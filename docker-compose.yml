@@ -1,0 +1,19 @@
+# docker-compose.yml
+#
+# Só o Postgres necessário para desenvolvimento local e para os testes
+# de integração (tests/integration/) — a API roda fora do compose
+# (uvicorn local) neste estágio do projeto.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 10

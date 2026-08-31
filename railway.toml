@@ -1,0 +1,23 @@
+# railway.toml
+#
+# Comando de start explícito e versionado — não depende de configuração
+# manual na interface do Railway, que pode ser perdida/esquecida num
+# próximo deploy ou numa reconfiguração do serviço.
+#
+# UM ÚNICO processo (não mais "bootstrap && uvicorn" encadeado por
+# shell) — importante porque a DATABASE_URL calculada pelo bootstrap
+# (role app_runtime) só chega até a aplicação se for setada ANTES do
+# primeiro import de app.main, e isso só é garantido dentro do MESMO
+# processo Python (ver docstring de app/scripts/entrypoint.py).
+#
+# Variáveis necessárias no serviço (Settings → Variables), configuradas
+# UMA VEZ:
+#   DATABASE_ADMIN_URL   — a DATABASE_URL de superusuário que o Railway
+#                          já fornece para o Postgres do projeto.
+#   APP_RUNTIME_PASSWORD — gerar com:
+#                          python -c "import secrets; print(secrets.token_urlsafe(32))"
+#   JWT_SECRET_KEY        — idem, qualquer string longa e aleatória.
+# Não é preciso setar DATABASE_URL manualmente — o entrypoint calcula
+# sozinho, a cada início de processo.
+[deploy]
+startCommand = "python -m app.scripts.entrypoint"
