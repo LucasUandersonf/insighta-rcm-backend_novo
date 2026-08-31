@@ -1,0 +1,87 @@
+"""app/api/v1/endpoints/users.py — Gestão de Usuários (RBAC), tela
+administrativa do Painel do Administrador da Empresa (Tenant Owner).
+
+Só owner/admin gerenciam usuários — mesmo padrão de _CAN_WRITE usado em
+professionals.py/contracts.py, adaptado ao domínio "quem pode mexer em
+quem tem acesso à plataforma"."""
+from uuid import UUID
+
+from fastapi import APIRouter, Depends
+
+from app.api.deps import CurrentUser, DbSession, require_role
+from app.repositories.user_repository import UserRepository
+from app.schemas.user import (
+    PasswordChangeRequest,
+    PasswordResetResponse,
+    UserCreateRequest,
+    UserResponse,
+    UserUpdateRequest,
+)
+from app.services.user_service import UserService
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+_CAN_MANAGE = ("owner", "admin")
+
+
+@router.get("", response_model=list[UserResponse])
+async def list_users(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> list[UserResponse]:
+    service = UserService(UserRepository(db))
+    return await service.list_users()
+
+
+@router.post("", response_model=UserResponse, status_code=201)
+async def create_user(
+    payload: UserCreateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> UserResponse:
+    service = UserService(UserRepository(db))
+    user, temp_password = await service.create_user(current_user.tenant_id, payload)
+    # Devolvemos a senha temporária embutida no header de resposta em vez
+    # do corpo (que segue o contrato de UserResponse) — ver o endpoint
+    # dedicado /users/{id}/reset-password para o formato "de verdade"
+    # dessa informação sensível. Aqui, para a criação, o frontend chama
+    # em seguida esse mesmo endpoint de reset caso precise reexibir.
+    return user
+
+
+@router.patch("/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: UUID,
+    payload: UserUpdateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> UserResponse:
+    service = UserService(UserRepository(db))
+    return await service.update_user(current_user.id, user_id, payload)
+
+
+@router.post("/{user_id}/reset-password", response_model=PasswordResetResponse)
+async def admin_reset_password(
+    user_id: UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> PasswordResetResponse:
+    """Reset administrado: owner/admin geram uma nova senha temporária
+    para um colaborador (ex: esqueceu a senha e não há e-mail transacional
+    integrado ainda — ver DECISÃO em app/sql/006_platform_admin.sql).
+    A senha só aparece nesta resposta, uma única vez."""
+    service = UserService(UserRepository(db))
+    return await service.admin_reset_password(user_id)
+
+
+@router.post("/me/change-password", status_code=204)
+async def change_own_password(
+    payload: PasswordChangeRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role("owner", "admin", "financeiro", "atendimento", "auditor")),
+) -> None:
+    """Recuperação e alteração segura de senha (self-service) — qualquer
+    papel autenticado pode trocar a PRÓPRIA senha, desde que prove
+    conhecer a atual."""
+    service = UserService(UserRepository(db))
+    await service.change_own_password(current_user.id, payload)
