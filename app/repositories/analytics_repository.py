@@ -1,0 +1,274 @@
+"""
+app/repositories/analytics_repository.py
+
+Agregações para os Dashboards de Decisão (Visão Geral, Agenda &
+Capacidade, Insights Descritivos). Reaproveita o mesmo raciocínio já
+documentado em reporting_repository.py e capacity_repository.py — soma/
+conta no Postgres, nunca carrega linha por linha para a aplicação só
+para descartar tudo, menos um número.
+
+DECISÃO — `financial_hole_total` e `payment_gap_total` usam SQL cru com
+LATERAL JOIN, não ORM
+-------------------------------------------------------------------------
+O briefing da Inteligência de Contratos pede DUAS divergências
+separadas, nunca somadas na mesma métrica:
+
+  1) `financial_hole_total` — "Divergência de Cobrança": quanto a
+     CLÍNICA cobrou ABAIXO do valor contratado (vazamento de receita —
+     ver `_rule_value_mismatch` em denial_risk_engine.py, que
+     deliberadamente NÃO persiste esse valor em
+     `value_saved_by_correction`, porque não foi "salvo", foi perdido).
+     Compara `billing.charged_value` vs. `contract_items.agreed_price`.
+
+  2) `payment_gap_total` — "Divergência de Recebimento": quanto a
+     OPERADORA de fato PAGOU abaixo do que foi cobrado/contratado (ex:
+     cobrou R$120, contrato previa R$140, operadora pagou R$90 -> R$50
+     de buraco de recebimento). Só entra no cálculo billing já
+     conciliado (`received_value IS NOT NULL` — `settle_billing` em
+     billing_service.py é quem preenche essa coluna), senão estaríamos
+     contando como "não recebido" um billing que simplesmente ainda não
+     foi baixado.
+
+Para agregar isso por período sem recalcular contrato-a-contrato em
+Python (N+1 queries — inaceitável para uma agregação de dashboard, ao
+contrário do fluxo de criação de UM billing, onde uma query extra é
+irrelevante), usamos um LATERAL JOIN: para cada linha de billing, busca
+o item de contrato vigente NA DATA daquele billing pelo código TUSS do
+atendimento (mesma regra de vigência de
+`ContractItemRepository.find_agreed_price`, replicada aqui em SQL,
+juntando contract_items -> contracts). Session já é tenant-aware (SET
+LOCAL aplicado) — RLS filtra billing/appointments/contracts/contract_items
+pelo tenant normalmente, mesmo em SQL cru, porque roda na MESMA
+conexão/transação da requisição.
+"""
+from datetime import date, datetime, time, timedelta, timezone
+
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.appointment import Appointment
+from app.models.billing import Billing
+from app.models.insurance_plan import InsurancePlan
+
+
+def _bounds(date_from: date, date_to: date) -> tuple[datetime, datetime]:
+    return (
+        datetime.combine(date_from, time.min, tzinfo=timezone.utc),
+        datetime.combine(date_to, time.max, tzinfo=timezone.utc),
+    )
+
+
+class AnalyticsRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def financial_hole_total(self, date_from: date, date_to: date) -> float:
+        """Divergência de Cobrança: clínica cobrou (charged_value) abaixo
+        do agreed_price do item de contrato vigente para o TUSS do
+        atendimento."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT COALESCE(SUM(GREATEST(ci.agreed_price - b.charged_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.created_at >= :start AND b.created_at <= :end
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return float(result.scalar_one())
+
+    async def payment_gap_total(self, date_from: date, date_to: date) -> float:
+        """Divergência de Recebimento: valor efetivamente PAGO pela
+        operadora (billing.received_value, preenchido só após
+        settle_billing) abaixo do agreed_price do item de contrato
+        vigente. Só considera billings já conciliados — um billing sem
+        received_value é "ainda não baixado", não "pago a menos"."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT COALESCE(SUM(GREATEST(ci.agreed_price - b.received_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.received_value IS NOT NULL
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return float(result.scalar_one())
+
+    async def avg_charged_value(self, date_from: date, date_to: date) -> float:
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(
+            Billing.created_at >= start, Billing.created_at <= end
+        )
+        return float((await self.session.execute(stmt)).scalar_one())
+
+    async def denial_findings_by_plan(self, date_from: date, date_to: date) -> list[tuple[str, list[str]]]:
+        """
+        Retorna (nome_do_convenio, lista_de_reason_codes) por linha de
+        billing com risco de glosa no período. A contagem POR motivo é
+        feita em Python (ver smart_insights_engine.py) em vez de um
+        UNNEST de JSONB em SQL — mesma decisão de "grade pequena -> lista
+        em Python" de capacity_service.py: o volume de billings com risco
+        num período de dashboard (dias/semanas) é pequeno o bastante para
+        não justificar a complexidade de um LATERAL UNNEST só para contar
+        strings dentro de um array JSONB.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(InsurancePlan.display_name, Billing.denial_reasons)
+            .select_from(Billing)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(
+                Billing.created_at >= start,
+                Billing.created_at <= end,
+                Billing.denial_risk_level != "low",
+            )
+        )
+        result = await self.session.execute(stmt)
+        return [(plan_name, reasons or []) for plan_name, reasons in result.all()]
+
+    async def appointment_hour_histogram(self, date_from: date, date_to: date) -> dict[int, int]:
+        """Horários de pico — para identificar em que faixa do dia a
+        agenda mais lota (ex: "10h-11h é sistematicamente o pico")."""
+        start, end = _bounds(date_from, date_to)
+        hour_expr = func.extract("hour", Appointment.scheduled_at)
+        stmt = (
+            select(hour_expr, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status != "cancelled",
+            )
+            .group_by(hour_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(hour): count for hour, count in result.all()}
+
+    async def appointment_weekday_histogram(self, date_from: date, date_to: date) -> dict[int, int]:
+        """Volume de agendamentos por DIA DA SEMANA (0=domingo..6=sábado —
+        mesma convenção de capacity_service.py/no_show_risk_engine.py).
+        Alimenta o insight textual "a agenda de segunda-feira caiu X%"
+        (ver smart_insights_engine.py::_weekday_drop_insights) e o
+        gráfico de apoio em Agenda & Capacidade.
+
+        EXTRACT(DOW FROM timestamptz) do Postgres já devolve 0=domingo..
+        6=sábado nativamente — ao contrário de Python weekday()
+        (0=segunda), aqui NENHUMA conversão (current.weekday()+1)%7 é
+        necessária. Mesmo filtro de status != 'cancelled' de
+        appointment_hour_histogram: um agendamento cancelado não ocupou
+        a agenda de fato, não deveria contar nem para "cheio" nem para
+        "vazio" num dia específico."""
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        stmt = (
+            select(weekday_expr, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status != "cancelled",
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): count for weekday, count in result.all()}
+
+    async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
+        """Soma de charged_value por denial_risk_level ('low'/'medium'/
+        'high') faturado no período — alimenta o insight "X% do valor
+        faturado está sob risco de glosa" (ver
+        smart_insights_engine.py::_denial_risk_pct_insight). Value-based,
+        não count-based, de propósito: uma diretoria se importa com QUANTO
+        dinheiro está em risco, não com quantas linhas de billing —
+        mesmo raciocínio de "impacto financeiro" já usado para ordenar o
+        feed de insights inteiro."""
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Billing.denial_risk_level, func.coalesce(func.sum(Billing.charged_value), 0))
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Billing.denial_risk_level)
+        )
+        result = await self.session.execute(stmt)
+        return {level: float(total) for level, total in result.all()}
+
+    async def no_show_risk_breakdown(self, date_from: date, date_to: date) -> dict[str, int]:
+        """Agrupa AGENDAMENTOS FUTUROS AINDA NÃO REALIZADOS (status
+        'scheduled') por nível de risco preditivo de falta — a mesma
+        semântica de `upcoming_high_risk_appointments_count` em
+        reporting_repository.py, mas com o detalhamento completo dos
+        4 níveis (indeterminado/baixo/medio/alto), não só o alto."""
+        start, end = _bounds(date_from, date_to)
+        level_expr = func.coalesce(Appointment.no_show_risk_level, "indeterminado")
+        stmt = (
+            select(level_expr, func.count())
+            .where(
+                Appointment.status == "scheduled",
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+            )
+            .group_by(level_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {level: count for level, count in result.all()}
+
+    async def ytd_billed_total(self, as_of: date) -> float:
+        """Faturamento acumulado do ANO CALENDÁRIO até `as_of` (1º de
+        janeiro do ano de `as_of` até o fim do dia de `as_of`) — alimenta
+        o insight de desempenho anual vs. meta manual configurada em
+        Minha Clínica (ver smart_insights_engine.py::_annual_goal_insight
+        e Tenant.annual_revenue_goal). Deliberadamente INDEPENDENTE da
+        janela de 7/14/30 dias do resto do dashboard — meta anual compara
+        com o ano inteiro, não com a janela selecionada."""
+        year_start = datetime(as_of.year, 1, 1, tzinfo=timezone.utc)
+        _, end = _bounds(as_of, as_of)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0)).where(
+            Billing.created_at >= year_start, Billing.created_at <= end
+        )
+        return float((await self.session.execute(stmt)).scalar_one())
+
+    async def inactive_patients_count(self, as_of: date, inactive_after_days: int = 365) -> int:
+        """
+        Conta pacientes que JÁ tiveram pelo menos um atendimento, mas cujo
+        atendimento mais recente foi há mais de `inactive_after_days` dias
+        (padrão 1 ano) — alimenta a recomendação de CRM/recuperação de
+        pacientes inativos do insight de meta anual.
+
+        DECISÃO — exige pelo menos 1 atendimento histórico
+        -------------------------------------------------------------
+        Um paciente sem NENHUM atendimento (cadastro sem histórico) não é
+        "inativo", é um cadastro que talvez nunca tenha virado paciente de
+        fato — misturar os dois inflaria a contagem e tornaria a
+        recomendação de "recuperação" sem sentido (não há o que recuperar
+        de alguém que nunca foi atendido). O INNER JOIN abaixo já exclui
+        esses casos naturalmente (sem necessidade de um NOT EXISTS extra).
+        """
+        cutoff = datetime.combine(as_of - timedelta(days=inactive_after_days), time.min, tzinfo=timezone.utc)
+        last_appointment = func.max(Appointment.scheduled_at)
+        subq = select(Appointment.patient_id).group_by(Appointment.patient_id).having(last_appointment < cutoff)
+        stmt = select(func.count()).select_from(subq.subquery())
+        return int((await self.session.execute(stmt)).scalar_one())
