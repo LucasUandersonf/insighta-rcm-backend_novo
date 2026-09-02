@@ -91,6 +91,19 @@ class UserService:
         await self.repo.save(user)
         return PasswordResetResponse(temporary_password=temp_password)
 
+    async def get_own_profile(self, user_id: uuid.UUID) -> UserResponse:
+        """Perfil do próprio usuário autenticado — alimenta a identificação
+        de usuário (avatar/nome) na barra superior, para QUALQUER papel
+        (mesmo RBAC de change_own_password: cada um só lê a si mesmo aqui;
+        gestão de outros usuários continua restrita a owner/admin em
+        list_users/update_user)."""
+        user = await self.repo.get_by_id(user_id)
+        if user is None:
+            # Não deveria acontecer (usuário autenticado por um JWT válido) —
+            # mesmo raciocínio de change_own_password.
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessão inválida.")
+        return UserResponse.model_validate(user)
+
     async def change_own_password(self, user_id: str, data: PasswordChangeRequest) -> None:
         user = await self.repo.get_by_id(uuid.UUID(user_id))
         if user is None:

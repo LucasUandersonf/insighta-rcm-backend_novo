@@ -42,7 +42,16 @@ from app.core.rate_limit import limiter
 from app.core.security import create_access_token, verify_password
 from app.db.session import get_db_no_tenant
 from app.repositories.auth_repository import AuthRepository, LoginRecord
-from app.schemas.token import LoginRequest, LoginResponse, TenantOption
+from app.schemas.token import (
+    LoginRequest,
+    LoginResponse,
+    PasswordResetConfirmRequest,
+    PasswordResetRequestRequest,
+    RegisterRequest,
+    TenantOption,
+    TokenResponse,
+)
+from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -107,3 +116,43 @@ async def login(
 def _issue_token(record: LoginRecord) -> LoginResponse:
     token = create_access_token(user_id=record.user_id, tenant_id=record.tenant_id, role=record.role)
     return LoginResponse(access_token=token)
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.REGISTER_RATE_LIMIT)
+async def register(
+    request: Request,  # injetado pelo slowapi; ver nota no main.py
+    payload: RegisterRequest,
+    db: AsyncSession = Depends(get_db_no_tenant),
+) -> TokenResponse:
+    """Cadastro público (self-signup) — modelo SaaS confirmado com o
+    usuário: quem se cadastra e escolhe um plano já vira owner da própria
+    clínica, autenticado imediatamente (sem etapa de verificação de
+    e-mail nesta primeira versão — ver DECISÃO em RegisterRequest). A
+    cobrança de verdade do plano escolhido fica para uma etapa seguinte."""
+    return await AuthService(db).register(payload)
+
+
+@router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(settings.PASSWORD_RESET_RATE_LIMIT)
+async def request_password_reset(
+    request: Request,
+    payload: PasswordResetRequestRequest,
+    db: AsyncSession = Depends(get_db_no_tenant),
+) -> None:
+    """SEMPRE devolve 202 sem corpo, exista ou não o e-mail — mesmo
+    princípio anti-enumeração do login (ver módulo acima): a resposta não
+    pode ajudar um atacante a descobrir quais e-mails têm conta no
+    sistema. O envio de fato (ou não) acontece dentro de AuthService,
+    silenciosamente."""
+    await AuthService(db).request_password_reset(payload.email)
+
+
+@router.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.PASSWORD_RESET_RATE_LIMIT)
+async def confirm_password_reset(
+    request: Request,
+    payload: PasswordResetConfirmRequest,
+    db: AsyncSession = Depends(get_db_no_tenant),
+) -> None:
+    await AuthService(db).confirm_password_reset(payload.token, payload.new_password)

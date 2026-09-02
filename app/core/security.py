@@ -45,6 +45,36 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
+# Regra de força mínima de senha, extraída para cá porque agora é
+# compartilhada por TRÊS schemas de entrada (PasswordChangeRequest,
+# RegisterRequest e PasswordResetConfirmRequest — ver app/schemas/user.py
+# e app/schemas/token.py) — antes vivia só dentro do validator de
+# PasswordChangeRequest; duplicar a mesma regra em cada schema novo
+# arriscava os três divergirem silenciosamente com o tempo.
+MIN_PASSWORD_LENGTH = 8
+
+
+def validate_password_strength(password: str) -> str:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"A senha precisa ter pelo menos {MIN_PASSWORD_LENGTH} caracteres.")
+    return password
+
+
+def generate_password_reset_token() -> tuple[str, str]:
+    """Gera (token_em_texto_puro, hash_sha256_hex) para o fluxo de "esqueci
+    minha senha" — mesmo espírito de generate_api_key(): o valor em texto
+    puro só existe no e-mail enviado ao usuário; o banco guarda só o hash
+    (ver PasswordResetToken). SHA-256 (não argon2/bcrypt) de propósito
+    aqui: o token já nasce com alta entropia (secrets.token_urlsafe), ao
+    contrário de uma senha escolhida por humano — não há ataque de
+    força bruta offline a mitigar com um hash lento, e um hash rápido
+    permite o lookup por token_hash usar um índice único normal (UNIQUE
+    em token_hash), em vez de teria que comparar contra cada hash salgado
+    da tabela um por um, como precisaria ser com argon2/bcrypt."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def create_access_token(*, user_id: str, tenant_id: str, role: str) -> str:
     """
     Gera o JWT que o cliente (frontend) enviará em cada requisição via

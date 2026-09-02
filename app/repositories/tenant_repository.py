@@ -21,6 +21,16 @@ class TenantRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def add(self, tenant: Tenant) -> Tenant:
+        """Cadastro público (self-signup) — ver app/services/auth_service.py.
+        Único INSERT deste repositório: fora do RLS por natureza (mesma
+        razão de get_by_id não filtrar por current_tenant_id), então quem
+        chama isto precisa ser um fluxo explicitamente autorizado a criar
+        tenant (hoje, só o registro público)."""
+        self.session.add(tenant)
+        await self.session.flush()
+        return tenant
+
     async def save(self, tenant: Tenant) -> Tenant:
         await self.session.flush()
         return tenant

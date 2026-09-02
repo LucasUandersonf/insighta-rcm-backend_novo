@@ -101,6 +101,7 @@ _SCHEMA_FILES = [
     "008_denial_appeals.sql",
     "009_report_recipients.sql",
     "010_ingestion_original_filename.sql",
+    "012_password_reset.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -139,6 +140,12 @@ GRANT SELECT ON core.users, core.tenants TO auth_resolver_owner_test;
 ALTER FUNCTION core.resolve_login(CITEXT) OWNER TO auth_resolver_owner_test;
 REVOKE ALL ON FUNCTION core.resolve_login(CITEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_login(CITEXT) TO app_test_runtime;
+
+-- Mesmo padrão acima, para o resolver de recuperação de senha (ver
+-- 012_password_reset.sql e _ROLES_SQL em app/scripts/bootstrap_db.py).
+ALTER FUNCTION core.resolve_user_by_email(CITEXT) OWNER TO auth_resolver_owner_test;
+REVOKE ALL ON FUNCTION core.resolve_user_by_email(CITEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.resolve_user_by_email(CITEXT) TO app_test_runtime;
 """
 
 
