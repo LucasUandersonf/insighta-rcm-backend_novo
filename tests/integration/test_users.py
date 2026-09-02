@@ -70,6 +70,26 @@ async def test_owner_can_reset_password_and_user_can_login_with_temp_password(cl
     assert login_resp.status_code == 200
 
 
+async def test_any_role_can_read_own_profile(client, admin_engine, tenant_a, auth_headers_a, owner_a):
+    # owner lendo o próprio perfil — usado pela identificação de usuário
+    # (avatar + nome) na barra superior do frontend.
+    resp = await client.get("/api/v1/users/me", headers=auth_headers_a)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["email"] == owner_a["email"]
+    assert body["role"] == "owner"
+
+    # papel sem permissão de gestão de usuários (atendimento) também lê o
+    # PRÓPRIO perfil sem 403 — self-service, não "gestão de usuários".
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao.perfil@clinica-a.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    self_resp = await client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {token}"})
+    assert self_resp.status_code == 200
+    assert self_resp.json()["email"] == "recepcao.perfil@clinica-a.com"
+
+
 async def test_user_can_change_own_password_but_not_with_wrong_current_password(client, auth_headers_a, owner_a):
     wrong_resp = await client.post(
         "/api/v1/users/me/change-password",

@@ -22,6 +22,23 @@ from app.services.user_service import UserService
 router = APIRouter(prefix="/users", tags=["users"])
 
 _CAN_MANAGE = ("owner", "admin")
+# Qualquer papel autenticado pode ver o PRÓPRIO perfil — mesmo critério de
+# /users/me/change-password (self-service não é "gestão de usuários").
+_CAN_VIEW_SELF = ("owner", "admin", "financeiro", "atendimento", "auditor")
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_own_profile(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW_SELF)),
+) -> UserResponse:
+    """Perfil do próprio usuário autenticado (nome, e-mail, papel) — usado
+    pela identificação de usuário (avatar + nome) na barra superior. Vem
+    antes de GET "" na definição de rota só por organização; não há
+    conflito de path (GET "" não tem parâmetro, GET "/{user_id}" não
+    existe — só PATCH)."""
+    service = UserService(UserRepository(db))
+    return await service.get_own_profile(UUID(current_user.id))
 
 
 @router.get("", response_model=list[UserResponse])
