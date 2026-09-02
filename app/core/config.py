@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # ASGI em processo), então um valor fixo baixo estourava o limite já
     # nos primeiros testes. Em produção, o padrão continua restritivo.
     LOGIN_RATE_LIMIT: str = "5/minute"
+    # Mesma proteção contra abuso, aplicada aos dois novos endpoints
+    # públicos (self-signup e recuperação de senha) — sem isso, os dois
+    # seriam um vetor óbvio de spam (criar tenants em massa) ou de
+    # enumeração de e-mail por força bruta de tentativas.
+    REGISTER_RATE_LIMIT: str = "5/minute"
+    PASSWORD_RESET_RATE_LIMIT: str = "5/minute"
     # None = contagem em memória do processo (só funciona com 1 instância
     # da aplicação). Setar para "redis://host:6379" quando houver mais de
     # uma instância atrás de um load balancer — ver DECISÃO em
@@ -138,6 +144,43 @@ class Settings(BaseSettings):
     # atendimento) SÓ podem ser enviadas via template pré-aprovado, nunca
     # como texto livre. Ver DECISÃO em app/services/whatsapp_client.py.
     WHATSAPP_REPORT_TEMPLATE_NAME: str = "weekly_report"
+
+    # --- Cadastro público (self-signup) ---
+    # URL base do FRONTEND (não desta API) — usada só para montar o link
+    # de recuperação de senha dentro do e-mail (ex: "https://app.insighta
+    # rcm.com/reset-password?token=..."). Sem isso configurado, o link
+    # cai no fallback abaixo (localhost), o que é aceitável em dev mas
+    # nunca deveria acontecer em produção — documentar aqui é o suficiente
+    # por ora (não falha o boot: mesma filosofia de feature opcional que
+    # degrada, não quebra).
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
+    # Validade do token de "esqueci minha senha" — curta de propósito
+    # (é um link enviado por e-mail, canal fora do controle do produto;
+    # quanto mais tempo válido, maior a janela de uso indevido se o
+    # e-mail for interceptado).
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # --- E-mail transacional (recuperação de senha) — OPCIONAL ---
+    # DECISÃO — SMTP genérico, não um SDK de provedor específico
+    # -------------------------------------------------------------------
+    # Sem SMTP_HOST configurado, EmailClient (app/services/email_client.py)
+    # não falha o boot nem a requisição — só REGISTRA em log o e-mail que
+    # teria sido enviado (mesmo padrão de degradação graciosa de
+    # SENTRY_DSN/ANTHROPIC_API_KEY acima: feature ausente vira "desligada",
+    # nunca "quebrada"). Isso permite terminar e testar o FLUXO inteiro
+    # (cadastro, geração de token, endpoint de confirmação) antes mesmo de
+    # decidir qual provedor de e-mail contratar — bastando preencher estas
+    # variáveis depois (compatível com SendGrid, Mailgun, AWS SES,
+    # Postmark, Gmail/Workspace... qualquer um que ofereça credenciais SMTP).
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    # Remetente exibido ao destinatário — a maioria dos provedores exige
+    # que este endereço esteja verificado na conta do provedor.
+    SMTP_FROM_EMAIL: str = "no-reply@insighta-rcm.com"
+    SMTP_FROM_NAME: str = "Insighta RCM"
+    SMTP_USE_TLS: bool = True
 
     # --- Sentry (monitoramento de erros — opcional) ---
     # Sem SENTRY_DSN, nada é inicializado: zero overhead, zero mudança de

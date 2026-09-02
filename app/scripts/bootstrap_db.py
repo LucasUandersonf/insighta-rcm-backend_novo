@@ -130,6 +130,11 @@ _POST_UPGRADE_SQL_FILES = [
     "009_report_recipients.sql",
     "010_ingestion_original_filename.sql",
     "011_annual_revenue_goal.sql",
+    # Cadastro público + recuperação de senha (self-signup). Assim como
+    # 002_auth_resolver.sql, este arquivo é auto-idempotente por
+    # construção (CREATE TABLE IF NOT EXISTS + DROP/CREATE FUNCTION) —
+    # roda em TODO deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "012_password_reset.sql",
 ]
 
 _ROLES_SQL = """
@@ -145,6 +150,14 @@ GRANT SELECT ON core.users, core.tenants TO auth_resolver_owner;
 ALTER FUNCTION core.resolve_login(CITEXT) OWNER TO auth_resolver_owner;
 REVOKE ALL ON FUNCTION core.resolve_login(CITEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_login(CITEXT) TO app_runtime;
+
+-- Cadastro público + recuperação de senha (ver 012_password_reset.sql) —
+-- mesmo padrão de resolve_login acima, aplicado só DEPOIS que
+-- auth_resolver_owner existe (ver DECISÃO no próprio .sql sobre por que
+-- não fica lá).
+ALTER FUNCTION core.resolve_user_by_email(CITEXT) OWNER TO auth_resolver_owner;
+REVOKE ALL ON FUNCTION core.resolve_user_by_email(CITEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.resolve_user_by_email(CITEXT) TO app_runtime;
 """
 
 

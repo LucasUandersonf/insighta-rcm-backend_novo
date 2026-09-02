@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, field_validator
 
+from app.core.security import validate_password_strength
+
 # Mesmo enum de app/models/user.py — repetido aqui (não importado do
 # model) porque schemas/ nunca depende de models/ (ver DECISÃO no
 # README: schemas são o contrato público, models é estrutura interna).
@@ -69,9 +71,7 @@ class PasswordChangeRequest(BaseModel):
     @field_validator("new_password")
     @classmethod
     def enforce_minimum_strength(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("A nova senha precisa ter pelo menos 8 caracteres.")
-        return v
+        return validate_password_strength(v)
 
 
 class PasswordResetResponse(BaseModel):

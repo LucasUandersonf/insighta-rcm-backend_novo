@@ -18,7 +18,10 @@ JÁ foi validada (ver app/api/v1/endpoints/auth.py). Enviar um tenant_id
 arbitrário sem a senha correspondente continua resultando em erro
 genérico, exatamente como antes.
 """
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
+
+from app.core.security import validate_password_strength
+from app.schemas.tenant import AVAILABLE_PLAN_TIERS
 
 
 class LoginRequest(BaseModel):
@@ -51,3 +54,61 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     requires_tenant_selection: bool = False
     tenant_options: list[TenantOption] = []
+
+
+# --- Cadastro público (self-signup) ---
+class RegisterRequest(BaseModel):
+    """POST /auth/register — cria a clínica (tenant) + o primeiro usuário,
+    sempre com role "owner" (nunca aceito do cliente — mesmo princípio de
+    mass assignment do topo deste arquivo: quem se cadastra sempre vira
+    dono da própria clínica, nunca escolhe o próprio papel).
+
+    Modelo confirmado com o usuário: cadastro + escolha de plano acontecem
+    já nesta chamada; a cobrança de verdade (gateway de pagamento) fica
+    para uma etapa seguinte — plan_tier aqui só registra a intenção,
+    tenant nasce ativo (Tenant.is_active=True), sem estado de "pendente
+    de pagamento" (não existe hoje um model de assinatura/cobrança neste
+    backend para sustentar esse estado)."""
+
+    trade_name: str
+    legal_name: str | None = None  # None = usa trade_name (clínica pequena, sem razão social distinta)
+    cnpj: str
+    plan_tier: str = "starter"
+    owner_name: str
+    email: EmailStr
+    password: str
+
+    @field_validator("cnpj")
+    @classmethod
+    def validate_cnpj_format(cls, v: str) -> str:
+        digits = "".join(ch for ch in v if ch.isdigit())
+        if len(digits) != 14:
+            raise ValueError("CNPJ inválido — informe os 14 dígitos (com ou sem pontuação).")
+        return v
+
+    @field_validator("plan_tier")
+    @classmethod
+    def validate_plan_tier(cls, v: str) -> str:
+        if v not in AVAILABLE_PLAN_TIERS:
+            raise ValueError(f"plan_tier deve ser um de: {', '.join(AVAILABLE_PLAN_TIERS)}")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return validate_password_strength(v)
+
+
+# --- Recuperação de senha (self-service) ---
+class PasswordResetRequestRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return validate_password_strength(v)

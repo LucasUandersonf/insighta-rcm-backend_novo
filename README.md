@@ -122,7 +122,8 @@ uvicorn app.main:app --reload
 ```
 
 ## Endpoints implementados
-`auth` (login), `users` (Gestão de Usuários/RBAC + troca de senha),
+`auth` (login, cadastro público/self-signup, recuperação de senha —
+ver seção própria abaixo), `users` (Gestão de Usuários/RBAC + troca de senha),
 `tenant` (dados cadastrais + plano), `integrations` (chaves de API),
 `billing`, `patients`, `appointments`, `contracts`, `insurance-companies`
 (operadoras + planos), `denial-appeals` (Recurso de Glosa),
@@ -133,6 +134,52 @@ com `DbSession` (tenant-aware) injetada via `app/api/deps.py` e RBAC via
 `contracts`/`insurance-companies`/`denial-appeals`/`analytics` (dado
 financeiro) excluem a role `atendimento`, que por sua vez pode escrever
 livremente em `patients`/`appointments` (rotina de recepção).
+
+## Cadastro público (self-signup) + recuperação de senha
+
+Modelo SaaS: `POST /auth/register` cria a clínica (`core.tenants`) + o
+primeiro usuário (sempre `role="owner"`, nunca aceito do payload) numa
+única chamada, e já devolve o JWT — sem etapa de verificação de e-mail
+nesta primeira versão. O plano escolhido (`plan_tier`) é só registrado
+(`Tenant.is_active=True` desde já); a cobrança de verdade (gateway de
+pagamento) é uma etapa futura, combinada explicitamente com o usuário —
+hoje não existe nenhum estado de "assinatura pendente" no schema.
+
+Duas sessões de banco cruzam essa única requisição
+(`app/services/auth_service.py::AuthService.register`): `core.tenants`
+não tem RLS, `core.users` tem — o serviço grava o tenant numa sessão
+"crua" (`get_db_no_tenant`) e, só depois de ter o `tenant_id`, abre uma
+segunda sessão tenant-aware (`get_db_with_tenant`) para gravar o owner.
+Mesmo "ovo e galinha" que o login resolve com `core.resolve_login`
+(ver seção abaixo), resolvido aqui em duas fases de escrita em vez de
+uma função `SECURITY DEFINER`.
+
+Recuperação de senha (self-service, `POST /auth/password-reset/request`
++ `POST /auth/password-reset/confirm`) segue a mesma lógica de
+`core.resolve_login`: uma segunda função `SECURITY DEFINER`,
+`core.resolve_user_by_email` (`app/sql/012_password_reset.sql`), localiza
+o(s) usuário(s) daquele e-mail cross-tenant (o mesmo e-mail pode existir
+em mais de uma clínica — consultor multi-clínica, mesmo cenário do
+achado F-04 do login) sem nunca expor hash de senha. Um token de uso
+único (`core.password_reset_tokens`, sem RLS, só o HASH SHA-256 do token
+é persistido) é gerado por conta ativa encontrada, com validade curta
+(`PASSWORD_RESET_TOKEN_EXPIRE_MINUTES`, padrão 30 min). `/request` SEMPRE
+devolve `202` sem corpo, exista ou não o e-mail — mesmo princípio
+anti-enumeração do login.
+
+**Envio de e-mail semi-configurado, de propósito**: o fluxo inteiro
+(geração de token, expiração, confirmação) já funciona de ponta a ponta
+sem nenhum provedor de e-mail configurado — `app/services/email_client.py`
+degrada graciosamente (mesmo padrão de `SENTRY_DSN`/`ANTHROPIC_API_KEY`
+ausentes): sem `SMTP_HOST`/`SMTP_USERNAME`/`SMTP_PASSWORD` no ambiente,
+o e-mail que seria enviado só é registrado em log estruturado (dá para
+testar o fluxo completo em desenvolvimento sem depender de conta
+externa nenhuma). Compatível com qualquer provedor que ofereça
+credenciais SMTP (SendGrid, Mailgun, AWS SES, Postmark, Gmail/Workspace
+etc.) — trocar de provedor é só preencher as variáveis de ambiente,
+nunca mudar código. Ver `FRONTEND_BASE_URL` (usada para montar o link
+`/reset-password?token=...` dentro do e-mail) e `SMTP_*` em
+`app/core/config.py`.
 
 ## Recurso de Glosa (conformidade ANS) — a segunda metade do ciclo de glosa
 
