@@ -20,7 +20,13 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
-from app.schemas.analytics import AgendaMetricsResponse, ExecutiveSummaryResponse, SmartInsightsResponse
+from app.schemas.analytics import (
+    AgendaMetricsResponse,
+    ContractUtilizationResponse,
+    ExecutiveSummaryResponse,
+    PlanLossRankingResponse,
+    SmartInsightsResponse,
+)
 from app.services.analytics_service import AnalyticsService
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -83,3 +89,25 @@ async def get_smart_insights(
 ) -> SmartInsightsResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_smart_insights(start, end, tenant_id=current_user.tenant_id)
+
+
+@router.get("/plan-loss-ranking", response_model=PlanLossRankingResponse)
+async def get_plan_loss_ranking(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PlanLossRankingResponse:
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_plan_loss_ranking(start, end)
+
+
+@router.get("/contract-utilization", response_model=ContractUtilizationResponse)
+async def get_contract_utilization(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ContractUtilizationResponse:
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_contract_utilization(start, end)

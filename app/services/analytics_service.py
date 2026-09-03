@@ -30,10 +30,15 @@ from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    ContractUtilizationItem,
+    ContractUtilizationResponse,
     ExecutiveSummaryResponse,
     NoShowRiskBucket,
+    PatientNoShowRankingItem,
     PeakHourBucket,
     PeriodKPI,
+    PlanLossItem,
+    PlanLossRankingResponse,
     ProfessionalCapacityMetric,
     SmartInsightResponse,
     SmartInsightsResponse,
@@ -46,6 +51,15 @@ from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriod
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
 # um número fixo e nomeado em vez de mágico espalhado pelo código.
 APPEAL_DEADLINE_ALERT_HORIZON_DAYS = 5
+
+# "Lista vermelha" de pacientes (Painel → Agenda) — mesmo raciocínio de
+# amostra mínima de no_show_risk_engine.MIN_SPECIFIC_SAMPLES: exige pelo
+# menos 3 atendimentos no período para uma taxa de falta significar
+# alguma coisa, e mostra só os 10 piores para a lista continuar
+# acionável (uma tabela de 200 pacientes não é uma "lista vermelha", é
+# ruído de novo).
+RED_LIST_MIN_SAMPLE = 3
+RED_LIST_LIMIT = 10
 
 
 @dataclass
@@ -250,6 +264,10 @@ class AnalyticsService:
             for weekday, count in sorted(weekday_histogram.items(), key=lambda item: item[0])
         ]
 
+        red_list = await self.analytics_repo.top_no_show_patients(
+            date_from, date_to, min_sample=RED_LIST_MIN_SAMPLE, limit=RED_LIST_LIMIT
+        )
+
         return AgendaMetricsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -258,7 +276,67 @@ class AnalyticsService:
             weekday_histogram=weekday_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
+            patient_no_show_ranking=[
+                PatientNoShowRankingItem(
+                    patient_id=row["patient_id"],
+                    full_name=row["full_name"],
+                    no_show_count=row["no_show_count"],
+                    total_appointments=row["total_appointments"],
+                    no_show_rate=row["no_show_rate"],
+                )
+                for row in red_list
+            ],
         )
+
+    async def get_plan_loss_ranking(self, date_from: date, date_to: date) -> PlanLossRankingResponse:
+        """Une as três fontes de perda por convênio que já existem
+        separadas no sistema (buraco de cobrança, divergência de
+        recebimento, valor em risco de glosa) num único ranking por
+        operadora — mesmos números de ExecutiveSummaryResponse, só
+        quebrados por convênio em vez de somados no tenant inteiro."""
+        hole_by_plan = await self.analytics_repo.financial_hole_by_plan(date_from, date_to)
+        gap_by_plan = await self.analytics_repo.payment_gap_by_plan(date_from, date_to)
+        denial_by_plan = await self.analytics_repo.denial_risk_value_by_plan(date_from, date_to)
+
+        plan_names = set(hole_by_plan) | set(gap_by_plan) | set(denial_by_plan)
+        items = [
+            PlanLossItem(
+                plan_name=plan_name,
+                financial_hole=hole_by_plan.get(plan_name, 0.0),
+                payment_gap=gap_by_plan.get(plan_name, 0.0),
+                denial_risk_value=denial_by_plan.get(plan_name, 0.0),
+                total_loss=(
+                    hole_by_plan.get(plan_name, 0.0) + gap_by_plan.get(plan_name, 0.0) + denial_by_plan.get(plan_name, 0.0)
+                ),
+            )
+            for plan_name in plan_names
+        ]
+        items.sort(key=lambda item: item.total_loss, reverse=True)
+
+        return PlanLossRankingResponse(period_start=date_from, period_end=date_to, plans=items)
+
+    async def get_contract_utilization(self, date_from: date, date_to: date) -> ContractUtilizationResponse:
+        """Ver DECISÃO completa em AnalyticsRepository.contract_utilization
+        sobre a semântica de idle_catalog_value. Utilization_pct é
+        calculado aqui (não em SQL) por ser uma divisão simples sobre
+        dado já agregado — mesmo raciocínio de manter o SQL cru restrito
+        ao que só o banco faz bem (agregação em volume), com a aritmética
+        final em Python."""
+        rows = await self.analytics_repo.contract_utilization(date_from, date_to)
+        contracts = [
+            ContractUtilizationItem(
+                contract_id=row["contract_id"],
+                plan_name=row["plan_name"],
+                valid_from=row["valid_from"],
+                valid_until=row["valid_until"],
+                total_items=row["total_items"],
+                items_billed=row["items_billed"],
+                utilization_pct=(row["items_billed"] / row["total_items"] * 100) if row["total_items"] > 0 else 0.0,
+                idle_catalog_value=row["idle_catalog_value"],
+            )
+            for row in rows
+        ]
+        return ContractUtilizationResponse(period_start=date_from, period_end=date_to, contracts=contracts)
 
     async def _period_insights_input(
         self,
