@@ -121,6 +121,204 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
 
+    async def financial_hole_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """Mesma regra de `financial_hole_total`, mas agrupada por
+        convênio — a base do ranking de perda financeira por operadora
+        (Painel → Faturamento). Um convênio some da lista quando não tem
+        nenhum billing no período, não quando a soma dá zero — por isso
+        o GROUP BY já resolve sozinho (sem convênio sem linha, sem
+        entrada no dict)."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT ip.display_name, COALESCE(SUM(GREATEST(ci.agreed_price - b.charged_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.created_at >= :start AND b.created_at <= :end
+            GROUP BY ip.display_name
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def payment_gap_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """Mesma regra de `payment_gap_total`, agrupada por convênio."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT ip.display_name, COALESCE(SUM(GREATEST(ci.agreed_price - b.received_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.received_value IS NOT NULL
+            GROUP BY ip.display_name
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """Mesma regra de `denial_risk_value_breakdown` (valor faturado
+        com denial_risk_level medium/high), agrupada por convênio em vez
+        de por nível — o terceiro componente do ranking de perda por
+        operadora, ao lado de buraco financeiro e divergência de
+        recebimento."""
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(InsurancePlan.display_name, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(
+                Billing.created_at >= start,
+                Billing.created_at <= end,
+                Billing.denial_risk_level != "low",
+            )
+            .group_by(InsurancePlan.display_name)
+        )
+        result = await self.session.execute(stmt)
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def contract_utilization(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Utilização de contrato: dos procedimentos NEGOCIADOS num contrato
+        (contract_items), quantos foram de fato FATURADOS no período —
+        o "buraco de utilização" é capacidade contratada parada, dinheiro
+        que já foi negociado com o convênio e nunca vira receita porque a
+        clínica simplesmente não fatura aquele procedimento.
+
+        DECISÃO — `idle_catalog_value` é o VALOR DE TABELA dos itens
+        parados, não uma estimativa de receita perdida
+        -------------------------------------------------------------
+        Diferente de `financial_hole_total`/`payment_gap_total` (que
+        comparam um valor JÁ COBRADO contra o contratado), aqui não há
+        nenhum billing do item para comparar — o procedimento simplesmente
+        não foi faturado. Não há como estimar "quanto isso deveria ter
+        faturado" sem inventar um volume hipotético, então o número
+        reportado é o valor de tabela do item parado (quanto vale SE for
+        faturado), não uma perda already-incorrida — o texto na tela
+        precisa deixar isso explícito, mesmo cuidado de
+        `financial_hole_total` vs. `payment_gap_total` nunca serem somados
+        como se fossem a mesma coisa.
+
+        Só contratos HOMOLOGADOS entram (mesmo filtro de
+        `find_agreed_price`) — um contrato em rascunho/revisão não é
+        "verdade" ainda, não faz sentido cobrar utilização dele.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT
+                c.id,
+                ip.display_name,
+                c.valid_from,
+                c.valid_until,
+                COUNT(ci.id) AS total_items,
+                COUNT(DISTINCT CASE WHEN billed.tuss_code IS NOT NULL THEN ci.tuss_code END) AS items_billed,
+                COALESCE(SUM(CASE WHEN billed.tuss_code IS NULL THEN ci.agreed_price ELSE 0 END), 0) AS idle_catalog_value
+            FROM core.contracts c
+            JOIN core.insurance_plans ip ON ip.id = c.insurance_plan_id
+            JOIN core.contract_items ci ON ci.contract_id = c.id
+            LEFT JOIN LATERAL (
+                SELECT DISTINCT a.procedure_code AS tuss_code
+                FROM core.billing b
+                JOIN core.appointments a ON a.id = b.appointment_id
+                WHERE b.insurance_plan_id = c.insurance_plan_id
+                  AND a.procedure_code = ci.tuss_code
+                  AND b.created_at >= :start AND b.created_at <= :end
+                LIMIT 1
+            ) billed ON true
+            WHERE c.status = 'homologado'
+            GROUP BY c.id, ip.display_name, c.valid_from, c.valid_until
+            ORDER BY (COUNT(DISTINCT CASE WHEN billed.tuss_code IS NOT NULL THEN ci.tuss_code END)::float / NULLIF(COUNT(ci.id), 0)) ASC
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return [
+            {
+                "contract_id": row[0],
+                "plan_name": row[1],
+                "valid_from": row[2],
+                "valid_until": row[3],
+                "total_items": row[4],
+                "items_billed": row[5],
+                "idle_catalog_value": float(row[6]),
+            }
+            for row in result.all()
+        ]
+
+    async def top_no_show_patients(
+        self, date_from: date, date_to: date, *, min_sample: int = 3, limit: int = 10
+    ) -> list[dict]:
+        """
+        "Lista vermelha" de pacientes: ranking por taxa de falta dentro da
+        janela selecionada, entre atendimentos já OCORRIDOS (completed ou
+        no_show — mesmo filtro de `no_show_risk_engine.assess`, cancelar
+        com aviso não é o mesmo comportamento que faltar sem avisar).
+
+        `min_sample` evita o mesmo problema estatístico documentado em
+        `no_show_risk_engine.MIN_SPECIFIC_SAMPLES`: 1 falta em 1 consulta
+        é 100% de taxa, mas não é um padrão — é ruído. Só entra no
+        ranking quem tem pelo menos `min_sample` atendimentos no período
+        E pelo menos 1 falta (paciente com 0 faltas não é "vermelho").
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT
+                p.id,
+                p.full_name,
+                COUNT(*) FILTER (WHERE a.status = 'no_show') AS no_show_count,
+                COUNT(*) AS total_appointments
+            FROM core.appointments a
+            JOIN core.patients p ON p.id = a.patient_id
+            WHERE a.status IN ('completed', 'no_show')
+              AND a.scheduled_at >= :start AND a.scheduled_at <= :end
+            GROUP BY p.id, p.full_name
+            HAVING COUNT(*) >= :min_sample AND COUNT(*) FILTER (WHERE a.status = 'no_show') > 0
+            ORDER BY (COUNT(*) FILTER (WHERE a.status = 'no_show')::float / COUNT(*)) DESC, no_show_count DESC
+            LIMIT :limit
+            """
+        )
+        result = await self.session.execute(
+            stmt, {"start": start, "end": end, "min_sample": min_sample, "limit": limit}
+        )
+        return [
+            {
+                "patient_id": row[0],
+                "full_name": row[1],
+                "no_show_count": row[2],
+                "total_appointments": row[3],
+                "no_show_rate": row[2] / row[3],
+            }
+            for row in result.all()
+        ]
+
     async def avg_charged_value(self, date_from: date, date_to: date) -> float:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(

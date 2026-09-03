@@ -101,6 +101,7 @@ _SCHEMA_FILES = [
     "008_denial_appeals.sql",
     "009_report_recipients.sql",
     "010_ingestion_original_filename.sql",
+    "011_annual_revenue_goal.sql",
     "012_password_reset.sql",
 ]
 

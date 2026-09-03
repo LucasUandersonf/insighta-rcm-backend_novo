@@ -67,6 +67,18 @@ class WeekdayBucket(BaseModel):
     appointment_count: int
 
 
+class PatientNoShowRankingItem(BaseModel):
+    """Uma linha da "lista vermelha" — ver
+    AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
+    1 falta e amostra mínima no período entram aqui."""
+
+    patient_id: UUID
+    full_name: str
+    no_show_count: int
+    total_appointments: int
+    no_show_rate: float
+
+
 class AgendaMetricsResponse(BaseModel):
     """GET /api/v1/analytics/agenda-metrics — Dashboard da Agenda & Capacidade."""
 
@@ -83,6 +95,61 @@ class AgendaMetricsResponse(BaseModel):
     # AnalyticsService.get_agenda_metrics sobre por que é uma aproximação,
     # não um número contábil fechado.
     estimated_revenue_at_risk: float
+    # "Lista vermelha" — ranking de pacientes por taxa de falta no
+    # período, ordenado do pior para o melhor (ver
+    # AnalyticsRepository.top_no_show_patients). Lista vazia é o caso
+    # feliz (ninguém bateu a amostra mínima com pelo menos 1 falta).
+    patient_no_show_ranking: list[PatientNoShowRankingItem]
+
+
+class PlanLossItem(BaseModel):
+    """Uma linha do ranking de perda financeira por convênio — as TRÊS
+    fontes de perda já existentes no sistema (buraco de cobrança,
+    divergência de recebimento, valor faturado em risco de glosa),
+    somadas por operadora em vez de um único número do tenant inteiro.
+    Os três componentes continuam expostos separados (nunca só o total)
+    pelo mesmo motivo de financial_hole/payment_gap nunca serem somados
+    silenciosamente em ExecutiveSummaryResponse: são perdas de natureza
+    diferente, e quem decide o que fazer precisa saber qual delas pesa
+    mais em cada convênio."""
+
+    plan_name: str
+    financial_hole: float  # cobrado abaixo do contratado
+    payment_gap: float  # pago pela operadora abaixo do contratado (só billings conciliados)
+    denial_risk_value: float  # valor faturado com risco de glosa médio/alto
+    total_loss: float  # soma dos três — só para ordenar o ranking
+
+
+class PlanLossRankingResponse(BaseModel):
+    """GET /api/v1/analytics/plan-loss-ranking — Painel → Faturamento."""
+
+    period_start: date
+    period_end: date
+    plans: list[PlanLossItem]  # ordenado por total_loss, maior perda primeiro
+
+
+class ContractUtilizationItem(BaseModel):
+    """Uma linha do ranking de utilização de contrato — ver DECISÃO em
+    AnalyticsRepository.contract_utilization sobre por que
+    idle_catalog_value é valor de TABELA dos itens parados, não uma
+    estimativa de receita perdida."""
+
+    contract_id: UUID
+    plan_name: str
+    valid_from: date
+    valid_until: date | None
+    total_items: int  # procedimentos negociados no contrato
+    items_billed: int  # quantos desses foram faturados ao menos 1x no período
+    utilization_pct: float  # items_billed / total_items * 100
+    idle_catalog_value: float  # valor de tabela dos itens NUNCA faturados no período
+
+
+class ContractUtilizationResponse(BaseModel):
+    """GET /api/v1/analytics/contract-utilization — Painel → Faturamento."""
+
+    period_start: date
+    period_end: date
+    contracts: list[ContractUtilizationItem]  # ordenado por utilization_pct, pior primeiro
 
 
 class SmartInsightResponse(BaseModel):
