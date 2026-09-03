@@ -19,7 +19,7 @@ usuário pedir 7 dias, o resultado JÁ é "semana vs. semana anterior".
 """
 import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
@@ -32,6 +32,8 @@ from app.schemas.analytics import (
     AgendaMetricsResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DenialRiskDistributionItem,
+    DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     NoShowRiskBucket,
     PatientNoShowRankingItem,
@@ -42,6 +44,7 @@ from app.schemas.analytics import (
     ProfessionalCapacityMetric,
     SmartInsightResponse,
     SmartInsightsResponse,
+    UpcomingRiskAppointmentItem,
     WeekdayBucket,
 )
 from app.services.capacity_service import CapacityService
@@ -268,6 +271,8 @@ class AnalyticsService:
             date_from, date_to, min_sample=RED_LIST_MIN_SAMPLE, limit=RED_LIST_LIMIT
         )
 
+        upcoming_risk = await self.analytics_repo.upcoming_risk_appointments(as_of=datetime.now(timezone.utc))
+
         return AgendaMetricsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -285,6 +290,15 @@ class AnalyticsService:
                     no_show_rate=row["no_show_rate"],
                 )
                 for row in red_list
+            ],
+            upcoming_risk_appointments=[
+                UpcomingRiskAppointmentItem(
+                    appointment_id=row["appointment_id"],
+                    patient_full_name=row["patient_full_name"],
+                    scheduled_at=row["scheduled_at"],
+                    risk_level=row["risk_level"],
+                )
+                for row in upcoming_risk
             ],
         )
 
@@ -337,6 +351,13 @@ class AnalyticsService:
             for row in rows
         ]
         return ContractUtilizationResponse(period_start=date_from, period_end=date_to, contracts=contracts)
+
+    async def get_denial_risk_distribution(self, date_from: date, date_to: date) -> DenialRiskDistributionResponse:
+        breakdown = await self.analytics_repo.denial_risk_count_breakdown(date_from, date_to)
+        items = [DenialRiskDistributionItem(level=level, count=count) for level, count in breakdown.items()]
+        return DenialRiskDistributionResponse(
+            period_start=date_from, period_end=date_to, items=items, total_reviewed=sum(breakdown.values())
+        )
 
     async def _period_insights_input(
         self,

@@ -23,6 +23,7 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     ContractUtilizationResponse,
+    DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     PlanLossRankingResponse,
     SmartInsightsResponse,
@@ -111,3 +112,14 @@ async def get_contract_utilization(
 ) -> ContractUtilizationResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_contract_utilization(start, end)
+
+
+@router.get("/denial-risk-distribution", response_model=DenialRiskDistributionResponse)
+async def get_denial_risk_distribution(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DenialRiskDistributionResponse:
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_denial_risk_distribution(start, end)

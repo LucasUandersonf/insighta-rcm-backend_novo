@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -79,6 +79,18 @@ class PatientNoShowRankingItem(BaseModel):
     no_show_rate: float
 
 
+class UpcomingRiskAppointmentItem(BaseModel):
+    """Um agendamento futuro com risco médio/alto de falta — ver DECISÃO
+    em AnalyticsRepository.upcoming_risk_appointments. Mais próximo
+    primeiro; sempre "a partir de agora", não escopado pelo período do
+    dashboard."""
+
+    appointment_id: UUID
+    patient_full_name: str
+    scheduled_at: datetime
+    risk_level: str  # "medio" | "alto"
+
+
 class AgendaMetricsResponse(BaseModel):
     """GET /api/v1/analytics/agenda-metrics — Dashboard da Agenda & Capacidade."""
 
@@ -100,6 +112,10 @@ class AgendaMetricsResponse(BaseModel):
     # AnalyticsRepository.top_no_show_patients). Lista vazia é o caso
     # feliz (ninguém bateu a amostra mínima com pelo menos 1 falta).
     patient_no_show_ranking: list[PatientNoShowRankingItem]
+    # Lista nominal de próximos agendamentos em risco (ver
+    # AnalyticsRepository.upcoming_risk_appointments) — alimenta o card
+    # "Risco de falta — próximos dias" da Sala de Comando.
+    upcoming_risk_appointments: list[UpcomingRiskAppointmentItem]
 
 
 class PlanLossItem(BaseModel):
@@ -150,6 +166,24 @@ class ContractUtilizationResponse(BaseModel):
     period_start: date
     period_end: date
     contracts: list[ContractUtilizationItem]  # ordenado por utilization_pct, pior primeiro
+
+
+class DenialRiskDistributionItem(BaseModel):
+    level: str  # "low" | "medium" | "high"
+    count: int
+
+
+class DenialRiskDistributionResponse(BaseModel):
+    """GET /api/v1/analytics/denial-risk-distribution — Painel → Faturamento
+    (donut "Distribuição de risco de glosa" do canvas de design)."""
+
+    period_start: date
+    period_end: date
+    items: list[DenialRiskDistributionItem]
+    # Soma dos 3 níveis — ver DECISÃO em
+    # AnalyticsRepository.denial_risk_count_breakdown sobre por que
+    # "revisado" é sinônimo de "faturado no período" neste produto.
+    total_reviewed: int
 
 
 class SmartInsightResponse(BaseModel):
