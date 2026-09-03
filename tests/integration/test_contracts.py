@@ -9,9 +9,11 @@ Cadastro MANUAL (sem PDF/IA) — payload agora carrega uma LISTA de itens
 app/sql/007_contract_intelligence.sql), não mais um único
 procedure_code/agreed_value por chamada.
 """
+import uuid
 from datetime import date, timedelta
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 async def _create_insurance_plan(admin_engine, tenant_id, display_name="SulAmérica") -> str:
@@ -105,3 +107,79 @@ async def test_contract_without_items_is_rejected(client, auth_headers_a, admin_
         headers=auth_headers_a,
     )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------
+# ContractItemRepository.list_items_for_previous_homologated_contract —
+# usado pelo alerta de anomalia de preço (ver
+# contract_extraction_service.detect_price_anomalies). Testado contra
+# Postgres de verdade (não é função pura) via uma sessão direta no
+# admin_engine, no mesmo espírito de _insert_audit_log em
+# test_audit_log.py — não existe fixture de AsyncSession pronta porque
+# nenhum outro teste precisou falar com um repositório sem passar pelo
+# client HTTP até agora.
+# ---------------------------------------------------------------------
+
+
+async def test_previous_homologated_contract_items_are_found_and_current_excluded(admin_engine, tenant_a):
+    from app.repositories.contract_item_repository import ContractItemRepository
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+
+    older_contract_id = str(uuid.uuid4())
+    current_contract_id = str(uuid.uuid4())
+    item_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status)
+                VALUES (:id, :t, :plan, :valid_from, 'homologado')
+                """
+            ),
+            {"id": older_contract_id, "t": tenant_a, "plan": plan_id, "valid_from": date.today() - timedelta(days=90)},
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO core.contract_items (id, tenant_id, contract_id, tuss_code, procedure_name, agreed_price)
+                VALUES (:id, :t, :contract_id, :tuss_code, :name, :price)
+                """
+            ),
+            {"id": item_id, "t": tenant_a, "contract_id": older_contract_id, "tuss_code": "10101012", "name": "Consulta", "price": 150.0},
+        )
+        # O contrato "atual" (sendo extraído agora) fica em revisão, sem
+        # itens ainda — precisa ser EXCLUÍDO da busca por "anterior".
+        await conn.execute(
+            text(
+                """
+                INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status)
+                VALUES (:id, :t, :plan, :valid_from, 'em_revisao')
+                """
+            ),
+            {"id": current_contract_id, "t": tenant_a, "plan": plan_id, "valid_from": date.today()},
+        )
+
+    session_factory = async_sessionmaker(admin_engine, expire_on_commit=False)
+    async with session_factory() as session:
+        repo = ContractItemRepository(session)
+        items = await repo.list_items_for_previous_homologated_contract(
+            uuid.UUID(plan_id), exclude_contract_id=uuid.UUID(current_contract_id)
+        )
+
+    assert len(items) == 1
+    assert items[0].tuss_code == "10101012"
+    assert items[0].agreed_price == 150.0
+
+
+async def test_no_previous_homologated_contract_returns_empty_list(admin_engine, tenant_a):
+    from app.repositories.contract_item_repository import ContractItemRepository
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Plano sem histórico")
+
+    session_factory = async_sessionmaker(admin_engine, expire_on_commit=False)
+    async with session_factory() as session:
+        repo = ContractItemRepository(session)
+        items = await repo.list_items_for_previous_homologated_contract(uuid.UUID(plan_id), exclude_contract_id=uuid.uuid4())
+
+    assert items == []

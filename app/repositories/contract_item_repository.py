@@ -53,6 +53,38 @@ class ContractItemRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_items_for_previous_homologated_contract(
+        self, insurance_plan_id: uuid.UUID, exclude_contract_id: uuid.UUID
+    ) -> list[ContractItem]:
+        """
+        Tabela de preços do contrato HOMOLOGADO mais recente do mesmo
+        plano (por `valid_from`), excluindo o contrato que está sendo
+        extraído agora — usado por
+        contract_extraction_service.detect_price_anomalies para comparar
+        o preço recém-extraído contra o que já valia antes, procedimento
+        a procedimento (mesmo tuss_code).
+
+        Diferente de `find_agreed_price`: não filtra por `as_of` (data de
+        hoje) — aqui a pergunta é "o que valia na tabela anterior a
+        esta", não "o que vale hoje". Devolve lista vazia quando não há
+        nenhum contrato homologado anterior (ex: primeira tabela deste
+        plano) — sem histórico, não há o que comparar.
+        """
+        previous_id_stmt = (
+            select(Contract.id)
+            .where(
+                Contract.insurance_plan_id == insurance_plan_id,
+                Contract.status == "homologado",
+                Contract.id != exclude_contract_id,
+            )
+            .order_by(Contract.valid_from.desc())
+            .limit(1)
+        )
+        previous_contract_id = (await self.session.execute(previous_id_stmt)).scalar_one_or_none()
+        if previous_contract_id is None:
+            return []
+        return await self.list_by_contract(previous_contract_id)
+
     async def replace_items(self, tenant_id: uuid.UUID, contract_id: uuid.UUID, items: list[dict]) -> list[ContractItem]:
         """
         Homologação: substitui TODOS os itens do contrato pelo conjunto
