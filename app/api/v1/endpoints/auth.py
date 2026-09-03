@@ -43,6 +43,8 @@ from app.core.security import create_access_token, verify_password
 from app.db.session import get_db_no_tenant
 from app.repositories.auth_repository import AuthRepository, LoginRecord
 from app.schemas.token import (
+    GoogleAuthResponse,
+    GoogleCredentialRequest,
     LoginRequest,
     LoginResponse,
     PasswordResetConfirmRequest,
@@ -131,6 +133,21 @@ async def register(
     e-mail nesta primeira versão — ver DECISÃO em RegisterRequest). A
     cobrança de verdade do plano escolhido fica para uma etapa seguinte."""
     return await AuthService(db).register(payload)
+
+
+@router.post("/google", response_model=GoogleAuthResponse)
+@limiter.limit(settings.LOGIN_RATE_LIMIT)
+async def google_auth(
+    request: Request,
+    payload: GoogleCredentialRequest,
+    db: AsyncSession = Depends(get_db_no_tenant),
+) -> GoogleAuthResponse:
+    """"Continuar com Google" — usado tanto na tela de login quanto na de
+    cadastro (ver GoogleAuthResponse para os 3 estados possíveis de
+    resposta). Mesmo rate limit do login tradicional: é a mesma classe de
+    endpoint público sensível a abuso (aqui, tentativas de token
+    forjado/replay em vez de senha)."""
+    return await AuthService(db).login_or_signal_registration_with_google(payload.credential, tenant_id=payload.tenant_id)
 
 
 @router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)

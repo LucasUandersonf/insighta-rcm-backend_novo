@@ -16,7 +16,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.security import create_access_token, generate_password_reset_token, hash_password
+from app.core.security import (
+    create_access_token,
+    generate_password_reset_token,
+    generate_temporary_password,
+    hash_password,
+)
 from app.db.session import get_db_with_tenant
 from app.models.password_reset_token import PasswordResetToken
 from app.models.tenant import Tenant
@@ -25,8 +30,9 @@ from app.repositories.auth_repository import AuthRepository
 from app.repositories.password_reset_token_repository import PasswordResetTokenRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.token import RegisterRequest, TokenResponse
+from app.schemas.token import GoogleAuthResponse, RegisterRequest, TenantOption, TokenResponse
 from app.services.email_client import EmailClient
+from app.services.google_oauth_client import verify_google_id_token
 
 settings = get_settings()
 
@@ -64,6 +70,27 @@ class AuthService:
         primeiro candidato a virar uma transação de verdade se o produto
         crescer para justificar o esforço (ex: SAGA/compensação).
         """
+        # Duas origens possíveis para nome/e-mail/senha do owner — nunca
+        # confiamos em owner_name/email enviados pelo cliente quando há
+        # google_credential: eles são DERIVADOS do token, já re-verificado
+        # aqui (RegisterRequest.validate_auth_method já garante que os
+        # dois grupos são mutuamente exclusivos, mas a fonte de verdade do
+        # e-mail em si só é estabelecida agora, na verificação).
+        if data.google_credential:
+            google_user = await verify_google_id_token(data.google_credential)
+            owner_name = google_user.name
+            owner_email = google_user.email
+            # Senha aleatória, de alta entropia, que o owner nunca vê nem
+            # usa — esta conta só faz login via Google. Evita adicionar
+            # uma coluna nullable/"sem senha" ao model User só para este
+            # caso: mais simples manter TODO usuário com uma senha
+            # hasheada válida, mesmo que inatingível na prática.
+            owner_password_hash = hash_password(generate_temporary_password())
+        else:
+            owner_name = data.owner_name
+            owner_email = data.email
+            owner_password_hash = hash_password(data.password)
+
         tenant_repo = TenantRepository(self.no_tenant_db)
         tenant = Tenant(
             id=uuid.uuid4(),
@@ -90,16 +117,64 @@ class AuthService:
                 User(
                     id=owner_id,
                     tenant_id=tenant.id,
-                    email=data.email,
-                    full_name=data.owner_name,
+                    email=owner_email,
+                    full_name=owner_name,
                     role="owner",
-                    hashed_password=hash_password(data.password),
+                    hashed_password=owner_password_hash,
                     must_change_password=False,
                 )
             )
 
         token = create_access_token(user_id=str(owner_id), tenant_id=str(tenant.id), role="owner")
         return TokenResponse(access_token=token)
+
+    async def login_or_signal_registration_with_google(
+        self, credential: str, tenant_id: str | None = None
+    ) -> GoogleAuthResponse:
+        """POST /auth/google — verifica o ID token e resolve um de 3
+        estados (ver docstring de GoogleAuthResponse): login direto, tela
+        de seleção de clínica (mesma ambiguidade multi-tenant do login
+        tradicional), ou "nenhuma conta com este e-mail" — devolvido ao
+        frontend para pré-preencher o cadastro (SignUpPage.tsx), NUNCA
+        criando a clínica sozinho aqui: cadastrar continua exigindo CNPJ e
+        escolha de plano, que este endpoint não recebe."""
+        google_user = await verify_google_id_token(credential)
+
+        # Reaproveita resolve_login_candidates (não resolve_user_by_email)
+        # porque precisamos do "role" de cada candidato para emitir o JWT
+        # — resolve_user_by_email foi desenhada só para o fluxo de reset de
+        # senha, que nunca precisa disso. A senha vindo nesses registros
+        # simplesmente não é usada aqui.
+        candidates = await self.auth_repo.resolve_login_candidates(google_user.email)
+        usable = [c for c in candidates if c.is_active and c.tenant_is_active]
+
+        if not usable:
+            return GoogleAuthResponse(
+                needs_registration=True,
+                email=google_user.email,
+                suggested_owner_name=google_user.name,
+            )
+
+        if len(usable) > 1:
+            if tenant_id is not None:
+                chosen = next((c for c in usable if c.tenant_id == tenant_id), None)
+                if chosen is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Não foi possível autenticar com esta conta Google.",
+                    )
+                token = create_access_token(user_id=chosen.user_id, tenant_id=chosen.tenant_id, role=chosen.role)
+                return GoogleAuthResponse(access_token=token)
+
+            return GoogleAuthResponse(
+                requires_tenant_selection=True,
+                tenant_options=[TenantOption(tenant_id=c.tenant_id, trade_name=c.tenant_trade_name) for c in usable],
+                email=google_user.email,
+            )
+
+        record = usable[0]
+        token = create_access_token(user_id=record.user_id, tenant_id=record.tenant_id, role=record.role)
+        return GoogleAuthResponse(access_token=token)
 
     async def request_password_reset(self, email: str) -> None:
         """SEMPRE silencioso: o chamador (endpoint) devolve a mesma
