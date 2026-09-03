@@ -136,6 +136,46 @@ def validate_extracted_items(raw_items: list[dict]) -> ExtractionResult:
     return result
 
 
+# Preço >= 2x o da tabela anterior é aviso, não regra rígida — reajuste
+# legítimo de convênio às vezes passa disso, mas é raro o bastante para
+# merecer um segundo olhar humano antes de homologar.
+_PRICE_ANOMALY_THRESHOLD = 2.0
+
+
+def detect_price_anomalies(items: list[ExtractedItem], previous_prices: dict[str, float]) -> list[str]:
+    """
+    Função PURA e determinística — nenhuma IA aqui, só aritmética contra
+    o que já está no banco. Compara o preço de cada item recém-extraído
+    com o preço do MESMO código TUSS na tabela do contrato homologado
+    anterior do mesmo plano (`previous_prices`, montado por
+    ContractItemRepository.list_items_for_previous_homologated_contract).
+
+    Preço >= _PRICE_ANOMALY_THRESHOLD vezes o valor anterior vira aviso
+    (nunca bloqueio): quem decide se é reajuste legítimo ou erro de
+    extração da IA é o humano na Tela de Conferência. Muta `item.warning`
+    in-place (concatenando com um warning de formato já existente,
+    quando houver) e devolve as mensagens agregadas do lote, para
+    `ExtractionResult.warnings`.
+    """
+    flagged = 0
+    for item in items:
+        previous_price = previous_prices.get(item.tuss_code)
+        if not previous_price or previous_price <= 0:
+            continue
+        ratio = item.agreed_price / previous_price
+        if ratio >= _PRICE_ANOMALY_THRESHOLD:
+            # Vírgula decimal (pt-BR), não ponto — mesmo padrão de todo
+            # valor exibido na Tela de Conferência (ver canvas de design).
+            ratio_label = f"{ratio:.1f}".replace(".", ",")
+            anomaly_warning = f"Valor {ratio_label}x acima do preço da tabela anterior para este procedimento."
+            item.warning = f"{item.warning} {anomaly_warning}" if item.warning else anomaly_warning
+            flagged += 1
+
+    if flagged == 0:
+        return []
+    return [f"{flagged} {'item tem' if flagged == 1 else 'itens têm'} preço muito acima da tabela anterior — confira antes de homologar."]
+
+
 class AnthropicContractExtractor:
     """Implementação real via API da Anthropic (Messages API). Injetada
     no service por interface (duck typing — só precisa expor `extract`),

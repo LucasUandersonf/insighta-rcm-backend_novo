@@ -38,7 +38,11 @@ from app.schemas.contract import (
     ExtractedItemResponse,
     ExtractionPreviewResponse,
 )
-from app.services.contract_extraction_service import AnthropicContractExtractor, ContractExtractionError
+from app.services.contract_extraction_service import (
+    AnthropicContractExtractor,
+    ContractExtractionError,
+    detect_price_anomalies,
+)
 from app.services.contract_pdf_text import ContractPdfTextError, extract_text
 from app.services.contract_storage_client import ContractStorageClient, ContractStorageError, build_pdf_key
 
@@ -113,6 +117,15 @@ class ContractIntakeService:
             result = await extractor.extract(pdf_text)
         except ContractExtractionError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+        # Alerta de anomalia de preço: aritmética determinística contra o
+        # contrato homologado anterior do mesmo plano, não IA (ver
+        # DECISÃO em contract_extraction_service.detect_price_anomalies).
+        previous_items = await self.item_repo.list_items_for_previous_homologated_contract(
+            contract.insurance_plan_id, exclude_contract_id=contract.id
+        )
+        previous_prices = {i.tuss_code: i.agreed_price for i in previous_items}
+        result.warnings.extend(detect_price_anomalies(result.items, previous_prices))
 
         contract.status = "em_revisao"
         contract.extracted_at = datetime.now(timezone.utc)
