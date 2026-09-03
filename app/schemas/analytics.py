@@ -168,6 +168,24 @@ class ContractUtilizationResponse(BaseModel):
     contracts: list[ContractUtilizationItem]  # ordenado por utilization_pct, pior primeiro
 
 
+class DenialRiskDistributionItem(BaseModel):
+    level: str  # "low" | "medium" | "high"
+    count: int
+
+
+class DenialRiskDistributionResponse(BaseModel):
+    """GET /api/v1/analytics/denial-risk-distribution — Painel → Faturamento
+    (donut "Distribuição de risco de glosa" do canvas de design)."""
+
+    period_start: date
+    period_end: date
+    items: list[DenialRiskDistributionItem]
+    # Soma dos 3 níveis — ver DECISÃO em
+    # AnalyticsRepository.denial_risk_count_breakdown sobre por que
+    # "revisado" é sinônimo de "faturado no período" neste produto.
+    total_reviewed: int
+
+
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive"
     title: str

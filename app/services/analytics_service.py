@@ -32,6 +32,8 @@ from app.schemas.analytics import (
     AgendaMetricsResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DenialRiskDistributionItem,
+    DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     NoShowRiskBucket,
     PatientNoShowRankingItem,
@@ -349,6 +351,13 @@ class AnalyticsService:
             for row in rows
         ]
         return ContractUtilizationResponse(period_start=date_from, period_end=date_to, contracts=contracts)
+
+    async def get_denial_risk_distribution(self, date_from: date, date_to: date) -> DenialRiskDistributionResponse:
+        breakdown = await self.analytics_repo.denial_risk_count_breakdown(date_from, date_to)
+        items = [DenialRiskDistributionItem(level=level, count=count) for level, count in breakdown.items()]
+        return DenialRiskDistributionResponse(
+            period_start=date_from, period_end=date_to, items=items, total_reviewed=sum(breakdown.values())
+        )
 
     async def _period_insights_input(
         self,

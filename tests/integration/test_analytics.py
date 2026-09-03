@@ -146,6 +146,7 @@ async def test_atendimento_cannot_access_analytics(client, admin_engine, tenant_
         "smart-insights",
         "plan-loss-ranking",
         "contract-utilization",
+        "denial-risk-distribution",
     ):
         response = await client.get(f"/api/v1/analytics/{path}", headers=headers)
         assert response.status_code == 403, f"{path} deveria barrar atendimento"
@@ -426,3 +427,42 @@ async def test_agenda_metrics_lists_upcoming_risk_appointments_soonest_first(cli
     assert names == ["Paciente Faltoso Próximo", "Paciente Faltoso Distante"]  # soonest first
     assert all(item["risk_level"] == "alto" for item in upcoming)
     assert "Paciente Sem Histórico" not in names  # indeterminado nunca entra na lista
+
+
+async def test_denial_risk_distribution_counts_by_level(client, auth_headers_a, admin_engine, tenant_a):
+    """Donut 'Distribuição de risco de glosa' do Painel: CONTA
+    faturamentos por nível (não soma valor, ver denial_risk_value_breakdown
+    em test_executive_summary_computes_financial_hole_and_margin) —
+    total_reviewed é a soma dos 3 níveis."""
+    patient = (await client.post("/api/v1/patients", json={"full_name": "Paciente Distribuição"}, headers=auth_headers_a)).json()
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Plano Distribuição", normalized_key="plano_distribuicao")
+
+    # Faltando CID -> regra missing_cid dispara, severidade "high" (ver
+    # denial_risk_engine.py::_rule_missing_cid).
+    appt_high = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+        },
+        headers=auth_headers_a,
+    )
+    assert appt_high.status_code == 201
+    billing_high = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appt_high.json()["id"], "insurance_plan_id": plan_id, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    assert billing_high.status_code == 201
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/denial-risk-distribution?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    counts = {item["level"]: item["count"] for item in body["items"]}
+    assert counts.get("high") == 1
+    assert body["total_reviewed"] == sum(counts.values())

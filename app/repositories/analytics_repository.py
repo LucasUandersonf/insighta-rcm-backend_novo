@@ -446,6 +446,23 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {level: float(total) for level, total in result.all()}
 
+    async def denial_risk_count_breakdown(self, date_from: date, date_to: date) -> dict[str, int]:
+        """Mesmo agrupamento de `denial_risk_value_breakdown`, mas
+        CONTANDO faturamentos em vez de somar valor — alimenta o donut
+        "Distribuição de risco de glosa" do Painel (ver canvas de
+        design, Painel.dc.html), onde o centro mostra "Revisados: N"
+        (todo faturamento passa pelo motor anti-glosa na criação —
+        denial_risk_engine.py roda de forma síncrona —, então "revisado"
+        aqui é sinônimo de "faturado no período", não uma fila à parte)."""
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Billing.denial_risk_level, func.count())
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Billing.denial_risk_level)
+        )
+        result = await self.session.execute(stmt)
+        return {level: int(count) for level, count in result.all()}
+
     async def no_show_risk_breakdown(self, date_from: date, date_to: date) -> dict[str, int]:
         """Agrupa AGENDAMENTOS FUTUROS AINDA NÃO REALIZADOS (status
         'scheduled') por nível de risco preditivo de falta — a mesma
