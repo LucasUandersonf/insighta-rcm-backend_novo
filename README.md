@@ -181,6 +181,35 @@ nunca mudar código. Ver `FRONTEND_BASE_URL` (usada para montar o link
 `/reset-password?token=...` dentro do e-mail) e `SMTP_*` em
 `app/core/config.py`.
 
+### Login/cadastro com Google ("Sign in with Google")
+
+`POST /auth/google` — usado tanto para login quanto para cadastro,
+distinguindo por 3 estados na mesma resposta (`GoogleAuthResponse`, ver
+`app/schemas/token.py`): login direto (`access_token`), ambiguidade
+multi-tenant (`requires_tenant_selection` — mesmo mecanismo do login
+tradicional) ou nenhuma conta com aquele e-mail (`needs_registration` +
+`email`/`suggested_owner_name`, para o frontend pré-preencher o cadastro
+sem pedir para digitar nome/e-mail de novo). `POST /auth/register`
+aceita um `google_credential` no lugar de `owner_name`/`email`/`password`
+para completar esse cadastro (CNPJ e plano continuam obrigatórios — o
+Google só resolve identidade, nunca os dados da clínica).
+
+**Sem client_secret nenhum**: o frontend usa o Google Identity Services
+(`https://accounts.google.com/gsi/client`, botão renderizado pelo
+próprio Google) e recebe um ID token JÁ ASSINADO no callback — este
+backend só VERIFICA esse token (`app/services/google_oauth_client.py`,
+via JWKS + `python-jose`, dependência que o projeto já tinha para os
+próprios JWTs — sem puxar o SDK `google-auth`), conferindo assinatura,
+emissor, expiração, a claim `aud` contra `GOOGLE_OAUTH_CLIENT_ID` e
+`email_verified=true`. Sem `GOOGLE_OAUTH_CLIENT_ID` configurado,
+`POST /auth/google` devolve `503` — mesma degradação graciosa do e-mail
+transacional acima. Para ativar: criar um "OAuth client ID" do tipo
+"Web application" no Google Cloud Console (APIs & Services >
+Credentials), com as origens do frontend em "Authorized JavaScript
+origins", e configurar o mesmo Client ID nos dois lados
+(`GOOGLE_OAUTH_CLIENT_ID` aqui, `VITE_GOOGLE_OAUTH_CLIENT_ID` no
+frontend) — é um valor PÚBLICO, não um segredo.
+
 ## Recurso de Glosa (conformidade ANS) — a segunda metade do ciclo de glosa
 
 `denial_risk_engine.py` (já existia) cobre a glosa TÉCNICA — erro de

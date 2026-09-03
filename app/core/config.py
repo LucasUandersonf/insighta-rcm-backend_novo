@@ -160,6 +160,20 @@ class Settings(BaseSettings):
     # e-mail for interceptado).
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # --- Login com Google ("Sign in with Google") — OPCIONAL ---
+    # Client ID do OAuth 2.0 criado no Google Cloud Console (APIs &
+    # Services > Credentials > OAuth client ID > Web application) — é
+    # PÚBLICO por natureza (vai no HTML do frontend), nunca um segredo.
+    # Sem client_secret nenhum: o fluxo usa Google Identity Services
+    # (https://accounts.google.com/gsi/client), que devolve ao frontend um
+    # ID token JÁ ASSINADO pelo Google — este backend só VERIFICA a
+    # assinatura e a claim "aud" contra este client_id (ver
+    # app/services/google_oauth_client.py), nunca troca código de
+    # autorização por token. Sem GOOGLE_OAUTH_CLIENT_ID configurado,
+    # POST /auth/google devolve 503 — mesma degradação graciosa de
+    # SMTP_HOST/SENTRY_DSN ausentes.
+    GOOGLE_OAUTH_CLIENT_ID: str | None = None
+
     # --- E-mail transacional (recuperação de senha) — OPCIONAL ---
     # DECISÃO — SMTP genérico, não um SDK de provedor específico
     # -------------------------------------------------------------------
