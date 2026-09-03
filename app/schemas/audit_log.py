@@ -7,6 +7,12 @@ from pydantic import BaseModel
 class AuditLogResponse(BaseModel):
     id: int
     actor_user_id: UUID | None
+    # Nome do colaborador dono de `actor_user_id`, resolvido pelo
+    # endpoint numa segunda query (AuditLog não tem relationship ORM
+    # para User — ver DECISÃO em audit_log_repository.py). None quando
+    # actor_user_id é None (ação disparada pelo próprio sistema, sem
+    # usuário logado) ou quando o usuário já foi removido.
+    actor_name: str | None = None
     action: str
     entity_type: str
     entity_id: UUID

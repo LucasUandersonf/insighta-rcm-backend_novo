@@ -52,8 +52,18 @@ async def list_audit_log(
         date_from=date_from,
         date_to=date_to,
     )
+    # Nome do autor é resolvido à parte (ver DECISÃO em
+    # AuditLogRepository.get_actor_names) e mesclado aqui — ação
+    # disparada pelo próprio sistema (sem usuário logado) ou por um
+    # usuário já removido fica com actor_name=None; a UI trata isso
+    # como "Sistema".
+    actor_ids = {i.actor_user_id for i in items if i.actor_user_id is not None}
+    actor_names = await repo.get_actor_names(actor_ids)
     return PaginatedResponse(
-        items=[AuditLogResponse.model_validate(i) for i in items],
+        items=[
+            AuditLogResponse.model_validate(i).model_copy(update={"actor_name": actor_names.get(i.actor_user_id)})
+            for i in items
+        ],
         total=total,
         limit=limit,
         offset=offset,

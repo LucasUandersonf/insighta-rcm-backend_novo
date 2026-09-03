@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
+from app.models.user import User
 
 
 class AuditLogRepository:
@@ -59,3 +60,16 @@ class AuditLogRepository:
         )
         result = await self.session.execute(items_stmt)
         return list(result.scalars().all()), total
+
+    async def get_actor_names(self, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Resolve `actor_user_id` -> `full_name` para os autores de uma
+        página de resultados. Método à parte (em vez de um JOIN em
+        `list_paginated`) porque `AuditLog` não declara relationship ORM
+        para `User` — o volume de autores distintos numa página de até
+        200 linhas é pequeno o bastante para não justificar o JOIN. RLS
+        da sessão já restringe a busca aos usuários do tenant corrente."""
+        if not user_ids:
+            return {}
+        stmt = select(User.id, User.full_name).where(User.id.in_(user_ids))
+        result = await self.session.execute(stmt)
+        return {row.id: row.full_name for row in result}

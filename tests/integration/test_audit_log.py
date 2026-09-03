@@ -12,17 +12,26 @@ import uuid as uuid_module
 from sqlalchemy import text
 
 
-async def _insert_audit_log(admin_engine, *, tenant_id: str, action: str, entity_type: str, entity_id: str | None = None):
+async def _insert_audit_log(
+    admin_engine,
+    *,
+    tenant_id: str,
+    action: str,
+    entity_type: str,
+    entity_id: str | None = None,
+    actor_user_id: str | None = None,
+):
     async with admin_engine.begin() as conn:
         await conn.execute(
             text(
                 """
-                INSERT INTO core.audit_log (tenant_id, action, entity_type, entity_id, diff)
-                VALUES (:tenant_id, :action, :entity_type, :entity_id, :diff)
+                INSERT INTO core.audit_log (tenant_id, actor_user_id, action, entity_type, entity_id, diff)
+                VALUES (:tenant_id, :actor_user_id, :action, :entity_type, :entity_id, :diff)
                 """
             ),
             {
                 "tenant_id": tenant_id,
+                "actor_user_id": actor_user_id,
                 "action": action,
                 "entity_type": entity_type,
                 "entity_id": entity_id or str(uuid_module.uuid4()),
@@ -94,3 +103,21 @@ async def test_auditor_can_read_audit_log(client, admin_engine, tenant_a):
     response = await client.get("/api/v1/audit-log", headers=headers)
     assert response.status_code == 200
     assert response.json()["total"] == 1
+
+
+async def test_audit_log_resolves_actor_name(client, admin_engine, tenant_a, auth_headers_a):
+    from tests.conftest import _insert_user
+
+    actor = await _insert_user(admin_engine, tenant_id=tenant_a, email="renata.alves@audit-log-test.com", role="admin")
+    await _insert_audit_log(
+        admin_engine, tenant_id=tenant_a, action="update", entity_type="contract", actor_user_id=actor["id"]
+    )
+    # Ação disparada pelo próprio sistema, sem usuário logado.
+    await _insert_audit_log(admin_engine, tenant_id=tenant_a, action="create", entity_type="billing")
+
+    response = await client.get("/api/v1/audit-log", headers=auth_headers_a)
+    assert response.status_code == 200
+    items = {i["entity_type"]: i for i in response.json()["items"]}
+    assert items["contract"]["actor_name"] == "renata.alves"
+    assert items["billing"]["actor_user_id"] is None
+    assert items["billing"]["actor_name"] is None
