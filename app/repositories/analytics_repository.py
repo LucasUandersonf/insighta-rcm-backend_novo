@@ -319,6 +319,38 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
+    async def upcoming_risk_appointments(self, *, as_of: datetime, min_level: tuple[str, ...] = ("medio", "alto"), limit: int = 6) -> list[dict]:
+        """
+        Próximos agendamentos (status 'scheduled', ainda no futuro) com
+        risco de falta médio ou alto, mais próximos primeiro — a "lista de
+        atenção" da Sala de Comando ("Risco de falta — próximos dias" no
+        canvas de design): diferente de `no_show_risk_breakdown`
+        (contagem agregada por nível), aqui é a lista NOMINAL de quem
+        precisa de uma ligação de confirmação esta semana.
+
+        Não filtra por período (`date_from`/`date_to`) de propósito — é
+        sempre "a partir de agora", igual a `DenialAppealRepository.
+        count_due_within`: uma lista de ação não fica "vazia" só porque o
+        gestor escolheu ver os últimos 7 dias no seletor do dashboard.
+        """
+        stmt = text(
+            """
+            SELECT a.id, p.full_name, a.scheduled_at, a.no_show_risk_level
+            FROM core.appointments a
+            JOIN core.patients p ON p.id = a.patient_id
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :as_of
+              AND a.no_show_risk_level = ANY(:levels)
+            ORDER BY a.scheduled_at ASC
+            LIMIT :limit
+            """
+        )
+        result = await self.session.execute(stmt, {"as_of": as_of, "levels": list(min_level), "limit": limit})
+        return [
+            {"appointment_id": row[0], "patient_full_name": row[1], "scheduled_at": row[2], "risk_level": row[3]}
+            for row in result.all()
+        ]
+
     async def avg_charged_value(self, date_from: date, date_to: date) -> float:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(
