@@ -6,7 +6,7 @@ from app.models.appointment import Appointment
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
-from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse
+from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 
 
@@ -72,3 +72,27 @@ class AppointmentService:
     async def list_by_patient(self, patient_id: uuid.UUID) -> list[AppointmentResponse]:
         items = await self.appointment_repo.list_by_patient(patient_id)
         return [AppointmentResponse.model_validate(i) for i in items]
+
+    async def update_appointment(self, appointment_id: uuid.UUID, data: AppointmentUpdateRequest) -> AppointmentResponse:
+        """
+        Fecha o ciclo Agendamento -> Atendimento que faltava (ver DECISÃO
+        em AppointmentUpdateRequest): a recepção marca falta/cancelamento,
+        ou o profissional confirma o atendimento e só agora informa
+        procedimento/CID, sem precisar ter adivinhado isso na hora de
+        marcar o horário.
+        """
+        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        if appointment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento não encontrado neste tenant.")
+
+        if data.status is not None:
+            appointment.status = data.status
+        if data.procedure_code is not None:
+            appointment.procedure_code = data.procedure_code
+        if data.cid_code is not None:
+            appointment.cid_code = data.cid_code
+        if data.duration_minutes is not None:
+            appointment.duration_minutes = data.duration_minutes
+
+        await self.appointment_repo.save(appointment)
+        return AppointmentResponse.model_validate(appointment)

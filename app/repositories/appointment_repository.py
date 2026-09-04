@@ -41,3 +41,7 @@ class AppointmentRepository:
         self.session.add(appointment)
         await self.session.flush()
         return appointment
+
+    async def save(self, appointment: Appointment) -> Appointment:
+        await self.session.flush()
+        return appointment
