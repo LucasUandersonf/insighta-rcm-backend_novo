@@ -198,12 +198,30 @@ class NormalizationService:
     async def normalize_rows(
         self, tenant_id: uuid.UUID, raw_rows: list[IngestionRawRow], source_file: str | None = None
     ) -> NormalizationSummary:
+        """
+        BUG CORRIGIDO (achado testando com upload real de arquivo) —
+        `raw_rows` inclui TODA linha salva por `save_raw_rows`, inclusive
+        as que a Etapa 1 (parsing estrutural) já rejeitou ANTES de
+        chegarem aqui (status já é 'rejected', não 'pending_normalization'
+        — ver IngestionRepository.save_raw_rows). Para essas,
+        `normalize_row` retorna False sem tocar o status (early return),
+        mas o `elif raw_row.status == "rejected"` abaixo enxergava o
+        status HERDADO da Etapa 1 e contava a linha de novo em
+        `summary.rejected` — dobrando a contagem dessas linhas em
+        `error_row_count` (ver ingestion_processing_service.py:
+        `error_row_count = structural_error_count + summary.rejected`,
+        onde a mesma linha já entra em `structural_error_count`). Só
+        conta aqui uma linha que ESTAVA pendente de normalização e virou
+        'rejected' NESTA passada (unknown_insurance_plan) — a rejeição
+        estrutural já está contabilizada em `structural_error_count`.
+        """
         summary = NormalizationSummary()
         for raw_row in raw_rows:
+            was_pending = raw_row.status == "pending_normalization"
             promoted = await self.normalize_row(tenant_id, raw_row, source_file)
             if promoted:
                 summary.normalized += 1
-            elif raw_row.status == "rejected":
+            elif was_pending and raw_row.status == "rejected":
                 summary.rejected += 1
         return summary
 

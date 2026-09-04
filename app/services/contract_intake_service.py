@@ -124,7 +124,19 @@ class ContractIntakeService:
         previous_items = await self.item_repo.list_items_for_previous_homologated_contract(
             contract.insurance_plan_id, exclude_contract_id=contract.id
         )
-        previous_prices = {i.tuss_code: i.agreed_price for i in previous_items}
+        # BUG CORRIGIDO (achado testando o fluxo com um contrato anterior
+        # de verdade no Postgres) — `ContractItem.agreed_price` é
+        # `Numeric(12, 2)` no banco, então o driver devolve `Decimal`
+        # em runtime mesmo a coluna sendo anotada `Mapped[float]` (é só
+        # o tipo estático do ORM, não o tipo real do valor). Sem o
+        # `float(...)` aqui, `detect_price_anomalies` quebrava com
+        # `TypeError: unsupported operand type(s) for /: 'float' and
+        # 'decimal.Decimal'` (vira 500 pro usuário) todo SEGUNDO
+        # contrato homologado do mesmo convênio pra frente — o primeiro
+        # nunca dispara porque `previous_items` vem vazio. Mesmo
+        # cuidado que denial_risk_engine.py já toma ao ler
+        # `contract_item.agreed_price` (lá via `Decimal(str(...))`).
+        previous_prices = {i.tuss_code: float(i.agreed_price) for i in previous_items}
         result.warnings.extend(detect_price_anomalies(result.items, previous_prices))
 
         contract.status = "em_revisao"

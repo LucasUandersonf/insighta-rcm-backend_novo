@@ -87,14 +87,33 @@ def _detect_file_format(filename: str, content_type: str | None) -> str | None:
 
 
 def _to_response(row: IngestionRawRow) -> RejectedRowResponse:
-    errors = row.validation_errors or {}
+    # BUG CORRIGIDO — `validation_errors` (JSONB) tem DUAS formas
+    # possíveis, dependendo de QUEM rejeitou a linha: um dict
+    # {"reason": ..., "raw_value": ...} quando a Etapa 2 (normalização)
+    # rejeita por convênio desconhecido (ver
+    # NormalizationService.normalize_row), ou uma LISTA de mensagens de
+    # erro (`RowParseResult.failed`, ver app/worker/schemas.py) quando a
+    # Etapa 1 (parsing estrutural do CSV/XML/JSON) já rejeita a linha
+    # antes disso — ex: data em formato inválido, moeda sem nenhum
+    # dígito. Esta função assumia sempre a forma de dict — `errors.get(...)`
+    # quebrava com AttributeError na forma de lista, derrubando com 500
+    # o endpoint INTEIRO (GET /ingestion/rejected lista as duas juntas)
+    # assim que UMA linha estruturalmente inválida existisse no tenant.
+    errors = row.validation_errors
+    if isinstance(errors, list):
+        reason = "validation_error"
+        raw_value = "; ".join(str(e) for e in errors) if errors else None
+    else:
+        errors = errors or {}
+        reason = errors.get("reason")
+        raw_value = errors.get("raw_value")
     return RejectedRowResponse(
         id=row.id,
         ingestion_file_id=row.ingestion_file_id,
         row_number=row.row_number,
         payload=row.payload,
-        reason=errors.get("reason"),
-        raw_value=errors.get("raw_value"),
+        reason=reason,
+        raw_value=raw_value,
         created_at=row.created_at,
     )
 
