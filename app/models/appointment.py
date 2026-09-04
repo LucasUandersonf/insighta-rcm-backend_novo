@@ -7,6 +7,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
+# Vocabulário FECHADO e universal entre clínicas (confirmado idêntico
+# em 3 ERPs do mercado — Moderna, Feegow, iClinic: "Amb/Int/PS" aparece
+# como filtro/coluna em praticamente toda tela de faturamento
+# pesquisada) — mesmo raciocínio de GUIA_TIPOS em app/models/guia.py.
+TIPO_PACIENTE_VALUES = ("ambulatorial", "internacao", "pronto_socorro")
+
 
 class Appointment(Base):
     __tablename__ = "appointments"
@@ -17,6 +23,13 @@ class Appointment(Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("core.patients.id"), nullable=False)
     insurance_plan_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.insurance_plans.id"))
     professional_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.professionals.id"))
+    # Local de Atendimento/Unidade/Setor (ver app/models/local.py) e
+    # Tipo de Paciente (Fase 4) — NULLABLE: todo agendamento existente
+    # antes desta migration, e todo vindo da ingestão em massa hoje,
+    # não tem essa informação (ver DECISÃO em
+    # app/sql/018_locais_tipo_paciente.sql).
+    local_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.locais.id"))
+    tipo_paciente: Mapped[str | None] = mapped_column(String(20))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_minutes: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="scheduled")

@@ -159,6 +159,10 @@ _POST_UPGRADE_SQL_FILES = [
     # mercado. CREATE TABLE sem IF NOT EXISTS — precisa do marcador
     # (ver _POST_UPGRADE_MARKER_TABLE).
     "017_glosas.sql",
+    # Local de Atendimento + Tipo de Paciente — Fase 4 do plano de
+    # adequação ao fluxo real de mercado. CREATE TABLE sem IF NOT
+    # EXISTS — precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "018_locais_tipo_paciente.sql",
 ]
 
 _ROLES_SQL = """
@@ -271,6 +275,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "015_billing_guia.sql": "guias",
     "016_lotes_faturas.sql": "lotes",
     "017_glosas.sql": "glosas",
+    "018_locais_tipo_paciente.sql": "locais",
 }
 
 

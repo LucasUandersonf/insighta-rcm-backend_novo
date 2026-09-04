@@ -22,6 +22,7 @@ from app.api.v1.endpoints import (
     ingestion,
     insurance_companies,
     integrations,
+    locais,
     lotes,
     patients,
     professionals,
@@ -50,6 +51,7 @@ api_router.include_router(faturas.router)
 api_router.include_router(glosas.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(professionals.router)
+api_router.include_router(locais.router)
 api_router.include_router(capacity.router)
 api_router.include_router(ingestion.router)
 api_router.include_router(reports.router)
