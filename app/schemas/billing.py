@@ -16,6 +16,10 @@ class BillingCreateRequest(BaseModel):
     appointment_id: UUID
     insurance_plan_id: UUID
     charged_value: float = Field(gt=0, description="Valor cobrado, deve ser positivo")
+    # Guia TISS à qual este lançamento pertence (ver app/models/guia.py) —
+    # opcional: nem todo fluxo de faturamento manual já tem guia gerada
+    # no momento da cobrança.
+    guia_id: UUID | None = None
 
     @field_validator("charged_value")
     @classmethod
@@ -37,6 +41,7 @@ class BillingResponse(BaseModel):
     value_saved_by_correction: float
     received_value: float | None
     settled_at: datetime | None
+    guia_id: UUID | None
     created_at: datetime
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model

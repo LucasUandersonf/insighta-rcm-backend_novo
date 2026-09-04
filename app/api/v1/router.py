@@ -16,6 +16,7 @@ from app.api.v1.endpoints import (
     capacity,
     contracts,
     denial_appeals,
+    guias,
     ingestion,
     insurance_companies,
     integrations,
@@ -40,6 +41,7 @@ api_router.include_router(appointments.router)
 api_router.include_router(contracts.router)
 api_router.include_router(insurance_companies.router)
 api_router.include_router(denial_appeals.router)
+api_router.include_router(guias.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(professionals.router)
 api_router.include_router(capacity.router)

@@ -35,6 +35,7 @@ de app/services/contract_storage_client.py).
 """
 import aioboto3
 
+from app.core.aws_s3 import s3_client_kwargs
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -70,6 +71,6 @@ class IngestionStorageClient:
         (senão None) — vira o `s3_version_id` da chave de idempotência em
         core.ingestion_files, exatamente como faria o campo `versionId` de
         um evento S3 real no caminho SQS."""
-        async with self._session.client("s3") as s3:
+        async with self._session.client("s3", **s3_client_kwargs()) as s3:
             response = await s3.put_object(Bucket=self.bucket, Key=key, Body=raw_bytes)
             return response.get("VersionId")
