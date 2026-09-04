@@ -7,7 +7,7 @@ RBAC de contracts.py — dado financeiro/estrutural, não é de 'atendimento'.
 """
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.insurance_company_repository import InsuranceCompanyRepository
@@ -17,7 +17,7 @@ from app.schemas.insurance_company import (
     InsuranceCompanyResponse,
     InsuranceCompanyUpdateRequest,
 )
-from app.schemas.insurance_plan import InsurancePlanCreateRequest, InsurancePlanResponse
+from app.schemas.insurance_plan import InsurancePlanCreateRequest, InsurancePlanResponse, InsurancePlanUpdateRequest
 from app.services.insurance_company_service import InsuranceCompanyService
 from app.services.insurance_plan_service import InsurancePlanService
 
@@ -41,9 +41,10 @@ async def create_insurance_company(
 async def list_insurance_companies(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
+    include_inactive: bool = Query(False),
 ) -> list[InsuranceCompanyResponse]:
     service = InsuranceCompanyService(InsuranceCompanyRepository(db))
-    return await service.list_companies()
+    return await service.list_companies(include_inactive=include_inactive)
 
 
 @router.patch("/{company_id}", response_model=InsuranceCompanyResponse)
@@ -53,9 +54,12 @@ async def update_insurance_company(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
 ) -> InsuranceCompanyResponse:
-    """Hoje só serve para corrigir `default_appeal_deadline_days` depois
-    de conferir o prazo real no contrato com a operadora (ver DECISÃO em
-    app/sql/008_denial_appeals.sql)."""
+    """Corrige `default_appeal_deadline_days` depois de conferir o prazo
+    real no contrato com a operadora (ver DECISÃO em
+    app/sql/008_denial_appeals.sql), e/ou desativa/reativa uma operadora
+    cadastrada errado/duplicada (`is_active` — ver DECISÃO em
+    app/sql/014_insurance_is_active.sql). Exclusão de verdade não é opção:
+    Contract/Appointment/Billing referenciam planos desta operadora."""
     service = InsuranceCompanyService(InsuranceCompanyRepository(db))
     return await service.update_company(company_id, payload)
 
@@ -74,6 +78,22 @@ async def create_insurance_plan(
 async def list_insurance_plans(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
+    include_inactive: bool = Query(False),
 ) -> list[InsurancePlanResponse]:
     service = InsurancePlanService(InsurancePlanRepository(db), InsuranceCompanyRepository(db))
-    return await service.list_plans()
+    return await service.list_plans(include_inactive=include_inactive)
+
+
+@router.patch("/plans/{plan_id}", response_model=InsurancePlanResponse)
+async def update_insurance_plan(
+    plan_id: uuid.UUID,
+    payload: InsurancePlanUpdateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> InsurancePlanResponse:
+    """Desativa/reativa um plano cadastrado errado/duplicado (`is_active`
+    — ver DECISÃO em app/sql/014_insurance_is_active.sql). Exclusão de
+    verdade não é opção: Contract/Appointment/Billing/
+    insurance_plan_aliases referenciam este id."""
+    service = InsurancePlanService(InsurancePlanRepository(db), InsuranceCompanyRepository(db))
+    return await service.update_plan(plan_id, payload)

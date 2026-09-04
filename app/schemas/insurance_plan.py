@@ -15,12 +15,23 @@ class InsurancePlanCreateRequest(BaseModel):
     ans_registry: str | None = None
 
 
+class InsurancePlanUpdateRequest(BaseModel):
+    """PATCH parcial — hoje só serve para desativar/reativar
+    (`is_active`), mesmo padrão de InsuranceCompanyUpdateRequest/
+    ProfessionalUpdateRequest: "excluir" um plano cadastrado errado ou
+    duplicado sem quebrar as FKs de Contract/Appointment/Billing (ver
+    DECISÃO no model)."""
+
+    is_active: bool | None = None
+
+
 class InsurancePlanResponse(BaseModel):
     id: UUID
     insurance_company_id: UUID | None
     display_name: str
     normalized_key: str
     ans_registry: str | None
+    is_active: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
