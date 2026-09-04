@@ -121,6 +121,61 @@ async def test_agenda_metrics_returns_peak_hours_and_professionals(client, auth_
     assert "estimated_revenue_at_risk" in body
 
 
+async def test_agenda_metrics_computes_idle_capacity_revenue_lost(client, auth_headers_a, admin_engine, tenant_a):
+    """Grade cobrindo os 7 dias da semana (evita depender de qual weekday
+    'hoje' cai em) com bem mais capacidade instalada do que o único
+    agendamento criado — sobra ociosidade de sobra para o cálculo ter
+    algo a converter em R$ (ver capacity_service.estimate_idle_capacity_revenue_lost)."""
+    professional_resp = await client.post(
+        "/api/v1/professionals",
+        json={
+            "full_name": "Dr. Ocioso",
+            "availability": [{"weekday": wd, "start_time": "08:00:00", "end_time": "12:00:00"} for wd in range(7)],
+        },
+        headers=auth_headers_a,
+    )
+    assert professional_resp.status_code == 201
+    professional_id = professional_resp.json()["id"]
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Ocioso Saúde", normalized_key="ocioso_saude")
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Ocioso"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "professional_id": professional_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "duration_minutes": 60,
+            "procedure_code": "10101012",
+        },
+        headers=auth_headers_a,
+    )
+    assert appointment_resp.status_code == 201
+    appointment_id = appointment_resp.json()["id"]
+
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 200.0},
+        headers=auth_headers_a,
+    )
+    assert billing_resp.status_code == 201
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-metrics?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    # 3 dias * 240 min de grade - 60 min ocupados = 660 min ociosos.
+    assert body["total_idle_minutes"] == 660
+    # 660 min ociosos / 60 min por consulta = 11 consultas equivalentes * R$ 200 = R$ 2200.
+    assert body["estimated_revenue_lost_to_idle_capacity"] == 2200.0
+
+
 async def test_smart_insights_flags_financial_hole_from_current_period(client, auth_headers_a, admin_engine, tenant_a):
     await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=300.0, charged_value=250.0)
     date_from, date_to = _window()

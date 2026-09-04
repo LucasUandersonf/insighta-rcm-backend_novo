@@ -15,6 +15,15 @@ class ProfessionalRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_all(self) -> list[Professional]:
+        """Ativos e inativos — usado pela Tela de Profissionais (admin
+        precisa ver e poder reativar quem foi desativado; `list_active`
+        continua sendo o que alimenta seletores operacionais, como o
+        combobox de profissional em Nova Consulta)."""
+        stmt = select(Professional).order_by(Professional.full_name)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_by_id(self, professional_id: uuid.UUID) -> Professional | None:
         stmt = select(Professional).where(Professional.id == professional_id)
         result = await self.session.execute(stmt)
@@ -41,5 +50,9 @@ class ProfessionalRepository:
 
     async def add(self, professional: Professional) -> Professional:
         self.session.add(professional)
+        await self.session.flush()
+        return professional
+
+    async def save(self, professional: Professional) -> Professional:
         await self.session.flush()
         return professional

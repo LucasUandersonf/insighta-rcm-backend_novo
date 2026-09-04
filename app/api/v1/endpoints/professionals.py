@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
-from app.schemas.professional import ProfessionalCreateRequest, ProfessionalResponse
+from app.schemas.professional import ProfessionalCreateRequest, ProfessionalResponse, ProfessionalUpdateRequest
 from app.services.professional_service import ProfessionalService
 
 router = APIRouter(prefix="/professionals", tags=["professionals"])
@@ -27,6 +29,23 @@ async def create_professional(
 async def list_professionals(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "atendimento", "auditor")),
+    # False (padrão) é o que alimenta seletores operacionais (ex: campo
+    # "Profissional" em Nova Consulta) — nunca deve oferecer alguém
+    # desativado para um agendamento novo. True é só para a Tela de
+    # Profissionais em si, que precisa mostrar/reativar quem foi
+    # desativado.
+    include_inactive: bool = Query(False),
 ) -> list[ProfessionalResponse]:
     service = ProfessionalService(ProfessionalRepository(db), ProfessionalAvailabilityRepository(db))
-    return await service.list_professionals()
+    return await service.list_professionals(include_inactive=include_inactive)
+
+
+@router.patch("/{professional_id}", response_model=ProfessionalResponse)
+async def update_professional(
+    professional_id: UUID,
+    payload: ProfessionalUpdateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> ProfessionalResponse:
+    service = ProfessionalService(ProfessionalRepository(db), ProfessionalAvailabilityRepository(db))
+    return await service.update_professional(current_user.tenant_id, professional_id, payload)

@@ -47,7 +47,7 @@ from app.schemas.analytics import (
     UpcomingRiskAppointmentItem,
     WeekdayBucket,
 )
-from app.services.capacity_service import CapacityService
+from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriodInput, generate_insights
 
 # Janela de alerta de prazo de recurso: "vencendo em breve" — mesmo
@@ -156,6 +156,26 @@ class AnalyticsService:
         if not rates:
             return None
         return sum(rates) / len(rates)
+
+    async def _idle_capacity_totals(self, date_from: date, date_to: date) -> tuple[int, int, int]:
+        """(idle_minutes, booked_minutes, total_appointments) somados
+        entre profissionais com grade cadastrada — insumo de
+        capacity_service.estimate_idle_capacity_revenue_lost. Profissional
+        sem grade (available_minutes == 0) não entra: sem capacidade
+        teórica instalada, não há "ocioso" para medir nele, mesmo
+        critério de _avg_utilization acima."""
+        professionals = await self.professional_repo.list_active()
+        idle_minutes = 0
+        booked_minutes = 0
+        total_appointments = 0
+        for professional in professionals:
+            result = await self.capacity_service.get_utilization(professional.id, date_from, date_to)
+            if result.available_minutes <= 0:
+                continue
+            idle_minutes += max(result.available_minutes - result.booked_minutes, 0)
+            booked_minutes += result.booked_minutes
+            total_appointments += result.total_appointments
+        return idle_minutes, booked_minutes, total_appointments
 
     async def get_executive_summary(self, date_from: date, date_to: date) -> ExecutiveSummaryResponse:
         previous = _previous_period(date_from, date_to)
@@ -273,6 +293,14 @@ class AnalyticsService:
 
         upcoming_risk = await self.analytics_repo.upcoming_risk_appointments(as_of=datetime.now(timezone.utc))
 
+        idle_minutes, idle_booked_minutes, idle_total_appointments = await self._idle_capacity_totals(date_from, date_to)
+        estimated_revenue_lost_to_idle_capacity = estimate_idle_capacity_revenue_lost(
+            idle_minutes=idle_minutes,
+            booked_minutes=idle_booked_minutes,
+            total_appointments=idle_total_appointments,
+            avg_charged_value=avg_charged,
+        )
+
         return AgendaMetricsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -300,6 +328,8 @@ class AnalyticsService:
                 )
                 for row in upcoming_risk
             ],
+            total_idle_minutes=idle_minutes,
+            estimated_revenue_lost_to_idle_capacity=estimated_revenue_lost_to_idle_capacity,
         )
 
     async def get_plan_loss_ranking(self, date_from: date, date_to: date) -> PlanLossRankingResponse:
@@ -436,7 +466,17 @@ class AnalyticsService:
         avg_charged = await self.analytics_repo.avg_charged_value(date_from, date_to)
         estimated_revenue_at_risk = current_input.high_risk_no_show_count * avg_charged
 
-        insights = generate_insights(current_input, previous_input, estimated_revenue_at_risk)
+        idle_minutes, idle_booked_minutes, idle_total_appointments = await self._idle_capacity_totals(date_from, date_to)
+        estimated_idle_capacity_revenue_lost = estimate_idle_capacity_revenue_lost(
+            idle_minutes=idle_minutes,
+            booked_minutes=idle_booked_minutes,
+            total_appointments=idle_total_appointments,
+            avg_charged_value=avg_charged,
+        )
+
+        insights = generate_insights(
+            current_input, previous_input, estimated_revenue_at_risk, estimated_idle_capacity_revenue_lost
+        )
 
         return SmartInsightsResponse(
             period_start=date_from,

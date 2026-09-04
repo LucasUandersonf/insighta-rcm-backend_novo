@@ -1,10 +1,12 @@
 import uuid
 
+from fastapi import HTTPException, status
+
 from app.models.professional import Professional
 from app.models.professional_availability import ProfessionalAvailability
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
-from app.schemas.professional import ProfessionalCreateRequest, ProfessionalResponse
+from app.schemas.professional import ProfessionalCreateRequest, ProfessionalResponse, ProfessionalUpdateRequest
 
 """
 DECISÃO — sem relationship() do SQLAlchemy entre Professional e
@@ -52,8 +54,36 @@ class ProfessionalService:
         professional.availability = await self.availability_repo.list_by_professional(professional.id)
         return ProfessionalResponse.model_validate(professional)
 
-    async def list_professionals(self) -> list[ProfessionalResponse]:
-        items = await self.professional_repo.list_active()
+    async def update_professional(
+        self, tenant_id: str, professional_id: uuid.UUID, data: ProfessionalUpdateRequest
+    ) -> ProfessionalResponse:
+        professional = await self.professional_repo.get_by_id(professional_id)
+        if professional is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profissional não encontrado neste tenant.")
+
+        if data.full_name is not None:
+            professional.full_name = data.full_name
+        if data.professional_registry is not None:
+            professional.professional_registry = data.professional_registry
+        if data.specialty is not None:
+            professional.specialty = data.specialty
+        if data.is_active is not None:
+            professional.is_active = data.is_active
+        await self.professional_repo.save(professional)
+
+        if data.availability is not None:
+            professional.availability = await self.availability_repo.replace_for_professional(
+                tenant_id=uuid.UUID(tenant_id),
+                professional_id=professional.id,
+                blocks=[block.model_dump() for block in data.availability],
+            )
+        else:
+            professional.availability = await self.availability_repo.list_by_professional(professional.id)
+
+        return ProfessionalResponse.model_validate(professional)
+
+    async def list_professionals(self, *, include_inactive: bool = False) -> list[ProfessionalResponse]:
+        items = await self.professional_repo.list_all() if include_inactive else await self.professional_repo.list_active()
         # Uma query batelada em vez de N queries dentro do loop (ver
         # DECISÃO em ProfessionalAvailabilityRepository.list_by_professionals).
         availability_by_professional = await self.availability_repo.list_by_professionals([p.id for p in items])

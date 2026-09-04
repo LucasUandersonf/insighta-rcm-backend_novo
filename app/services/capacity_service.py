@@ -92,3 +92,39 @@ class CapacityService:
             total_appointments=total_appointments,
             status_breakdown=status_breakdown,
         )
+
+
+def estimate_idle_capacity_revenue_lost(
+    *, idle_minutes: int, booked_minutes: int, total_appointments: int, avg_charged_value: float
+) -> float:
+    """
+    Função PURA (mesmo princípio de report_calculations.py e
+    appeal_deadline_calculator.py) — traduz minutos ociosos da agenda em
+    R$, a mesma pergunta que o no-show já responde
+    (AnalyticsService.get_agenda_metrics::estimated_revenue_at_risk) mas
+    para o OUTRO lado do problema de agenda: não "paciente não veio",
+    e sim "não tinha nem agendamento marcado nesse horário".
+
+    DECISÃO — duração média REAL observada no período, não uma duração
+    "padrão" fixa
+    -------------------------------------------------------------------
+    Cada clínica/especialidade tem uma duração de consulta diferente.
+    Em vez de inventar uma constante (ex: "30 minutos por consulta"),
+    usamos `booked_minutes / total_appointments` do próprio período —
+    a mesma agenda que estamos diagnosticando informa o tamanho do
+    "slot equivalente" que caberia no tempo ocioso. Minutos ociosos
+    convertidos em "consultas equivalentes" × ticket médio cobrado no
+    período = estimativa de receita cessante por ociosidade.
+
+    Como em `estimated_revenue_at_risk`, isto é uma ESTIMATIVA de
+    gestão (quanto essa agenda vazia provavelmente custou, no ritmo
+    observado), não um número contábil fechado — não existe fatura para
+    uma consulta que nunca foi marcada.
+    """
+    if idle_minutes <= 0 or booked_minutes <= 0 or total_appointments <= 0:
+        return 0.0
+    avg_minutes_per_appointment = booked_minutes / total_appointments
+    if avg_minutes_per_appointment <= 0:
+        return 0.0
+    equivalent_idle_appointments = idle_minutes / avg_minutes_per_appointment
+    return equivalent_idle_appointments * avg_charged_value

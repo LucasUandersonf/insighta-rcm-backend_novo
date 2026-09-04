@@ -213,18 +213,32 @@ def _value_saved_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
     )
 
 
-def _capacity_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+def _capacity_drop_insight(
+    current: InsightsPeriodInput, previous: InsightsPeriodInput, estimated_idle_capacity_revenue_lost: float
+) -> Insight | None:
     if current.avg_capacity_utilization is None or previous.avg_capacity_utilization is None:
         return None
     drop_pp = (previous.avg_capacity_utilization - current.avg_capacity_utilization) * 100
     if drop_pp >= _UTILIZATION_DROP_ALERT_PP:
+        # Mesmo padrão do insight de no-show (_no_show_risk_insight): a
+        # queda em pontos percentuais diz O QUE mudou, mas é o R$ que
+        # decide a prioridade do alerta na lista (ver generate_insights,
+        # ordenado por financial_impact) — ver DECISÃO em
+        # capacity_service.estimate_idle_capacity_revenue_lost.
+        impact_note = (
+            f" — receita cessante estimada de R$ {estimated_idle_capacity_revenue_lost:,.2f} nesta janela"
+            if estimated_idle_capacity_revenue_lost > 0
+            else ""
+        )
         return Insight(
             severity="warning",
             title="Ocupação de agenda em queda",
             message=(
                 f"A taxa média de ocupação da agenda caiu {drop_pp:.0f} pontos percentuais em relação ao "
-                "período anterior. Vale checar ociosidade por profissional no painel de Agenda & Capacidade."
+                f"período anterior{impact_note}. Vale checar ociosidade por profissional no painel de "
+                "Agenda & Capacidade."
             ),
+            financial_impact=estimated_idle_capacity_revenue_lost or None,
         )
     return None
 
@@ -379,6 +393,7 @@ def generate_insights(
     current: InsightsPeriodInput,
     previous: InsightsPeriodInput,
     estimated_no_show_revenue_at_risk: float = 0.0,
+    estimated_idle_capacity_revenue_lost: float = 0.0,
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
@@ -391,7 +406,7 @@ def generate_insights(
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),
         _value_saved_insight(current, previous),
-        _capacity_drop_insight(current, previous),
+        _capacity_drop_insight(current, previous, estimated_idle_capacity_revenue_lost),
         _no_show_risk_insight(current, estimated_no_show_revenue_at_risk),
     ):
         if maybe_insight is not None:

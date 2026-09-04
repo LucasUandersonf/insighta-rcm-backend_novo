@@ -143,6 +143,31 @@ def test_capacity_drop_above_threshold_is_flagged():
     assert "queda" in insights[0].title.lower()
 
 
+def test_capacity_drop_uses_estimated_idle_capacity_revenue_lost():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.80, high_risk_no_show_count=0
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.65, high_risk_no_show_count=0
+    )
+    insights = generate_insights(current, previous, estimated_idle_capacity_revenue_lost=2400.0)
+    assert len(insights) == 1
+    assert insights[0].financial_impact == 2400.0
+    assert "receita cessante" in insights[0].message
+
+
+def test_capacity_drop_without_idle_estimate_omits_financial_impact():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.80, high_risk_no_show_count=0
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.65, high_risk_no_show_count=0
+    )
+    insights = generate_insights(current, previous)
+    assert insights[0].financial_impact is None
+    assert "receita cessante" not in insights[0].message
+
+
 def test_high_risk_no_show_volume_uses_estimated_revenue_at_risk():
     current = InsightsPeriodInput(
         denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=8

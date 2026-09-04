@@ -12,7 +12,7 @@ from datetime import date, time
 import pytest
 
 from app.models.professional_availability import ProfessionalAvailability
-from app.services.capacity_service import CapacityService
+from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 
 
 class _FakeAvailabilityRepo:
@@ -72,9 +72,55 @@ async def test_no_availability_configured_returns_zero_without_dividing_by_zero(
     assert result.no_show_rate == 0.0
 
 
+# ---------------------------------------------------------------------
+# estimate_idle_capacity_revenue_lost — função pura, mesmo espírito de
+# report_calculations.py: nenhuma dependência de banco/asyncio.
+# ---------------------------------------------------------------------
+
+
+def test_idle_minutes_converted_to_equivalent_appointments_times_ticket():
+    # 1200 min ocupados / 20 consultas = 60 min/consulta em média;
+    # 600 min ociosos -> 10 consultas equivalentes * R$ 150 = R$ 1500.
+    value = estimate_idle_capacity_revenue_lost(
+        idle_minutes=600, booked_minutes=1200, total_appointments=20, avg_charged_value=150.0
+    )
+    assert value == 1500.0
+
+
+def test_zero_idle_minutes_is_zero_loss():
+    value = estimate_idle_capacity_revenue_lost(
+        idle_minutes=0, booked_minutes=1200, total_appointments=20, avg_charged_value=150.0
+    )
+    assert value == 0.0
+
+
+def test_no_booked_appointments_cannot_infer_average_duration():
+    # Sem nenhuma consulta realizada no período, não há duração média
+    # observada para converter minutos ociosos em "consultas equivalentes"
+    # — retorna 0.0 em vez de dividir por zero ou inventar uma duração.
+    value = estimate_idle_capacity_revenue_lost(
+        idle_minutes=1000, booked_minutes=0, total_appointments=0, avg_charged_value=150.0
+    )
+    assert value == 0.0
+
+
+def test_negative_idle_minutes_is_treated_as_no_loss():
+    # Não deveria acontecer (overbooking apareceria como idle=0, nunca
+    # negativo — quem faz o clamp é o chamador), mas a função não deve
+    # devolver um valor negativo mesmo se receber um número negativo.
+    value = estimate_idle_capacity_revenue_lost(
+        idle_minutes=-100, booked_minutes=1200, total_appointments=20, avg_charged_value=150.0
+    )
+    assert value == 0.0
+
+
 if __name__ == "__main__":
     # Execução manual sem pytest instalado (ambiente sem acesso à rede) —
     # roda os dois testes diretamente com asyncio, só para validação local.
     asyncio.run(test_utilization_rate_for_a_full_business_week())
     asyncio.run(test_no_availability_configured_returns_zero_without_dividing_by_zero())
+    test_idle_minutes_converted_to_equivalent_appointments_times_ticket()
+    test_zero_idle_minutes_is_zero_loss()
+    test_no_booked_appointments_cannot_infer_average_duration()
+    test_negative_idle_minutes_is_treated_as_no_loss()
     print("Testes de capacity_service passaram.")
