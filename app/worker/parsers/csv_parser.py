@@ -52,7 +52,26 @@ _EXPECTED_HEADERS = {
     "cid": "cid_code",
     "valor_cobrado": "charged_value",
     "data_atendimento": "service_date",
+    # Colunas do TEMPLATE ESTENDIDO (Fase de "Templates de Integração" —
+    # ver conversa/PLANO_ADEQUACAO_TISS.md) — também opcionais, mesmo
+    # critério das demais: um export que não as tem continua funcionando
+    # exatamente como antes.
+    "local_atendimento": "local_name",
+    "tipo_paciente": "tipo_paciente",
+    "guia_tipo": "guia_tipo",
+    "guia_numero": "guia_numero",
+    "guia_senha": "guia_senha",
 }
+
+_OPTIONAL_STRING_FIELDS = (
+    "professional_name",
+    "professional_registry",
+    "local_name",
+    "tipo_paciente",
+    "guia_tipo",
+    "guia_numero",
+    "guia_senha",
+)
 
 
 def parse(raw_bytes: bytes) -> list[RowParseResult]:
@@ -71,8 +90,8 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
             # é str | None, e "" não deve contar como "profissional com
             # nome vazio" na normalização (get_or_create trataria isso
             # como um profissional real chamado "").
-            mapped["professional_name"] = mapped["professional_name"] or None
-            mapped["professional_registry"] = mapped["professional_registry"] or None
+            for field in _OPTIONAL_STRING_FIELDS:
+                mapped[field] = mapped[field] or None
             mapped["charged_value"] = _normalize_charged_value(mapped["charged_value"])
             mapped["service_date"] = _parse_br_date(mapped["service_date"])
 

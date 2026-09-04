@@ -21,6 +21,17 @@ class AppointmentRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_external_id(self, tenant_id: uuid.UUID, external_id: str) -> Appointment | None:
+        """Usado pela normalização do template de Agenda (ver
+        app/sql/019_agenda_ingestion.sql) para UPSERT: o mesmo
+        agendamento é tipicamente reexportado várias vezes conforme seu
+        status muda (agendado -> confirmado -> atendido/faltou) — sem
+        casar pelo external_id do sistema de origem, cada reimportação
+        criaria um agendamento duplicado."""
+        stmt = select(Appointment).where(Appointment.tenant_id == tenant_id, Appointment.external_id == external_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_past_by_patient(self, patient_id: uuid.UUID, before: datetime) -> list[Appointment]:
         """
         Histórico de atendimentos JÁ OCORRIDOS (completed/no_show) do

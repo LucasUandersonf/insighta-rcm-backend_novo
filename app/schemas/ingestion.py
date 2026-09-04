@@ -34,6 +34,7 @@ class IngestionFileResponse(BaseModel):
     id: UUID
     original_filename: str | None
     file_format: str
+    data_type: str
     status: str
     row_count: int
     error_row_count: int
@@ -53,6 +54,7 @@ class UploadIngestionFileResponse(BaseModel):
 
     id: UUID
     file_format: str
+    data_type: str
     status: str
     row_count: int
     error_row_count: int

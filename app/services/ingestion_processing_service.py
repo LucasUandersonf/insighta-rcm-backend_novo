@@ -45,12 +45,14 @@ from app.models.ingestion_file import IngestionFile
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.guia_repository import GuiaRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
+from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.services.normalization_service import NormalizationService
-from app.worker.parsers import csv_parser, json_parser, xml_parser
+from app.worker.parsers import agenda_csv_parser, csv_parser, json_parser, xml_parser
 
 _PARSERS = {
     "csv": csv_parser.parse,
@@ -58,13 +60,22 @@ _PARSERS = {
     "json": json_parser.parse,
 }
 
+# Template "Agenda" (ver app/sql/019_agenda_ingestion.sql) — só CSV
+# implementado nesta primeira versão (ver docstring de
+# agenda_csv_parser.py sobre por que XML/JSON ficam para quando um
+# cliente/ERP concreto precisar).
+_AGENDA_PARSERS = {
+    "csv": agenda_csv_parser.parse,
+}
+
 
 class UnknownFileFormatError(Exception):
-    """file_format fora de {csv, xml, json}. Na prática, quem chama esta
-    função já validou o formato antes (s3_key_resolver.py no caminho SQS;
-    detecção por extensão/content-type no endpoint HTTP) — esta checagem
-    aqui é só a segunda camada de defesa de sempre, para esta função
-    nunca confiar cegamente em quem a chama."""
+    """file_format fora do que o `data_type` do arquivo suporta (csv/xml/json
+    para 'faturamento'; só csv para 'agenda', por ora). Na prática, quem
+    chama esta função já validou o formato antes (s3_key_resolver.py no
+    caminho SQS; detecção por extensão/content-type no endpoint HTTP) —
+    esta checagem aqui é só a segunda camada de defesa de sempre, para
+    esta função nunca confiar cegamente em quem a chama."""
 
 
 class FileParsingError(Exception):
@@ -109,6 +120,7 @@ async def process_uploaded_file(
     file_format: str,
     raw_bytes: bytes,
     original_filename: str | None = None,
+    data_type: str = "faturamento",
 ) -> ProcessingResult:
     """
     Dado bytes já em mãos + tenant_id JÁ VALIDADO, roda o pipeline
@@ -121,6 +133,11 @@ async def process_uploaded_file(
     caminho SQS não tem "nome original" — a chave S3 já É o nome do
     arquivo do jeito que o SFTP depositou); fica None para o worker.
 
+    `data_type` ("faturamento", padrão, ou "agenda" — ver
+    app/sql/019_agenda_ingestion.sql) escolhe QUAL par (parser, método de
+    normalização) roda — os dois templates de integração compartilham
+    todo o resto do pipeline (idempotência, landing zone, histórico).
+
     Retorna `ProcessingResult` com `already_claimed=True` quando o
     arquivo (mesma chave de idempotência tenant_id+bucket+key+version)
     já havia sido reclamado antes — o caminho FELIZ de uma entrega
@@ -130,8 +147,9 @@ async def process_uploaded_file(
     ingestion_raw_rows.status='rejected', contados em `rejected_count`
     depois da normalização).
     """
-    if file_format not in _PARSERS:
-        raise UnknownFileFormatError(f"Formato de arquivo não suportado: {file_format!r}")
+    parsers = _AGENDA_PARSERS if data_type == "agenda" else _PARSERS
+    if file_format not in parsers:
+        raise UnknownFileFormatError(f"Formato de arquivo não suportado para data_type={data_type!r}: {file_format!r}")
 
     repo = IngestionRepository(db)
     ingestion_file = await repo.claim_file(
@@ -141,6 +159,7 @@ async def process_uploaded_file(
         s3_version_id=s3_version_id,
         file_format=file_format,
         original_filename=original_filename,
+        data_type=data_type,
     )
     if ingestion_file is None:
         existing = await repo.get_file_by_idempotency_key(
@@ -150,7 +169,7 @@ async def process_uploaded_file(
         return ProcessingResult(ingestion_file=existing, already_claimed=True)
 
     try:
-        parser = _PARSERS[file_format]
+        parser = parsers[file_format]
         parse_results = parser(raw_bytes)
     except Exception as exc:
         error_message = f"Falha ao parsear arquivo {file_format}: {exc}"
@@ -172,8 +191,13 @@ async def process_uploaded_file(
         contract_item_repo=ContractItemRepository(db),
         insurance_plan_repo=InsurancePlanRepository(db),
         billing_repo=BillingRepository(db),
+        local_repo=LocalRepository(db),
+        guia_repo=GuiaRepository(db),
     )
-    summary = await normalization_service.normalize_rows(tenant_id, saved_rows, source_file=s3_key)
+    if data_type == "agenda":
+        summary = await normalization_service.normalize_agenda_rows(tenant_id, saved_rows, source_file=s3_key)
+    else:
+        summary = await normalization_service.normalize_rows(tenant_id, saved_rows, source_file=s3_key)
 
     row_count = len(parse_results)
     error_row_count = structural_error_count + summary.rejected

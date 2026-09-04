@@ -29,6 +29,17 @@ class LocalRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_name(self, nome: str) -> Local | None:
+        """Usado pela normalização de ingestão (template de Faturamento/
+        Agenda) para casar o local de uma linha com um já existente pelo
+        nome — mesma limitação documentada em
+        ProfessionalRepository.get_by_name (sem identificador estável,
+        pequenas diferenças de grafia podem gerar registros duplicados;
+        aceito por ora pelo mesmo motivo)."""
+        stmt = select(Local).where(Local.nome == nome)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def add(self, local: Local) -> Local:
         self.session.add(local)
         await self.session.flush()

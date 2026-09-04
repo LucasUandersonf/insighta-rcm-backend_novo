@@ -40,5 +40,16 @@ class Appointment(Base):
     # a partir do histórico do próprio paciente — não é dado que o cliente envia.
     no_show_risk_level: Mapped[str | None] = mapped_column(String(20))
     no_show_risk_score: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    # Identificador do agendamento NO SISTEMA DE ORIGEM (ex: "codigo_agendamento"
+    # de um relatório de Agenda exportado pelo ERP) — Template de Integração
+    # "Agenda" (ver app/sql/019_agenda_ingestion.sql). Chave de UPSERT: um
+    # mesmo agendamento normalmente é reportado várias vezes ao longo do
+    # tempo (nasce "scheduled", depois o mesmo arquivo/relatório reaparece
+    # já com status "completed"/"no_show") — sem uma chave estável, cada
+    # reimportação criaria um agendamento DUPLICADO em vez de atualizar o
+    # existente. NULLABLE porque nem todo agendamento nasce da ingestão de
+    # Agenda (criação manual via POST /appointments, e todo agendamento
+    # vindo do template de Faturamento, nunca têm essa chave).
+    external_id: Mapped[str | None] = mapped_column(String(100))
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

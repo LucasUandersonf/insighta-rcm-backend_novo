@@ -40,6 +40,14 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                 "cid_code": _text(atendimento, "cid"),
                 "charged_value": _text(atendimento, "valorCobrado").replace(",", "."),
                 "service_date": _parse_iso_date(_text(atendimento, "dataAtendimento")),
+                # Campos do template estendido (Fase de "Templates de
+                # Integração") — mesmo padrão camelCase das demais tags,
+                # também opcionais.
+                "local_name": _text(atendimento, "localAtendimento") or None,
+                "tipo_paciente": _text(atendimento, "tipoPaciente") or None,
+                "guia_tipo": _text(atendimento, "guiaTipo") or None,
+                "guia_numero": _text(atendimento, "guiaNumero") or None,
+                "guia_senha": _text(atendimento, "guiaSenha") or None,
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))
