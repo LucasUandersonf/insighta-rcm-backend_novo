@@ -106,6 +106,7 @@ _SCHEMA_FILES = [
     "013_fix_plan_tier_check.sql",
     "014_insurance_is_active.sql",
     "015_billing_guia.sql",
+    "016_lotes_faturas.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
