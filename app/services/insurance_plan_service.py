@@ -18,7 +18,7 @@ from app.core.text_utils import slugify
 from app.models.insurance_plan import InsurancePlan
 from app.repositories.insurance_company_repository import InsuranceCompanyRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
-from app.schemas.insurance_plan import InsurancePlanCreateRequest, InsurancePlanResponse
+from app.schemas.insurance_plan import InsurancePlanCreateRequest, InsurancePlanResponse, InsurancePlanUpdateRequest
 
 
 class InsurancePlanService:
@@ -42,6 +42,18 @@ class InsurancePlanService:
         saved = await self.repo.add(plan)
         return InsurancePlanResponse.model_validate(saved)
 
-    async def list_plans(self) -> list[InsurancePlanResponse]:
-        plans = await self.repo.list_all()
+    async def list_plans(self, *, include_inactive: bool = False) -> list[InsurancePlanResponse]:
+        plans = await (self.repo.list_all() if include_inactive else self.repo.list_active())
         return [InsurancePlanResponse.model_validate(p) for p in plans]
+
+    async def update_plan(self, plan_id: uuid.UUID, data: InsurancePlanUpdateRequest) -> InsurancePlanResponse:
+        """Hoje só existe para desativar/reativar — mesmo padrão de
+        ProfessionalService.update_professional (só aplica campos
+        explicitamente enviados)."""
+        plan = await self.repo.get_by_id(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plano não encontrado neste tenant.")
+        if data.is_active is not None:
+            plan.is_active = data.is_active
+        await self.repo.save(plan)
+        return InsurancePlanResponse.model_validate(plan)

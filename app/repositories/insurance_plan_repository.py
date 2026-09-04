@@ -23,12 +23,27 @@ class InsurancePlanRepository:
         result = await self.session.execute(select(InsurancePlan).where(InsurancePlan.id == plan_id))
         return result.scalar_one_or_none()
 
+    async def list_active(self) -> list[InsurancePlan]:
+        """Alimenta os seletores de cadastro NOVO (Contratos, Central de
+        Upload) — mesmo critério de ProfessionalRepository.list_active."""
+        result = await self.session.execute(
+            select(InsurancePlan).where(InsurancePlan.is_active.is_(True)).order_by(InsurancePlan.display_name)
+        )
+        return list(result.scalars().all())
+
     async def list_all(self) -> list[InsurancePlan]:
+        """Ativos e inativos — usado pela tela de gestão (precisa ver e
+        poder reativar quem foi desativado; `list_active` continua sendo
+        o que alimenta seletores operacionais)."""
         result = await self.session.execute(select(InsurancePlan).order_by(InsurancePlan.display_name))
         return list(result.scalars().all())
 
     async def add(self, plan: InsurancePlan) -> InsurancePlan:
         self.session.add(plan)
+        await self.session.flush()
+        return plan
+
+    async def save(self, plan: InsurancePlan) -> InsurancePlan:
         await self.session.flush()
         return plan
 

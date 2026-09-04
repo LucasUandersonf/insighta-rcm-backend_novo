@@ -141,6 +141,11 @@ _POST_UPGRADE_SQL_FILES = [
     # 'professional' havia tempo. Ver DECISÃO completa no próprio .sql.
     # Auto-idempotente (DROP IF EXISTS + ADD) — roda em todo deploy.
     "013_fix_plan_tier_check.sql",
+    # is_active em insurance_companies/insurance_plans (achado do usuário:
+    # convênio/plano cadastrado errado não tinha nenhuma forma de sair dos
+    # seletores). Auto-idempotente (ADD COLUMN IF NOT EXISTS) — roda em
+    # todo deploy. Ver DECISÃO completa no próprio .sql.
+    "014_insurance_is_active.sql",
 ]
 
 _ROLES_SQL = """

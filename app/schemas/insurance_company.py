@@ -15,11 +15,14 @@ class InsuranceCompanyCreateRequest(BaseModel):
 
 
 class InsuranceCompanyUpdateRequest(BaseModel):
-    """PATCH — hoje só existe para corrigir o prazo de recurso depois de
-    conferir o contrato real (o cadastro inicial costuma vir sem esse
-    dado à mão)."""
+    """PATCH parcial — só aplica os campos explicitamente enviados (ver
+    DECISÃO em InsuranceCompanyService.update_company). `is_active=false`
+    é a forma de "excluir" uma operadora cadastrada errado/duplicada sem
+    quebrar as FKs de Contract/Appointment/Billing (ver DECISÃO no
+    model) — mesmo padrão de UserUpdateRequest/ProfessionalUpdateRequest."""
 
     default_appeal_deadline_days: int | None = Field(default=None, gt=0)
+    is_active: bool | None = None
 
 
 class InsuranceCompanyResponse(BaseModel):
@@ -27,6 +30,7 @@ class InsuranceCompanyResponse(BaseModel):
     name: str
     ans_registry: str | None
     default_appeal_deadline_days: int | None
+    is_active: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
