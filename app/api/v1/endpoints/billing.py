@@ -19,6 +19,7 @@ from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.guia_repository import GuiaRepository
 from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.billing_service import BillingService
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/billing", tags=["billing"])
 
 
 def _build_service(db: DbSession) -> BillingService:
-    return BillingService(BillingRepository(db), AppointmentRepository(db), ContractItemRepository(db))
+    return BillingService(BillingRepository(db), AppointmentRepository(db), ContractItemRepository(db), GuiaRepository(db))
 
 
 @router.post("", response_model=BillingResponse, status_code=201)

@@ -105,6 +105,7 @@ _SCHEMA_FILES = [
     "012_password_reset.sql",
     "013_fix_plan_tier_check.sql",
     "014_insurance_is_active.sql",
+    "015_billing_guia.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

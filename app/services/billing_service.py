@@ -21,6 +21,7 @@ from app.models.billing import Billing
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.guia_repository import GuiaRepository
 from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.denial_risk_engine import assess
@@ -32,10 +33,16 @@ class BillingService:
         billing_repo: BillingRepository,
         appointment_repo: AppointmentRepository,
         contract_item_repo: ContractItemRepository,
+        guia_repo: GuiaRepository | None = None,
     ):
         self.billing_repo = billing_repo
         self.appointment_repo = appointment_repo
         self.contract_item_repo = contract_item_repo
+        # Opcional por ora (default None) para não quebrar quem já
+        # instancia BillingService sem essa dependência (ver
+        # app/api/v1/endpoints/billing.py) — só é de fato usado quando
+        # guia_id vem preenchido no payload.
+        self.guia_repo = guia_repo
 
     async def create_billing(self, tenant_id: str, data: BillingCreateRequest) -> BillingResponse:
         # Mesma observação de sempre: se appointment_id pertencer a outro
@@ -47,6 +54,16 @@ class BillingService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Atendimento não encontrado neste tenant.",
             )
+
+        if data.guia_id is not None:
+            if self.guia_repo is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Serviço de faturamento não configurado para validar guia.",
+                )
+            guia = await self.guia_repo.get_by_id(data.guia_id)
+            if guia is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Guia não encontrada neste tenant.")
 
         contract_item = None
         if appointment.procedure_code:
@@ -63,6 +80,7 @@ class BillingService:
             appointment_id=data.appointment_id,
             insurance_plan_id=data.insurance_plan_id,
             charged_value=data.charged_value,
+            guia_id=data.guia_id,
             # Regra de negócio do briefing: risco alto barra o envio
             # automaticamente -> status "held_for_review" em vez de "pending".
             status="held_for_review" if risk.should_hold_for_review else "pending",

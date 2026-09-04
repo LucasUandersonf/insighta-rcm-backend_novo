@@ -146,6 +146,11 @@ _POST_UPGRADE_SQL_FILES = [
     # seletores). Auto-idempotente (ADD COLUMN IF NOT EXISTS) — roda em
     # todo deploy. Ver DECISÃO completa no próprio .sql.
     "014_insurance_is_active.sql",
+    # Guia (TISS) — Fase 1 do plano de adequação ao fluxo real de mercado
+    # (Agendamento -> Atendimento -> Faturamento). CREATE TABLE sem IF NOT
+    # EXISTS — precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE), não
+    # roda incondicionalmente em todo deploy.
+    "015_billing_guia.sql",
 ]
 
 _ROLES_SQL = """
@@ -255,6 +260,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "007_contract_intelligence.sql": "insurance_companies",
     "008_denial_appeals.sql": "denial_appeals",
     "009_report_recipients.sql": "report_recipients",
+    "015_billing_guia.sql": "guias",
 }
 
 

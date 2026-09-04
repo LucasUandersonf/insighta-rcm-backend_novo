@@ -35,4 +35,10 @@ class Billing(Base):
     # Recebimento) — ver app/repositories/analytics_repository.py.
     received_value: Mapped[float | None] = mapped_column(Numeric(12, 2))
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Guia TISS à qual este lançamento pertence (ver app/models/guia.py) —
+    # NULLABLE porque todo billing vindo da ingestão em massa hoje não
+    # tem noção de guia (o formato de arquivo ainda não carrega isso).
+    # Uma guia pode agrupar N linhas de billing (ex.: SADT com vários
+    # procedimentos na mesma guia).
+    guia_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.guias.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
