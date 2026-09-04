@@ -15,6 +15,7 @@ status muda (agendado -> confirmado -> atendido/faltou).
 """
 import io
 import uuid
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -207,3 +208,130 @@ async def test_default_data_type_is_faturamento_when_omitted(client, auth_header
 
     billing = await _fetch_one(admin_engine, "SELECT * FROM core.billing WHERE tenant_id = :t", t=tenant_a)
     assert billing is not None
+
+
+# =====================================================================
+# CORREÇÃO — motor de risco de falta agora roda na ingestão de Agenda
+# =====================================================================
+# Lacuna crítica reportada pelo usuário: `no_show_risk_level` só era
+# calculado na criação manual via POST /appointments — um agendamento
+# importado em lote pelo template de Agenda nunca tinha risco calculado,
+# o que zerava silenciosamente a "lista vermelha", a lista de "próximos
+# agendamentos em risco" e a contagem do relatório semanal por WhatsApp
+# para qualquer clínica que opera só por upload de arquivo. Estes testes
+# provam que o MESMO motor (já testado isoladamente em
+# tests/test_no_show_risk_engine.py e via HTTP em
+# tests/integration/test_no_show_risk.py) roda também neste caminho.
+
+_PATIENT_CPF = "12345678900"
+
+
+async def _insert_patient(admin_engine, tenant_id, cpf: str, full_name: str = "Paciente Teste") -> str:
+    patient_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.patients (id, tenant_id, full_name, cpf) VALUES (:id, :t, :n, :cpf)"),
+            {"id": patient_id, "t": tenant_id, "n": full_name, "cpf": cpf},
+        )
+    return patient_id
+
+
+async def _insert_past_appointment(admin_engine, tenant_id, patient_id, scheduled_at, status):
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) VALUES (:t, :p, :sched, :status)"),
+            {"t": tenant_id, "p": patient_id, "sched": scheduled_at, "status": status},
+        )
+
+
+def _next_matching_weekday_slot(target_python_weekday: int, hour: int) -> datetime:
+    """Próxima data futura que cai no mesmo dia da semana (convenção
+    Python: 0=segunda) e hora — mesmo tipo de cálculo de
+    test_no_show_risk.py, usado aqui pra garantir que o padrão
+    ESPECÍFICO (dia da semana + período) do motor seja acionado."""
+    days_ahead = (target_python_weekday - date.today().weekday()) % 7
+    target_date = date.today() + timedelta(days=days_ahead or 7)
+    return datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=hour)
+
+
+async def test_agenda_upload_computes_no_show_risk_on_create(client, auth_headers_a, admin_engine, tenant_a):
+    """3 faltas passadas na mesma combinação dia-da-semana+período ->
+    o agendamento importado via Agenda já nasce marcado como alto risco
+    — antes da correção, ficava sempre None/indeterminado."""
+    patient_id = await _insert_patient(admin_engine, tenant_a, _PATIENT_CPF)
+    for weeks_back in range(1, 4):
+        past = _next_matching_weekday_slot(0, 14) - timedelta(weeks=weeks_back)  # segunda-feira à tarde
+        await _insert_past_appointment(admin_engine, tenant_a, patient_id, past, "no_show")
+
+    next_monday = _next_matching_weekday_slot(0, 14)
+    row = (
+        f"{_PATIENT_CPF};Paciente Teste;;;;;;{next_monday.strftime('%d/%m/%Y')};14:00;;Agendado;;;AG-RISK-1"
+    )
+    response = await _upload_agenda(client, auth_headers_a, row)
+    assert response.status_code == 201, response.text
+    assert response.json()["error_row_count"] == 0
+
+    appointment = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-RISK-1"
+    )
+    assert appointment is not None
+    assert appointment["no_show_risk_level"] == "alto"
+    assert float(appointment["no_show_risk_score"]) == 1.0
+
+
+async def test_agenda_reimport_recalculates_no_show_risk_on_update(client, auth_headers_a, admin_engine, tenant_a):
+    """A primeira importação nasce indeterminado (paciente sem histórico
+    ainda) — depois que 3 faltas acontecem, uma REIMPORTAÇÃO do mesmo
+    agendamento (mesmo codigo_agendamento) precisa recalcular o risco,
+    não deixar o valor velho parado."""
+    next_monday = _next_matching_weekday_slot(0, 14)
+    row = f"{_PATIENT_CPF};Paciente Teste;;;;;;{next_monday.strftime('%d/%m/%Y')};14:00;;Agendado;;;AG-RISK-2"
+    first = await _upload_agenda(client, auth_headers_a, row, filename="agenda_risco_dia1.csv")
+    assert first.status_code == 201, first.text
+
+    appointment_before = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-RISK-2"
+    )
+    assert appointment_before["no_show_risk_level"] == "indeterminado"
+
+    patient = await _fetch_one(admin_engine, "SELECT id FROM core.patients WHERE tenant_id = :t AND cpf = :c", t=tenant_a, c=_PATIENT_CPF)
+    for weeks_back in range(1, 4):
+        past = next_monday - timedelta(weeks=weeks_back)
+        await _insert_past_appointment(admin_engine, tenant_a, patient["id"], past, "no_show")
+
+    second = await _upload_agenda(client, auth_headers_a, row, filename="agenda_risco_dia2.csv")
+    assert second.status_code == 201, second.text
+
+    appointment_after = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-RISK-2"
+    )
+    assert appointment_after["id"] == appointment_before["id"]  # continua sendo UM agendamento (upsert), não duplicou
+    assert appointment_after["no_show_risk_level"] == "alto"
+
+
+async def test_agenda_no_show_risk_respects_tenant_configured_thresholds(client, auth_headers_a, admin_engine, tenant_a):
+    """Um paciente com 20% de falta geral seria 'medio' pelo default do
+    módulo (10%-30%) — configurando um limiar baixo mais agressivo
+    (low_threshold=0.05) em Minha Clínica, o mesmo paciente vira 'alto'."""
+    patch_resp = await client.patch(
+        "/api/v1/tenant", json={"no_show_low_threshold": 0.05, "no_show_medium_threshold": 0.15}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+
+    patient_id = await _insert_patient(admin_engine, tenant_a, _PATIENT_CPF)
+    # 1 falta em 5 atendimentos passados (20%) — dias variados, sem bater
+    # no padrão específico de dia+período, só o geral.
+    base = datetime.now(timezone.utc) - timedelta(days=60)
+    statuses = ["completed", "completed", "completed", "completed", "no_show"]
+    for i, status in enumerate(statuses):
+        await _insert_past_appointment(admin_engine, tenant_a, patient_id, base + timedelta(days=i * 3), status)
+
+    future = datetime.now(timezone.utc) + timedelta(days=10)
+    row = f"{_PATIENT_CPF};Paciente Teste;;;;;;{future.strftime('%d/%m/%Y')};{future.strftime('%H:%M')};;Agendado;;;AG-RISK-3"
+    response = await _upload_agenda(client, auth_headers_a, row)
+    assert response.status_code == 201, response.text
+
+    appointment = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-RISK-3"
+    )
+    assert appointment["no_show_risk_level"] == "alto"  # 20% > medium_threshold configurado (0.15)

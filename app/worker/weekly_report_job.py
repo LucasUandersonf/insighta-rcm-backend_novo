@@ -21,23 +21,10 @@ from sqlalchemy import select
 
 from app.db.session import get_db_no_tenant, get_db_with_tenant
 from app.models.tenant import Tenant
-from app.repositories.capacity_repository import CapacityRepository
-from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
-from app.repositories.professional_repository import ProfessionalRepository
-from app.repositories.report_recipient_repository import ReportRecipientRepository
-from app.repositories.reporting_repository import ReportingRepository
-from app.services.report_data_service import ReportDataService
-from app.services.report_pdf_builder import build_weekly_report_pdf
-from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
+from app.services.report_send_service import send_report_to_recipients
+from app.services.whatsapp_client import WhatsAppClient
 
 logger = logging.getLogger("weekly_report_job")
-
-# Tipo de relatório usado para filtrar core.report_recipients (ver
-# DECISÃO em app/sql/009_report_recipients.sql) — único tipo que este
-# worker produz hoje. Um destinatário com `report_types` vazio recebe
-# este (e qualquer outro) tipo; um destinatário com lista não-vazia só
-# recebe este relatório se "weekly_summary" estiver nela.
-_REPORT_TYPE = "weekly_summary"
 
 
 def _last_full_week() -> tuple[date, date]:
@@ -58,7 +45,7 @@ async def _active_tenants() -> list[Tenant]:
     decidida aqui: qualquer tenant ativo é candidato, e
     `_process_tenant` simplesmente não envia nada (e não é contado como
     falha) se não houver nenhum destinatário elegível para
-    `_REPORT_TYPE`."""
+    `report_send_service.REPORT_TYPE`."""
     async for session in get_db_no_tenant():
         result = await session.execute(select(Tenant).where(Tenant.is_active.is_(True)))
         return list(result.scalars().all())
@@ -67,46 +54,19 @@ async def _active_tenants() -> list[Tenant]:
 
 async def _process_tenant(tenant: Tenant, period_start: date, period_end: date, client: WhatsAppClient) -> None:
     async for session in get_db_with_tenant(str(tenant.id)):
-        recipients = await ReportRecipientRepository(session).list_for_report_type(tenant.id, _REPORT_TYPE)
-        # Só destinatários com WhatsApp cadastrado — email fica para uma
-        # integração futura (não existe client de e-mail no sistema hoje,
-        # ver app/services/whatsapp_client.py: é a única integração de
-        # envio de relatório que já existe, e é isso que reaproveitamos).
-        whatsapp_recipients = [r for r in recipients if r.phone_whatsapp]
+        # client_factory devolve o MESMO client já construído (ver
+        # DECISÃO em send_report_to_recipients) — o cron quer falhar
+        # rápido UMA VEZ se as credenciais da plataforma faltarem (ver
+        # run() abaixo), não reconstruir/revalidar por tenant.
+        result = await send_report_to_recipients(session, tenant, period_start, period_end, lambda: client)
 
-        if not whatsapp_recipients:
-            logger.info("Nenhum destinatário de WhatsApp elegível para tenant=%s (%s) — pulando.", tenant.id, tenant.trade_name)
-            return
-
-        data_service = ReportDataService(
-            ReportingRepository(session),
-            ProfessionalRepository(session),
-            ProfessionalAvailabilityRepository(session),
-            CapacityRepository(session),
-        )
-        report_data = await data_service.build_weekly_report(tenant.trade_name, period_start, period_end)
-
-    pdf_bytes = build_weekly_report_pdf(report_data)
-    filename = f"relatorio_semanal_{period_start.isoformat()}_a_{period_end.isoformat()}.pdf"
-
-    # Fan-out: um destinatário com número inválido/expirado na Meta não
-    # pode travar o envio para os demais do MESMO tenant — mesmo
-    # princípio de isolamento de falha aplicado por tenant em run()
-    # abaixo, agora um nível mais fundo (por destinatário).
-    sent, failed = 0, 0
-    for recipient in whatsapp_recipients:
-        try:
-            await client.send_weekly_report(to_phone_number=recipient.phone_whatsapp, pdf_bytes=pdf_bytes, filename=filename)
-            sent += 1
-        except WhatsAppClientError:
-            failed += 1
-            logger.exception(
-                "Falha ao enviar relatório via WhatsApp: tenant=%s recipient=%s", tenant.id, recipient.id
-            )
+    if result.recipients_checked == 0:
+        logger.info("Nenhum destinatário de WhatsApp elegível para tenant=%s (%s) — pulando.", tenant.id, tenant.trade_name)
+        return
 
     logger.info(
         "Relatório semanal processado: tenant=%s (%s) — %d enviado(s), %d falha(s) de %d destinatário(s).",
-        tenant.id, tenant.trade_name, sent, failed, len(whatsapp_recipients),
+        tenant.id, tenant.trade_name, result.sent, result.failed, result.recipients_checked,
     )
 
 

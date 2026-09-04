@@ -46,6 +46,7 @@ from app.schemas.analytics import (
     SmartInsightsResponse,
     UpcomingRiskAppointmentItem,
     WeekdayBucket,
+    WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriodInput, generate_insights
@@ -144,6 +145,7 @@ class AnalyticsService:
         self.professional_repo = professional_repo
         self.appeal_repo = appeal_repo
         self.tenant_repo = tenant_repo
+        self.availability_repo = availability_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -287,6 +289,37 @@ class AnalyticsService:
             for weekday, count in sorted(weekday_histogram.items(), key=lambda item: item[0])
         ]
 
+        # Taxa de falta por dia da semana — não confundir com
+        # weekday_buckets acima (volume). Alimenta o mesmo gráfico de
+        # apoio, agora para o insight textual "quinta tem taxa de falta
+        # X%" (ver smart_insights_engine.py::_weekday_no_show_rate_insights).
+        weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
+        weekday_no_show_buckets = [
+            WeekdayNoShowRateBucket(
+                weekday=weekday,
+                no_show_count=no_show,
+                total_appointments=total,
+                no_show_rate=(no_show / total) if total > 0 else None,
+            )
+            for weekday, (no_show, total) in sorted(weekday_no_show_counts.items(), key=lambda item: item[0])
+        ]
+
+        # Quantos profissionais ativos ainda não têm NENHUM bloco de grade
+        # cadastrado — checagem INDEPENDENTE da janela de período pedida
+        # de propósito: `available_minutes <= 0` (usado por
+        # _idle_capacity_totals para "sem capacidade instalada, exclui da
+        # conta") also é 0 para um profissional que TEM grade mas ela só
+        # cai em dias fora da janela filtrada (ex: só atende terça, e o
+        # dashboard está filtrado numa semana sem nenhuma terça) — usar
+        # esse sinal aqui contaria falso positivo. Este número existe pra
+        # essa lacuna parar de ser silenciosa (ver DECISÃO no schema) —
+        # todo profissional auto-criado por upload de arquivo (Faturamento
+        # OU Agenda) nasce sem grade nenhuma, em qualquer janela.
+        availability_by_professional = await self.availability_repo.list_by_professionals([p.id for p in professionals])
+        professionals_without_availability_count = sum(
+            1 for blocks in availability_by_professional.values() if not blocks
+        )
+
         red_list = await self.analytics_repo.top_no_show_patients(
             date_from, date_to, min_sample=RED_LIST_MIN_SAMPLE, limit=RED_LIST_LIMIT
         )
@@ -307,6 +340,7 @@ class AnalyticsService:
             professionals=professional_metrics,
             peak_hours=peak_hours,
             weekday_histogram=weekday_buckets,
+            weekday_no_show_rates=weekday_no_show_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
             patient_no_show_ranking=[
@@ -330,6 +364,7 @@ class AnalyticsService:
             ],
             total_idle_minutes=idle_minutes,
             estimated_revenue_lost_to_idle_capacity=estimated_revenue_lost_to_idle_capacity,
+            professionals_without_availability_count=professionals_without_availability_count,
         )
 
     async def get_plan_loss_ranking(self, date_from: date, date_to: date) -> PlanLossRankingResponse:
@@ -417,6 +452,7 @@ class AnalyticsService:
         # `current`).
         risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
+        weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
 
@@ -438,6 +474,7 @@ class AnalyticsService:
             high_risk_no_show_count=risk_breakdown.get("alto", 0),
             appeals_due_soon_count=appeals_due_soon,
             weekday_appointment_counts=weekday_histogram,
+            weekday_no_show_counts=weekday_no_show_counts,
             denial_risk_pct=denial_risk_pct,
             denial_at_risk_value=denial_at_risk_value,
             annual_revenue_goal=annual_goal_context.annual_revenue_goal if annual_goal_context else None,

@@ -7,6 +7,7 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
 from app.services.appointment_service import AppointmentService
 
@@ -16,7 +17,9 @@ _CAN_WRITE = ("atendimento", "admin", "owner")
 
 
 def _build_service(db: DbSession) -> AppointmentService:
-    return AppointmentService(AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db), LocalRepository(db))
+    return AppointmentService(
+        AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db), LocalRepository(db), TenantRepository(db)
+    )
 
 
 @router.post("", response_model=AppointmentResponse, status_code=201)

@@ -110,6 +110,7 @@ _SCHEMA_FILES = [
     "017_glosas.sql",
     "018_locais_tipo_paciente.sql",
     "019_agenda_ingestion.sql",
+    "020_no_show_thresholds.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

@@ -51,6 +51,7 @@ from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.normalization_service import NormalizationService
 from app.worker.parsers import agenda_csv_parser, csv_parser, json_parser, xml_parser
 
@@ -193,6 +194,7 @@ async def process_uploaded_file(
         billing_repo=BillingRepository(db),
         local_repo=LocalRepository(db),
         guia_repo=GuiaRepository(db),
+        tenant_repo=TenantRepository(db),
     )
     if data_type == "agenda":
         summary = await normalization_service.normalize_agenda_rows(tenant_id, saved_rows, source_file=s3_key)

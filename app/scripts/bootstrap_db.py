@@ -168,6 +168,10 @@ _POST_UPGRADE_SQL_FILES = [
     # EXISTS + DROP/ADD CONSTRAINT) — roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
     "019_agenda_ingestion.sql",
+    # Limiares de risco de falta configuráveis por tenant. Auto-idempotente
+    # (ADD COLUMN IF NOT EXISTS) — roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
+    "020_no_show_thresholds.sql",
 ]
 
 _ROLES_SQL = """

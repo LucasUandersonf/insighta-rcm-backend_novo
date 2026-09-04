@@ -35,6 +35,7 @@ from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.schemas.ingestion import (
     IngestionFileResponse,
     RejectedRowResponse,
@@ -163,6 +164,7 @@ async def resolve_insurance_plan(
         billing_repo=BillingRepository(db),
         local_repo=LocalRepository(db),
         guia_repo=GuiaRepository(db),
+        tenant_repo=TenantRepository(db),
     )
     summary = await normalization_service.resolve_unknown_insurance_plan(
         tenant_id=UUID(current_user.tenant_id),

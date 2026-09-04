@@ -30,24 +30,51 @@ uma afirmação de confiança que os dados não sustentam — o mesmo cuidado
 que já tomamos no motor de risco de glosa (nunca inventar confiança que
 a evidência não dá).
 
-CALIBRAÇÃO DOS LIMIARES (ajustável)
+CALIBRAÇÃO DOS LIMIARES — agora configurável por tenant
 -------------------------------------------------------------------------
+Valores de PARTIDA (usados quando o tenant não configurou nada em "Minha
+Clínica" — ver Tenant.no_show_low_threshold/no_show_medium_threshold):
+
 < 10% de falta histórica  -> baixo
 10% a 30%                 -> médio
 > 30%                     -> alto
-São valores de partida razoáveis para um MVP, não uma calibração
-estatística validada com dado real de clínica — o primeiro ponto a
-revisar assim que houver volume de agendamentos suficiente para analisar
-a distribuição real de faltas do produto.
+
+Estes defaults nunca foram uma calibração estatística validada com dado
+real — eram um "chute" razoável de MVP. Cada clínica tem um perfil de
+falta muito diferente por especialidade (odontologia estética costuma
+faltar bem menos que psicologia/psiquiatria, por exemplo), então
+`assess()` aceita `low_threshold`/`medium_threshold` como parâmetros
+OPCIONAIS — quem chama (appointment_service.py,
+normalization_service.py) busca o valor configurado do tenant e passa
+aqui; sem configuração, caem nos defaults acima. A função continua pura
+(sem tocar banco), só ganhou dois parâmetros com default.
 """
 from dataclasses import dataclass
 from datetime import datetime
 
 MIN_SPECIFIC_SAMPLES = 3
-_LOW_THRESHOLD = 0.10
-_MEDIUM_THRESHOLD = 0.30
+DEFAULT_LOW_THRESHOLD = 0.10
+DEFAULT_MEDIUM_THRESHOLD = 0.30
 
 _COMPLETED_OR_NO_SHOW = ("completed", "no_show")
+
+
+def resolve_thresholds(tenant) -> tuple[float, float]:
+    """Duck-typed de propósito (não importa app.models.tenant.Tenant —
+    este módulo nunca toca banco/ORM): aceita qualquer objeto com os
+    atributos `no_show_low_threshold`/`no_show_medium_threshold`
+    (Decimal/float/None), OU `None` (tenant não encontrado — não deveria
+    acontecer para um tenant_id de JWT válido, mas defensivo é melhor que
+    AttributeError). Centraliza a regra "None -> default do módulo" para
+    os dois chamadores (appointment_service.py, normalization_service.py)
+    nunca divergirem nessa conversão."""
+    if tenant is None:
+        return DEFAULT_LOW_THRESHOLD, DEFAULT_MEDIUM_THRESHOLD
+    low = float(tenant.no_show_low_threshold) if tenant.no_show_low_threshold is not None else DEFAULT_LOW_THRESHOLD
+    medium = (
+        float(tenant.no_show_medium_threshold) if tenant.no_show_medium_threshold is not None else DEFAULT_MEDIUM_THRESHOLD
+    )
+    return low, medium
 
 
 @dataclass
@@ -71,15 +98,21 @@ def _weekday_pt(dt: datetime) -> int:
     return (dt.weekday() + 1) % 7
 
 
-def _classify(rate: float) -> str:
-    if rate < _LOW_THRESHOLD:
+def _classify(rate: float, low_threshold: float, medium_threshold: float) -> str:
+    if rate < low_threshold:
         return "baixo"
-    if rate < _MEDIUM_THRESHOLD:
+    if rate < medium_threshold:
         return "medio"
     return "alto"
 
 
-def assess(past_appointments: list, candidate_scheduled_at: datetime) -> NoShowAssessment:
+def assess(
+    past_appointments: list,
+    candidate_scheduled_at: datetime,
+    *,
+    low_threshold: float = DEFAULT_LOW_THRESHOLD,
+    medium_threshold: float = DEFAULT_MEDIUM_THRESHOLD,
+) -> NoShowAssessment:
     """
     `past_appointments` deve conter apenas atendimentos JÁ OCORRIDOS do
     paciente (status 'completed' ou 'no_show'), anteriores a
@@ -88,6 +121,11 @@ def assess(past_appointments: list, candidate_scheduled_at: datetime) -> NoShowA
     faltar sem avisar, e misturar os dois na mesma taxa distorceria o
     sinal — um paciente que sempre cancela educadamente não é um paciente
     de risco de falta.
+
+    `low_threshold`/`medium_threshold` — ver DECISÃO "agora configurável
+    por tenant" no topo do módulo. Quem chama busca o valor configurado
+    em Tenant (None = usar o default do módulo) antes de invocar esta
+    função; ela mesma nunca toca banco.
     """
     relevant = [a for a in past_appointments if a.status in _COMPLETED_OR_NO_SHOW]
     total = len(relevant)
@@ -106,8 +144,18 @@ def assess(past_appointments: list, candidate_scheduled_at: datetime) -> NoShowA
     if len(specific) >= MIN_SPECIFIC_SAMPLES:
         no_show_count = sum(1 for a in specific if a.status == "no_show")
         rate = no_show_count / len(specific)
-        return NoShowAssessment(risk_level=_classify(rate), score=rate, sample_size=len(specific), used_specific_pattern=True)
+        return NoShowAssessment(
+            risk_level=_classify(rate, low_threshold, medium_threshold),
+            score=rate,
+            sample_size=len(specific),
+            used_specific_pattern=True,
+        )
 
     no_show_count = sum(1 for a in relevant if a.status == "no_show")
     rate = no_show_count / total
-    return NoShowAssessment(risk_level=_classify(rate), score=rate, sample_size=total, used_specific_pattern=False)
+    return NoShowAssessment(
+        risk_level=_classify(rate, low_threshold, medium_threshold),
+        score=rate,
+        sample_size=total,
+        used_specific_pattern=False,
+    )

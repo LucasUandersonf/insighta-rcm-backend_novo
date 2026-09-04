@@ -43,7 +43,7 @@ conexão/transação da requisição.
 """
 from datetime import date, datetime, time, timedelta, timezone
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
@@ -427,6 +427,39 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {int(weekday): count for weekday, count in result.all()}
+
+    async def weekday_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Taxa de falta por dia da semana — diferente de
+        `appointment_weekday_histogram` (VOLUME bruto, inclui qualquer
+        status não cancelado), aqui só entram atendimentos RESOLVIDOS
+        (status 'completed' ou 'no_show' — mesmo filtro
+        `_COMPLETED_OR_NO_SHOW` de no_show_risk_engine.py): um
+        agendamento ainda 'scheduled' não tem desfecho conhecido, não
+        deveria contar nem a favor nem contra a taxa de um dia
+        específico, e um 'cancelled' é um comportamento diferente de
+        faltar sem avisar (mesmo raciocínio já documentado no motor).
+
+        Retorna {weekday: (no_show_count, total_relevante)} — a divisão
+        (e a decisão de tratar total=0 como "sem amostra", não como
+        0.0%) fica para o service, mesmo princípio de "None sobre zero"
+        usado no resto do produto.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, no_show_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show")),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/

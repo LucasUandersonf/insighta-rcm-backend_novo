@@ -40,3 +40,49 @@ async def test_list_available_plans(client, auth_headers_a):
     resp = await client.get("/api/v1/tenant/plans/available", headers=auth_headers_a)
     assert resp.status_code == 200
     assert "starter" in resp.json()
+
+
+async def test_no_show_thresholds_default_to_null(client, auth_headers_a):
+    """Sem configuração, o motor usa o default do módulo (ver
+    no_show_risk_engine.DEFAULT_LOW_THRESHOLD/DEFAULT_MEDIUM_THRESHOLD) —
+    NULL aqui, nunca um valor inventado."""
+    resp = await client.get("/api/v1/tenant", headers=auth_headers_a)
+    assert resp.status_code == 200
+    assert resp.json()["no_show_low_threshold"] is None
+    assert resp.json()["no_show_medium_threshold"] is None
+
+
+async def test_owner_can_configure_no_show_thresholds(client, auth_headers_a):
+    resp = await client.patch(
+        "/api/v1/tenant",
+        json={"no_show_low_threshold": 0.05, "no_show_medium_threshold": 0.20},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["no_show_low_threshold"] == 0.05
+    assert resp.json()["no_show_medium_threshold"] == 0.20
+
+
+async def test_low_threshold_must_be_below_medium_in_a_single_patch(client, auth_headers_a):
+    resp = await client.patch(
+        "/api/v1/tenant",
+        json={"no_show_low_threshold": 0.40, "no_show_medium_threshold": 0.30},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422
+
+
+async def test_low_threshold_validated_against_already_saved_medium(client, auth_headers_a):
+    """low < medium precisa valer mesmo quando só UM dos dois campos é
+    enviado num PATCH — o resultante (novo low, medium já salvo) é quem
+    importa, não só os campos deste PATCH isoladamente."""
+    first = await client.patch("/api/v1/tenant", json={"no_show_medium_threshold": 0.15}, headers=auth_headers_a)
+    assert first.status_code == 200, first.text
+
+    second = await client.patch("/api/v1/tenant", json={"no_show_low_threshold": 0.20}, headers=auth_headers_a)
+    assert second.status_code == 422
+
+
+async def test_no_show_threshold_out_of_range_is_rejected(client, auth_headers_a):
+    resp = await client.patch("/api/v1/tenant", json={"no_show_low_threshold": 1.5}, headers=auth_headers_a)
+    assert resp.status_code == 422

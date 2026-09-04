@@ -573,3 +573,59 @@ async def test_denial_risk_distribution_counts_by_level(client, auth_headers_a, 
     counts = {item["level"]: item["count"] for item in body["items"]}
     assert counts.get("high") == 1
     assert body["total_reviewed"] == sum(counts.values())
+
+
+async def test_agenda_metrics_reports_no_show_rate_per_weekday(client, auth_headers_a, admin_engine, tenant_a):
+    """Diferente de weekday_histogram (volume bruto), weekday_no_show_rates
+    responde diretamente 'segunda tem taxa de falta X%' — só conta
+    atendimentos RESOLVIDOS (completed/no_show), nunca 'scheduled'."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Taxa Semanal"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    days_until_monday = (0 - date.today().weekday()) % 7 or 7
+    target_monday = date.today() + timedelta(days=days_until_monday)  # garante Python weekday()==0 -> Postgres DOW==1
+    monday = datetime.combine(target_monday, datetime.min.time(), tzinfo=timezone.utc)
+
+    async with admin_engine.begin() as conn:
+        for status in ("no_show", "completed", "completed"):
+            await conn.execute(
+                text("INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) VALUES (:t, :p, :dt, :s)"),
+                {"t": tenant_a, "p": patient_id, "dt": monday, "s": status},
+            )
+        # Um 'scheduled' no mesmo dia NÃO deve entrar na conta (sem desfecho ainda).
+        await conn.execute(
+            text("INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) VALUES (:t, :p, :dt, 'scheduled')"),
+            {"t": tenant_a, "p": patient_id, "dt": monday},
+        )
+
+    response = await client.get(
+        f"/api/v1/analytics/agenda-metrics?date_from={monday.date().isoformat()}&date_to={monday.date().isoformat()}",
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 200
+    bucket = next(b for b in response.json()["weekday_no_show_rates"] if b["weekday"] == 1)  # segunda (Python weekday 0 -> DOW 1)
+    assert bucket["no_show_count"] == 1
+    assert bucket["total_appointments"] == 3  # scheduled excluído
+    assert round(bucket["no_show_rate"], 4) == round(1 / 3, 4)
+
+
+async def test_agenda_metrics_counts_professionals_without_availability(client, auth_headers_a, admin_engine, tenant_a):
+    """Todo profissional auto-criado por upload de arquivo nasce sem
+    grade — este contador existe pra essa lacuna parar de ser
+    silenciosa (ver DECISÃO em AgendaMetricsResponse)."""
+    with_grade = await client.post(
+        "/api/v1/professionals",
+        json={"full_name": "Dr. Com Grade", "availability": [{"weekday": 1, "start_time": "08:00:00", "end_time": "12:00:00"}]},
+        headers=auth_headers_a,
+    )
+    assert with_grade.status_code == 201
+    without_grade = await client.post(
+        "/api/v1/professionals", json={"full_name": "Dr. Sem Grade", "availability": []}, headers=auth_headers_a
+    )
+    assert without_grade.status_code == 201
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-metrics?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    assert response.json()["professionals_without_availability_count"] == 1

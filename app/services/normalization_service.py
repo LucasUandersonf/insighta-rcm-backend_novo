@@ -53,7 +53,10 @@ from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.denial_risk_engine import assess
+from app.services.no_show_risk_engine import assess as assess_no_show_risk
+from app.services.no_show_risk_engine import resolve_thresholds
 from app.worker.schemas import RawAppointmentRow, RawBillingRow
 
 
@@ -77,6 +80,7 @@ class NormalizationService:
         billing_repo: BillingRepository,
         local_repo: LocalRepository,
         guia_repo: GuiaRepository,
+        tenant_repo: TenantRepository,
     ):
         self.patient_repo = patient_repo
         self.professional_repo = professional_repo
@@ -86,6 +90,7 @@ class NormalizationService:
         self.billing_repo = billing_repo
         self.local_repo = local_repo
         self.guia_repo = guia_repo
+        self.tenant_repo = tenant_repo
 
     async def _get_or_create_patient(self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow) -> Patient:
         if row.patient_cpf:
@@ -287,7 +292,11 @@ class NormalizationService:
         return summary
 
     async def _get_or_create_or_update_appointment_from_agenda(
-        self, tenant_id: uuid.UUID, row: RawAppointmentRow, insurance_plan_id: uuid.UUID | None
+        self,
+        tenant_id: uuid.UUID,
+        row: RawAppointmentRow,
+        insurance_plan_id: uuid.UUID | None,
+        no_show_thresholds: tuple[float, float],
     ) -> Appointment:
         """
         UPSERT por `external_id` (ver DECISÃO em
@@ -302,10 +311,31 @@ class NormalizationService:
         agendamento novo, nunca tenta casar por outro critério — não há
         um substituto seguro (paciente+data não identifica um agendamento
         único quando o mesmo paciente tem duas consultas no mesmo dia).
+
+        CORREÇÃO (lacuna crítica reportada pelo usuário) — antes desta
+        mudança, `no_show_risk_level`/`no_show_risk_score` só eram
+        calculados na criação manual via POST /appointments
+        (appointment_service.py); um agendamento importado em lote por
+        este template NUNCA tinha risco calculado. Consequência prática:
+        para qualquer clínica que opera só por upload de arquivo (o
+        fluxo principal de integração do produto), a "lista vermelha",
+        a lista de "próximos agendamentos em risco" e a contagem no
+        relatório semanal por WhatsApp ficavam SEMPRE zeradas — não por
+        ausência de risco real, mas porque o número nunca era calculado.
+        Mesmo motor, mesma regra do caminho manual: olha só o histórico
+        ANTERIOR ao horário desta linha (nunca o próprio registro sendo
+        criado/atualizado, nunca dado futuro). Recalculado em toda
+        reimportação (create E update) — barato (mesma query indexada de
+        sempre) e mantém o score fresco conforme mais histórico do
+        paciente se acumula entre uma importação e outra.
         """
         patient = await self._get_or_create_patient(tenant_id, row)
         professional = await self._get_or_create_professional(tenant_id, row)
         local = await self._get_or_create_local(tenant_id, row)
+
+        history = await self.appointment_repo.list_past_by_patient(patient.id, before=row.scheduled_at)
+        low_threshold, medium_threshold = no_show_thresholds
+        risk = assess_no_show_risk(history, row.scheduled_at, low_threshold=low_threshold, medium_threshold=medium_threshold)
 
         existing = await self.appointment_repo.get_by_external_id(tenant_id, row.external_id) if row.external_id else None
         if existing is not None:
@@ -319,6 +349,8 @@ class NormalizationService:
             existing.status = row.status
             existing.procedure_code = row.procedure_code
             existing.cid_code = row.cid_code
+            existing.no_show_risk_level = risk.risk_level
+            existing.no_show_risk_score = risk.score
             return await self.appointment_repo.save(existing)
 
         return await self.appointment_repo.add(
@@ -336,11 +368,19 @@ class NormalizationService:
                 procedure_code=row.procedure_code,
                 cid_code=row.cid_code,
                 external_id=row.external_id,
+                no_show_risk_level=risk.risk_level,
+                no_show_risk_score=risk.score,
                 created_by=None,  # sem usuário humano por trás — veio de importação automática
             )
         )
 
-    async def normalize_agenda_row(self, tenant_id: uuid.UUID, raw_row: IngestionRawRow, source_file: str | None) -> bool:
+    async def normalize_agenda_row(
+        self,
+        tenant_id: uuid.UUID,
+        raw_row: IngestionRawRow,
+        source_file: str | None,
+        no_show_thresholds: tuple[float, float] | None = None,
+    ) -> bool:
         """
         Equivalente a `normalize_row`, mas para o Template de Integração
         "Agenda": promove a linha crua para um Appointment (UPSERT — ver
@@ -348,6 +388,12 @@ class NormalizationService:
         Billing/Guia — uma linha de Agenda é um agendamento, não uma
         cobrança (ver docstring do módulo app/worker/schemas.py sobre a
         diferença entre os dois templates).
+
+        `no_show_thresholds` é opcional: quando chamado avulso (fora de
+        `normalize_agenda_rows`), busca o valor configurado do tenant
+        sozinho; o caminho em lote passa o valor já resolvido UMA VEZ
+        para o arquivo inteiro, evitando 1 SELECT em core.tenants por
+        linha (ver `normalize_agenda_rows`).
         """
         if raw_row.status != "pending_normalization":
             return False
@@ -369,7 +415,10 @@ class NormalizationService:
                 tenant_id=tenant_id, plan_id=plan.id, raw_name=row.insurance_plan_raw_name, source_file=source_file
             )
 
-        await self._get_or_create_or_update_appointment_from_agenda(tenant_id, row, plan_id)
+        if no_show_thresholds is None:
+            no_show_thresholds = resolve_thresholds(await self.tenant_repo.get_by_id(tenant_id))
+
+        await self._get_or_create_or_update_appointment_from_agenda(tenant_id, row, plan_id, no_show_thresholds)
 
         raw_row.status = "normalized"
         return True
@@ -379,11 +428,14 @@ class NormalizationService:
     ) -> NormalizationSummary:
         """Equivalente a `normalize_rows`, chamando `normalize_agenda_row`
         por linha — mesmo cuidado de contagem documentado lá (uma linha
-        já rejeitada na Etapa 1 não é contada de novo aqui)."""
+        já rejeitada na Etapa 1 não é contada de novo aqui). Busca os
+        limiares de risco do tenant UMA VEZ para o arquivo inteiro (não
+        por linha) — ver docstring de `normalize_agenda_row`."""
+        no_show_thresholds = resolve_thresholds(await self.tenant_repo.get_by_id(tenant_id))
         summary = NormalizationSummary()
         for raw_row in raw_rows:
             was_pending = raw_row.status == "pending_normalization"
-            promoted = await self.normalize_agenda_row(tenant_id, raw_row, source_file)
+            promoted = await self.normalize_agenda_row(tenant_id, raw_row, source_file, no_show_thresholds=no_show_thresholds)
             if promoted:
                 summary.normalized += 1
             elif was_pending and raw_row.status == "rejected":
