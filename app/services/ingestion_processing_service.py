@@ -45,8 +45,10 @@ from app.models.ingestion_file import IngestionFile
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.guia_repository import GuiaRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
+from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.services.normalization_service import NormalizationService
@@ -172,6 +174,8 @@ async def process_uploaded_file(
         contract_item_repo=ContractItemRepository(db),
         insurance_plan_repo=InsurancePlanRepository(db),
         billing_repo=BillingRepository(db),
+        local_repo=LocalRepository(db),
+        guia_repo=GuiaRepository(db),
     )
     summary = await normalization_service.normalize_rows(tenant_id, saved_rows, source_file=s3_key)
 

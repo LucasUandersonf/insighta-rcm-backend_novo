@@ -15,6 +15,16 @@ class GuiaRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_numero(self, insurance_plan_id: uuid.UUID, numero: str) -> Guia | None:
+        """Usado pela normalização de ingestão (template de Faturamento)
+        para agrupar várias linhas com o MESMO número de guia num único
+        registro de Guia — o caso real de uma SADT com vários
+        procedimentos na mesma guia (ver DECISÃO em
+        app/sql/015_billing_guia.sql)."""
+        stmt = select(Guia).where(Guia.insurance_plan_id == insurance_plan_id, Guia.numero == numero)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_paginated(self, *, limit: int, offset: int) -> tuple[list[Guia], int]:
         items_stmt = select(Guia).order_by(Guia.created_at.desc()).limit(limit).offset(offset)
         items = list((await self.session.execute(items_stmt)).scalars().all())

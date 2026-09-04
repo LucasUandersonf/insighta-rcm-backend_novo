@@ -66,6 +66,8 @@ def _service(professional_repo: _FakeProfessionalRepo) -> NormalizationService:
         contract_item_repo=None,  # type: ignore[arg-type]
         insurance_plan_repo=None,  # type: ignore[arg-type]
         billing_repo=None,  # type: ignore[arg-type]
+        local_repo=None,  # type: ignore[arg-type]
+        guia_repo=None,  # type: ignore[arg-type]
     )
 
 

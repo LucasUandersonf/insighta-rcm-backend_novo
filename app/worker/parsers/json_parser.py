@@ -39,6 +39,13 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                 "cid_code": item.get("cid"),
                 "charged_value": item.get("valor_cobrado"),
                 "service_date": item.get("data_atendimento"),  # pydantic já converte "aaaa-mm-dd" em date
+                # Campos do template estendido (Fase de "Templates de
+                # Integração") — mesma chave usada no CSV, também opcionais.
+                "local_name": item.get("local_atendimento") or None,
+                "tipo_paciente": item.get("tipo_paciente") or None,
+                "guia_tipo": item.get("guia_tipo") or None,
+                "guia_numero": item.get("guia_numero") or None,
+                "guia_senha": item.get("guia_senha") or None,
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))
