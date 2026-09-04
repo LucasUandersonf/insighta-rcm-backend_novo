@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
@@ -14,14 +15,17 @@ router = APIRouter(prefix="/appointments", tags=["appointments"])
 _CAN_WRITE = ("atendimento", "admin", "owner")
 
 
+def _build_service(db: DbSession) -> AppointmentService:
+    return AppointmentService(AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db), LocalRepository(db))
+
+
 @router.post("", response_model=AppointmentResponse, status_code=201)
 async def create_appointment(
     payload: AppointmentCreateRequest,
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
 ) -> AppointmentResponse:
-    service = AppointmentService(AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db))
-    return await service.create_appointment(current_user.tenant_id, current_user.id, payload)
+    return await _build_service(db).create_appointment(current_user.tenant_id, current_user.id, payload)
 
 
 @router.patch("/{appointment_id}", response_model=AppointmentResponse)
@@ -37,8 +41,7 @@ async def update_appointment(
     confirmar o atendimento e só então informar procedimento/CID — ver
     DECISÃO completa em AppointmentUpdateRequest (app/schemas/appointment.py).
     """
-    service = AppointmentService(AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db))
-    return await service.update_appointment(appointment_id, payload)
+    return await _build_service(db).update_appointment(appointment_id, payload)
 
 
 @router.get("/by-patient/{patient_id}", response_model=list[AppointmentResponse])
@@ -47,5 +50,4 @@ async def list_appointments_by_patient(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
 ) -> list[AppointmentResponse]:
-    service = AppointmentService(AppointmentRepository(db), PatientRepository(db), ProfessionalRepository(db))
-    return await service.list_by_patient(patient_id)
+    return await _build_service(db).list_by_patient(patient_id)

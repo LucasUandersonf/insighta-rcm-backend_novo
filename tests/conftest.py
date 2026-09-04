@@ -108,6 +108,7 @@ _SCHEMA_FILES = [
     "015_billing_guia.sql",
     "016_lotes_faturas.sql",
     "017_glosas.sql",
+    "018_locais_tipo_paciente.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

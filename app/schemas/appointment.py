@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.models.appointment import TIPO_PACIENTE_VALUES
+
 # Vocabulário FECHADO — os únicos 4 valores que no_show_risk_engine.py,
 # capacity_repository.py e analytics_repository.py já sabem interpretar
 # (ver grep de literais "scheduled"/"completed"/"no_show"/"cancelled" no
@@ -14,15 +16,29 @@ from pydantic import BaseModel, Field, field_validator
 # como "confirmado").
 _KNOWN_STATUSES = ("scheduled", "completed", "no_show", "cancelled")
 
+# TIPO_PACIENTE_VALUES (Ambulatorial/Internação/Pronto-Socorro) — Fase 4
+# do plano de adequação ao fluxo real de mercado, vocabulário FECHADO e
+# universal entre clínicas (confirmado idêntico em 3 ERPs pesquisados) —
+# ver DECISÃO em app/models/appointment.py.
+
 
 class AppointmentCreateRequest(BaseModel):
     patient_id: UUID
     insurance_plan_id: UUID | None = None
     professional_id: UUID | None = None
+    local_id: UUID | None = None
+    tipo_paciente: str | None = None
     scheduled_at: datetime
     duration_minutes: int | None = Field(default=None, gt=0)
     procedure_code: str | None = None
     cid_code: str | None = None
+
+    @field_validator("tipo_paciente")
+    @classmethod
+    def validate_tipo_paciente(cls, v: str | None) -> str | None:
+        if v is not None and v not in TIPO_PACIENTE_VALUES:
+            raise ValueError(f"tipo_paciente deve ser um de: {', '.join(TIPO_PACIENTE_VALUES)}")
+        return v
 
 
 class AppointmentUpdateRequest(BaseModel):
@@ -64,6 +80,8 @@ class AppointmentUpdateRequest(BaseModel):
     procedure_code: str | None = None
     cid_code: str | None = None
     duration_minutes: int | None = Field(default=None, gt=0)
+    local_id: UUID | None = None
+    tipo_paciente: str | None = None
 
     @field_validator("status")
     @classmethod
@@ -72,12 +90,21 @@ class AppointmentUpdateRequest(BaseModel):
             raise ValueError(f"status deve ser um de: {', '.join(_KNOWN_STATUSES)}")
         return v
 
+    @field_validator("tipo_paciente")
+    @classmethod
+    def validate_tipo_paciente(cls, v: str | None) -> str | None:
+        if v is not None and v not in TIPO_PACIENTE_VALUES:
+            raise ValueError(f"tipo_paciente deve ser um de: {', '.join(TIPO_PACIENTE_VALUES)}")
+        return v
+
 
 class AppointmentResponse(BaseModel):
     id: UUID
     patient_id: UUID
     insurance_plan_id: UUID | None
     professional_id: UUID | None
+    local_id: UUID | None
+    tipo_paciente: str | None
     scheduled_at: datetime
     duration_minutes: int | None
     status: str

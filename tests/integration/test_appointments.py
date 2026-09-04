@@ -107,3 +107,62 @@ async def test_patch_partial_update_does_not_touch_other_fields(client, auth_hea
     assert updated["status"] == "completed"
     assert updated["procedure_code"] == "10101012"  # não mudou
     assert updated["cid_code"] == "J06"  # não mudou
+
+
+# --- Fase 4: Local de Atendimento + Tipo de Paciente ---
+
+
+async def test_create_appointment_with_local_and_tipo_paciente(client, auth_headers_a):
+    local_resp = await client.post("/api/v1/locais", json={"nome": "Pronto Socorro Adulto"}, headers=auth_headers_a)
+    local_id = local_resp.json()["id"]
+
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(
+        client, auth_headers_a, patient_id, local_id=local_id, tipo_paciente="pronto_socorro"
+    )
+    assert appointment["local_id"] == local_id
+    assert appointment["tipo_paciente"] == "pronto_socorro"
+
+
+async def test_create_appointment_rejects_unknown_tipo_paciente(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    payload = {
+        "patient_id": patient_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "tipo_paciente": "internado",
+    }
+    resp = await client.post("/api/v1/appointments", json=payload, headers=auth_headers_a)
+    assert resp.status_code == 422
+
+
+async def test_create_appointment_rejects_unknown_local(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    payload = {
+        "patient_id": patient_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "local_id": "00000000-0000-0000-0000-000000000000",
+    }
+    resp = await client.post("/api/v1/appointments", json=payload, headers=auth_headers_a)
+    assert resp.status_code == 404
+
+
+async def test_patch_fills_in_local_and_tipo_paciente_later(client, auth_headers_a):
+    """Caso real: o tipo de atendimento/local só é confirmado durante o
+    Atendimento, não necessariamente no Agendamento."""
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+    assert appointment["local_id"] is None
+    assert appointment["tipo_paciente"] is None
+
+    local_resp = await client.post("/api/v1/locais", json={"nome": "Recepção Central"}, headers=auth_headers_a)
+    local_id = local_resp.json()["id"]
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"local_id": local_id, "tipo_paciente": "ambulatorial"},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    updated = patch_resp.json()
+    assert updated["local_id"] == local_id
+    assert updated["tipo_paciente"] == "ambulatorial"

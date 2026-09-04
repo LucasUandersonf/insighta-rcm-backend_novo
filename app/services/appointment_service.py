@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 
 from app.models.appointment import Appointment
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
@@ -16,10 +17,12 @@ class AppointmentService:
         appointment_repo: AppointmentRepository,
         patient_repo: PatientRepository,
         professional_repo: ProfessionalRepository,
+        local_repo: LocalRepository,
     ):
         self.appointment_repo = appointment_repo
         self.patient_repo = patient_repo
         self.professional_repo = professional_repo
+        self.local_repo = local_repo
 
     async def create_appointment(self, tenant_id: str, created_by: str, data: AppointmentCreateRequest) -> AppointmentResponse:
         # Validação de integridade de negócio (além do FK do banco): o
@@ -43,12 +46,22 @@ class AppointmentService:
                     detail="Profissional não encontrado neste tenant.",
                 )
 
+        if data.local_id is not None:
+            local = await self.local_repo.get_by_id(data.local_id)
+            if local is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Local de atendimento não encontrado neste tenant.",
+                )
+
         appointment = Appointment(
             id=uuid.uuid4(),
             tenant_id=uuid.UUID(tenant_id),
             patient_id=data.patient_id,
             insurance_plan_id=data.insurance_plan_id,
             professional_id=data.professional_id,
+            local_id=data.local_id,
+            tipo_paciente=data.tipo_paciente,
             scheduled_at=data.scheduled_at,
             duration_minutes=data.duration_minutes,
             status="scheduled",
@@ -93,6 +106,13 @@ class AppointmentService:
             appointment.cid_code = data.cid_code
         if data.duration_minutes is not None:
             appointment.duration_minutes = data.duration_minutes
+        if data.local_id is not None:
+            local = await self.local_repo.get_by_id(data.local_id)
+            if local is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local de atendimento não encontrado neste tenant.")
+            appointment.local_id = data.local_id
+        if data.tipo_paciente is not None:
+            appointment.tipo_paciente = data.tipo_paciente
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)
