@@ -45,4 +45,8 @@ class Guia(Base):
     # Código da tabela de procedimento (padrão TISS: 18=CBHPM,
     # 19/20=tabela própria, 22=TUSS) — NULLABLE por ora.
     tabela_procedimento: Mapped[str | None] = mapped_column(String(5))
+    # Lote ao qual esta guia foi atribuída (Fase 2 — ver app/models/lote.py)
+    # — NULLABLE até o faturista atribuí-la a um lote. Uma guia só pode
+    # estar em UM lote por vez.
+    lote_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.lotes.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

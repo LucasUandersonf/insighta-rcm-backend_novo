@@ -21,6 +21,14 @@ class GuiaRepository:
         total = (await self.session.execute(select(func.count()).select_from(Guia))).scalar_one()
         return items, total
 
+    async def list_by_lote(self, lote_id: uuid.UUID) -> list[Guia]:
+        """Usado por LoteService para montar a lista de guias de um lote
+        (tela de gestão) e para validar que um lote não fica vazio ao
+        fechar (ver DECISÃO em app/sql/016_lotes_faturas.sql)."""
+        stmt = select(Guia).where(Guia.lote_id == lote_id).order_by(Guia.created_at)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def add(self, guia: Guia) -> Guia:
         self.session.add(guia)
         await self.session.flush()

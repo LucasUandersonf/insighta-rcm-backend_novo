@@ -51,6 +51,9 @@ class GuiaResponse(BaseModel):
     senha: str | None
     senha_validade: date | None
     tabela_procedimento: str | None
+    # Lote ao qual esta guia foi atribuída (Fase 2) — None até o
+    # faturista atribuí-la via POST /lotes/{id}/guias/{guia_id}.
+    lote_id: UUID | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

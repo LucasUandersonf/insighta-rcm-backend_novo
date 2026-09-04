@@ -151,6 +151,10 @@ _POST_UPGRADE_SQL_FILES = [
     # EXISTS — precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE), não
     # roda incondicionalmente em todo deploy.
     "015_billing_guia.sql",
+    # Lote + Fatura — Fase 2 do plano de adequação ao fluxo real de
+    # mercado. CREATE TABLE sem IF NOT EXISTS — precisa do marcador
+    # (ver _POST_UPGRADE_MARKER_TABLE).
+    "016_lotes_faturas.sql",
 ]
 
 _ROLES_SQL = """
@@ -261,6 +265,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "008_denial_appeals.sql": "denial_appeals",
     "009_report_recipients.sql": "report_recipients",
     "015_billing_guia.sql": "guias",
+    "016_lotes_faturas.sql": "lotes",
 }
 
 
