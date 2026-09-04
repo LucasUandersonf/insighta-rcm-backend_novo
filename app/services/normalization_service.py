@@ -54,7 +54,7 @@ from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.services.denial_risk_engine import assess
-from app.worker.schemas import RawBillingRow
+from app.worker.schemas import RawAppointmentRow, RawBillingRow
 
 
 @dataclass
@@ -87,7 +87,7 @@ class NormalizationService:
         self.local_repo = local_repo
         self.guia_repo = guia_repo
 
-    async def _get_or_create_patient(self, tenant_id: uuid.UUID, row: RawBillingRow) -> Patient:
+    async def _get_or_create_patient(self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow) -> Patient:
         if row.patient_cpf:
             existing = await self.patient_repo.get_by_cpf(row.patient_cpf)
             if existing is not None:
@@ -102,7 +102,9 @@ class NormalizationService:
             )
         )
 
-    async def _get_or_create_professional(self, tenant_id: uuid.UUID, row: RawBillingRow) -> Professional | None:
+    async def _get_or_create_professional(
+        self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow
+    ) -> Professional | None:
         """
         CORREÇÃO (Auditoria Go-Live, achado F-02) — antes desta mudança, o
         ÚNICO jeito de um Profissional existir era uma tela de CRUD manual
@@ -141,7 +143,7 @@ class NormalizationService:
             )
         )
 
-    async def _get_or_create_local(self, tenant_id: uuid.UUID, row: RawBillingRow) -> Local | None:
+    async def _get_or_create_local(self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow) -> Local | None:
         """
         Coluna `local_atendimento` do template estendido (Fase de
         "Templates de Integração") — mesmo caminho de get-or-create de
@@ -278,6 +280,110 @@ class NormalizationService:
         for raw_row in raw_rows:
             was_pending = raw_row.status == "pending_normalization"
             promoted = await self.normalize_row(tenant_id, raw_row, source_file)
+            if promoted:
+                summary.normalized += 1
+            elif was_pending and raw_row.status == "rejected":
+                summary.rejected += 1
+        return summary
+
+    async def _get_or_create_or_update_appointment_from_agenda(
+        self, tenant_id: uuid.UUID, row: RawAppointmentRow, insurance_plan_id: uuid.UUID | None
+    ) -> Appointment:
+        """
+        UPSERT por `external_id` (ver DECISÃO em
+        app/sql/019_agenda_ingestion.sql): um relatório de Agenda
+        tipicamente reexporta o MESMO agendamento várias vezes conforme
+        seu status muda (agendado -> confirmado -> atendido/faltou) — sem
+        casar pelo código do sistema de origem, cada reimportação criaria
+        um agendamento duplicado em vez de atualizar o existente.
+
+        Sem `external_id` na linha (limitação aceita e documentada, mesma
+        classe das demais get-or-create deste service): sempre cria um
+        agendamento novo, nunca tenta casar por outro critério — não há
+        um substituto seguro (paciente+data não identifica um agendamento
+        único quando o mesmo paciente tem duas consultas no mesmo dia).
+        """
+        patient = await self._get_or_create_patient(tenant_id, row)
+        professional = await self._get_or_create_professional(tenant_id, row)
+        local = await self._get_or_create_local(tenant_id, row)
+
+        existing = await self.appointment_repo.get_by_external_id(tenant_id, row.external_id) if row.external_id else None
+        if existing is not None:
+            existing.patient_id = patient.id
+            existing.insurance_plan_id = insurance_plan_id
+            existing.professional_id = professional.id if professional is not None else None
+            existing.local_id = local.id if local is not None else None
+            existing.tipo_paciente = row.tipo_paciente
+            existing.scheduled_at = row.scheduled_at
+            existing.duration_minutes = row.duration_minutes
+            existing.status = row.status
+            existing.procedure_code = row.procedure_code
+            existing.cid_code = row.cid_code
+            return await self.appointment_repo.save(existing)
+
+        return await self.appointment_repo.add(
+            Appointment(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                patient_id=patient.id,
+                insurance_plan_id=insurance_plan_id,
+                professional_id=professional.id if professional is not None else None,
+                local_id=local.id if local is not None else None,
+                tipo_paciente=row.tipo_paciente,
+                scheduled_at=row.scheduled_at,
+                duration_minutes=row.duration_minutes,
+                status=row.status,
+                procedure_code=row.procedure_code,
+                cid_code=row.cid_code,
+                external_id=row.external_id,
+                created_by=None,  # sem usuário humano por trás — veio de importação automática
+            )
+        )
+
+    async def normalize_agenda_row(self, tenant_id: uuid.UUID, raw_row: IngestionRawRow, source_file: str | None) -> bool:
+        """
+        Equivalente a `normalize_row`, mas para o Template de Integração
+        "Agenda": promove a linha crua para um Appointment (UPSERT — ver
+        `_get_or_create_or_update_appointment_from_agenda`) e NUNCA cria
+        Billing/Guia — uma linha de Agenda é um agendamento, não uma
+        cobrança (ver docstring do módulo app/worker/schemas.py sobre a
+        diferença entre os dois templates).
+        """
+        if raw_row.status != "pending_normalization":
+            return False
+
+        row = RawAppointmentRow.model_validate(raw_row.payload)
+
+        plan_id: uuid.UUID | None = None
+        if row.insurance_plan_raw_name:
+            plan = await self.insurance_plan_repo.resolve(row.insurance_plan_raw_name, slugify(row.insurance_plan_raw_name))
+            if plan is None:
+                raw_row.status = "rejected"
+                raw_row.validation_errors = {
+                    "reason": "unknown_insurance_plan",
+                    "raw_value": row.insurance_plan_raw_name,
+                }
+                return False
+            plan_id = plan.id
+            await self.insurance_plan_repo.record_alias_if_new(
+                tenant_id=tenant_id, plan_id=plan.id, raw_name=row.insurance_plan_raw_name, source_file=source_file
+            )
+
+        await self._get_or_create_or_update_appointment_from_agenda(tenant_id, row, plan_id)
+
+        raw_row.status = "normalized"
+        return True
+
+    async def normalize_agenda_rows(
+        self, tenant_id: uuid.UUID, raw_rows: list[IngestionRawRow], source_file: str | None = None
+    ) -> NormalizationSummary:
+        """Equivalente a `normalize_rows`, chamando `normalize_agenda_row`
+        por linha — mesmo cuidado de contagem documentado lá (uma linha
+        já rejeitada na Etapa 1 não é contada de novo aqui)."""
+        summary = NormalizationSummary()
+        for raw_row in raw_rows:
+            was_pending = raw_row.status == "pending_normalization"
+            promoted = await self.normalize_agenda_row(tenant_id, raw_row, source_file)
             if promoted:
                 summary.normalized += 1
             elif was_pending and raw_row.status == "rejected":

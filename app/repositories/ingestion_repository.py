@@ -38,6 +38,7 @@ class IngestionRepository:
         s3_version_id: str | None,
         file_format: str,
         original_filename: str | None = None,
+        data_type: str = "faturamento",
     ) -> IngestionFile | None:
         """
         Tenta registrar o arquivo como "sendo processado agora". Se já
@@ -50,6 +51,17 @@ class IngestionRepository:
         HTTP de upload — ver POST /ingestion/upload — para a tela de
         histórico poder mostrar o nome que o usuário reconhece, em vez da
         chave S3 tenant-scoped construída por baixo dos panos).
+
+        `data_type` ("faturamento"/"agenda" — ver
+        app/sql/019_agenda_ingestion.sql) NÃO faz parte da chave de
+        idempotência (tenant_id, s3_bucket, s3_key, s3_version_id) — só
+        descreve qual template o arquivo segue. Limitação aceita: dois
+        arquivos com o MESMO nome mas `data_type` diferente colidiriam na
+        idempotência (o segundo seria tratado como "já processado", não
+        como um upload novo); na prática os nomes de arquivo de
+        Faturamento e Agenda de um mesmo cliente tendem a já ser
+        distintos (ex: "faturamento_ago.csv" vs "agenda_ago.csv"), então
+        não resolvido agora.
 
         DECISÃO — dois alvos de ON CONFLICT diferentes, conforme
         s3_version_id é ou não None
@@ -77,9 +89,9 @@ class IngestionRepository:
         stmt = text(
             f"""
             INSERT INTO core.ingestion_files
-                (id, tenant_id, s3_bucket, s3_key, s3_version_id, file_format, status, original_filename)
+                (id, tenant_id, s3_bucket, s3_key, s3_version_id, file_format, status, original_filename, data_type)
             VALUES
-                (:id, :tenant_id, :s3_bucket, :s3_key, :s3_version_id, :file_format, 'processing', :original_filename)
+                (:id, :tenant_id, :s3_bucket, :s3_key, :s3_version_id, :file_format, 'processing', :original_filename, :data_type)
             ON CONFLICT {conflict_target} DO NOTHING
             RETURNING id
             """
@@ -95,6 +107,7 @@ class IngestionRepository:
                 "s3_version_id": s3_version_id,
                 "file_format": file_format,
                 "original_filename": original_filename,
+                "data_type": data_type,
             },
         )
         claimed_id = result.scalar_one_or_none()

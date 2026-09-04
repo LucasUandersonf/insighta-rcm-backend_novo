@@ -163,6 +163,11 @@ _POST_UPGRADE_SQL_FILES = [
     # adequação ao fluxo real de mercado. CREATE TABLE sem IF NOT
     # EXISTS — precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE).
     "018_locais_tipo_paciente.sql",
+    # Template de Integração "Agenda" — external_id em appointments +
+    # data_type em ingestion_files. Auto-idempotente (ADD COLUMN IF NOT
+    # EXISTS + DROP/ADD CONSTRAINT) — roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
+    "019_agenda_ingestion.sql",
 ]
 
 _ROLES_SQL = """

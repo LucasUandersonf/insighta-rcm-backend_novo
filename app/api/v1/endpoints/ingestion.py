@@ -22,7 +22,7 @@ Dois grupos de rota:
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.models.ingestion_raw_row import IngestionRawRow
@@ -179,36 +179,57 @@ async def resolve_insurance_plan(
     )
 
 
+_VALID_DATA_TYPES = ("faturamento", "agenda")
+
+
 @router.post("/upload", response_model=UploadIngestionFileResponse, status_code=status.HTTP_201_CREATED)
 async def upload_ingestion_file(
     db: DbSession,
     response: Response,
     file: UploadFile = File(...),
+    data_type: str = Form("faturamento"),
     current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
 ) -> UploadIngestionFileResponse:
     """
-    Caminho HTTP SÍNCRONO que faltava no produto: sobe um CSV/XML/JSON
-    operacional (billing/agenda/repasse) direto para o bucket de
-    ingestão e roda o MESMO pipeline (claim/parse/save/normalize) que o
-    worker SQS usa — ver app/services/ingestion_processing_service.py.
-    Diferente do worker (assíncrono, sem resposta HTTP), aqui o usuário
-    recebe o resultado do processamento na mesma requisição.
+    Caminho HTTP SÍNCRONO que faltava no produto: sobe um arquivo
+    operacional direto para o bucket de ingestão e roda o MESMO pipeline
+    (claim/parse/save/normalize) que o worker SQS usa — ver
+    app/services/ingestion_processing_service.py. Diferente do worker
+    (assíncrono, sem resposta HTTP), aqui o usuário recebe o resultado do
+    processamento na mesma requisição.
+
+    `data_type` escolhe QUAL template de integração o arquivo segue —
+    "faturamento" (padrão, retrocompatível: CSV/XML/JSON) ou "agenda"
+    (só CSV por ora — ver app/sql/019_agenda_ingestion.sql e
+    agenda_csv_parser.py). Os dois compartilham o resto do pipeline.
 
     - 201: arquivo novo, processado agora.
     - 200: MESMO arquivo (mesma chave de idempotência) já havia sido
       processado antes — caminho feliz de idempotência, não um erro.
-    - 400: formato não reconhecido, arquivo vazio, ou acima do limite.
+    - 400: data_type/formato não reconhecido, arquivo vazio, ou acima do
+      limite.
     - 422: arquivo reconhecido mas estruturalmente ilegível (CSV/XML/JSON
       malformado) — erro por LINHA não cai aqui, vira `error_row_count`.
     - 503: bucket de ingestão (AWS_S3_INGEST_BUCKET) não configurado, ou
       falha ao falar com o S3.
     """
+    if data_type not in _VALID_DATA_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"data_type deve ser um de: {', '.join(_VALID_DATA_TYPES)}.",
+        )
+
     filename = file.filename or "arquivo"
     file_format = _detect_file_format(filename, file.content_type)
     if file_format is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Formato de arquivo não reconhecido. Envie um arquivo .csv, .xml ou .json.",
+        )
+    if data_type == "agenda" and file_format != "csv":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Template de Agenda só aceita arquivo .csv por ora.",
         )
 
     raw_bytes = await file.read()
@@ -242,6 +263,7 @@ async def upload_ingestion_file(
             file_format=file_format,
             raw_bytes=raw_bytes,
             original_filename=filename,
+            data_type=data_type,
         )
     except FileParsingError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -252,6 +274,7 @@ async def upload_ingestion_file(
         return UploadIngestionFileResponse(
             id=existing.id,
             file_format=existing.file_format,
+            data_type=existing.data_type,
             status=existing.status,
             row_count=existing.row_count,
             error_row_count=existing.error_row_count,
@@ -264,6 +287,7 @@ async def upload_ingestion_file(
     return UploadIngestionFileResponse(
         id=ingestion_file.id,
         file_format=ingestion_file.file_format,
+        data_type=ingestion_file.data_type,
         status=ingestion_file.status,
         row_count=ingestion_file.row_count,
         error_row_count=ingestion_file.error_row_count,

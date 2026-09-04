@@ -17,9 +17,22 @@ Esta é uma validação ESTRUTURAL (a linha tem os campos no formato certo?
 o valor é um número válido?) — não é a mesma coisa que a normalização de
 negócio da Etapa 2 (ex: casar "UNIMED NAC." com o convênio certo). Isso
 fica claro pelo nome: RawBillingRow, não BillingRow.
+
+SEGUNDO TEMPLATE — RawAppointmentRow (Agenda)
+-------------------------------------------------------------------------
+Faturamento e Agenda são dois TEMPLATES DE INTEGRAÇÃO diferentes (ver
+conversa/PLANO_ADEQUACAO_TISS.md): uma linha de Faturamento é sempre um
+atendimento JÁ OCORRIDO com valor cobrado; uma linha de Agenda é um
+agendamento que muda de estado com o tempo e não gera cobrança nenhuma
+por si só. Por isso RawAppointmentRow é uma classe SEPARADA de
+RawBillingRow (campos obrigatórios e o que a normalização faz com cada
+uma são diferentes), mas compartilha os mesmos helpers de normalização
+de dado sujo (_strip_accents_lower, aliases de tipo_paciente) — o
+"schema canônico único por formato de origem" vale para os DOIS
+templates, não só para Faturamento.
 """
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -76,6 +89,54 @@ _GUIA_TIPO_ALIASES = {
     "honorarios": "honorario",
 }
 
+# Vocabulário do Template de Integração "Agenda" (ver
+# app/sql/019_agenda_ingestion.sql) — os 5 status que aparecem em
+# praticamente toda tela de agenda de ERP pesquisada (Moderna, Feegow,
+# iClinic), mapeados para o vocabulário que já existe em
+# Appointment.status (ver app/models/appointment.py e a CHECK constraint
+# de 001_init_schema.sql, que já incluía 'confirmed' mesmo antes de o
+# produto ter um canal de confirmação próprio — ver DECISÃO em
+# AppointmentUpdateRequest sobre por que a API de edição manual não
+# expõe esse estado; a ingestão em massa pode receber um agendamento
+# JÁ confirmado pelo ERP de origem sem que isso dependa desse canal).
+_AGENDA_STATUS_ALIASES = {
+    "agendado": "scheduled",
+    "agendada": "scheduled",
+    "marcado": "scheduled",
+    "marcada": "scheduled",
+    "scheduled": "scheduled",
+    "confirmado": "confirmed",
+    "confirmada": "confirmed",
+    "confirmed": "confirmed",
+    "atendido": "completed",
+    "atendida": "completed",
+    "realizado": "completed",
+    "realizada": "completed",
+    "compareceu": "completed",
+    "completed": "completed",
+    "faltou": "no_show",
+    "falta": "no_show",
+    "nao compareceu": "no_show",
+    "no_show": "no_show",
+    "no-show": "no_show",
+    "cancelado": "cancelled",
+    "cancelada": "cancelled",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+
+
+def _normalize_tipo_paciente_value(v: str) -> str:
+    normalized = _TIPO_PACIENTE_ALIASES.get(_strip_accents_lower(v))
+    if normalized is None:
+        raise ValueError(f"tipo_paciente '{v}' não reconhecido — use um de: {', '.join(TIPO_PACIENTE_VALUES)}")
+    return normalized
+
+
+def _sanitize_cpf_value(v: str) -> str | None:
+    digits = "".join(ch for ch in v if ch.isdigit())
+    return digits or None
+
 
 class RawBillingRow(BaseModel):
     patient_cpf: str | None = None
@@ -127,18 +188,14 @@ class RawBillingRow(BaseModel):
     def sanitize_cpf(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
-        digits = "".join(ch for ch in v if ch.isdigit())
-        return digits or None
+        return _sanitize_cpf_value(v)
 
     @field_validator("tipo_paciente")
     @classmethod
     def normalize_tipo_paciente(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
-        normalized = _TIPO_PACIENTE_ALIASES.get(_strip_accents_lower(v))
-        if normalized is None:
-            raise ValueError(f"tipo_paciente '{v}' não reconhecido — use um de: {', '.join(TIPO_PACIENTE_VALUES)}")
-        return normalized
+        return _normalize_tipo_paciente_value(v)
 
     @field_validator("guia_tipo")
     @classmethod
@@ -159,6 +216,92 @@ class RawBillingRow(BaseModel):
         if (self.guia_numero or self.guia_senha) and not self.guia_tipo:
             raise ValueError("guia_numero/guia_senha informados sem guia_tipo — guia_tipo é obrigatório para registrar a guia.")
         return self
+
+
+class RawAppointmentRow(BaseModel):
+    """
+    Schema canônico do Template de Integração "Agenda" — ver docstring do
+    módulo e app/sql/019_agenda_ingestion.sql. Deliberadamente usa os
+    MESMOS nomes de campo de identidade (patient_cpf/patient_name/
+    professional_name/professional_registry/local_name) que RawBillingRow
+    onde o conceito é idêntico — NormalizationService._get_or_create_patient/
+    _get_or_create_professional/_get_or_create_local são reaproveitados
+    SEM DUPLICAÇÃO entre os dois templates por causa disso (Python
+    resolve por nome de atributo, não por classe declarada).
+    """
+
+    patient_cpf: str | None = None
+    patient_name: str = Field(min_length=1, max_length=255)
+    professional_name: str | None = None
+    professional_registry: str | None = None
+    # Diferente de RawBillingRow: uma linha de Agenda pode não ter
+    # convênio confirmado ainda (agendamento feito antes da confirmação
+    # de cobertura) — OPCIONAL aqui, sempre OBRIGATÓRIO em Faturamento.
+    insurance_plan_raw_name: str | None = None
+    local_name: str | None = None
+    tipo_paciente: str | None = None
+    scheduled_at: datetime
+    duration_minutes: int | None = Field(default=None, gt=0)
+    status: str
+    procedure_code: str | None = None
+    cid_code: str | None = None
+    # Código do agendamento no sistema de origem — chave de UPSERT (ver
+    # app/models/appointment.py Appointment.external_id). Sem ele, cada
+    # reimportação do mesmo relatório cria um agendamento duplicado
+    # (limitação aceita e documentada, mesma classe de limitação de
+    # ProfessionalRepository.get_by_name sem registro profissional).
+    external_id: str | None = None
+
+    @field_validator("patient_cpf")
+    @classmethod
+    def sanitize_cpf(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return _sanitize_cpf_value(v)
+
+    @field_validator("tipo_paciente")
+    @classmethod
+    def normalize_tipo_paciente(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return _normalize_tipo_paciente_value(v)
+
+    @field_validator("status")
+    @classmethod
+    def normalize_status(cls, v: str) -> str:
+        normalized = _AGENDA_STATUS_ALIASES.get(_strip_accents_lower(v))
+        if normalized is None:
+            raise ValueError(f"status '{v}' não reconhecido — use um de: agendado, confirmado, atendido, faltou, cancelado")
+        return normalized
+
+
+class AgendaRowParseResult(BaseModel):
+    """
+    Espelha RowParseResult, mas para RawAppointmentRow — ver docstring de
+    lá para o contrato (sempre exatamente um entre `row`/`errors`
+    preenchido). Classe separada em vez de reaproveitar RowParseResult
+    diretamente porque `row` teria que aceitar DOIS tipos de model
+    incompatíveis (Pydantic revalidaria uma instância de
+    RawAppointmentRow contra o schema de RawBillingRow se o campo fosse
+    tipado `RawBillingRow | None`, e falharia). `IngestionRepository.save_raw_rows`
+    só acessa `.row_number`/`.row`/`.errors` por atributo — funciona com
+    QUALQUER uma das duas classes, sem precisar saber qual é.
+    """
+    row_number: int
+    row: RawAppointmentRow | None = None
+    errors: list[str] | None = None
+
+    @classmethod
+    def ok(cls, row_number: int, row: RawAppointmentRow) -> "AgendaRowParseResult":
+        return cls(row_number=row_number, row=row, errors=None)
+
+    @classmethod
+    def failed(cls, row_number: int, exc: ValidationError | Exception) -> "AgendaRowParseResult":
+        if isinstance(exc, ValidationError):
+            messages = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+        else:
+            messages = [str(exc)]
+        return cls(row_number=row_number, row=None, errors=messages)
 
 
 class RowParseResult(BaseModel):

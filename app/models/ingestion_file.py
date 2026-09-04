@@ -20,6 +20,12 @@ class IngestionFile(Base):
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     s3_version_id: Mapped[str | None] = mapped_column(String(255))
     file_format: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Qual TEMPLATE de integração este arquivo segue — "faturamento"
+    # (padrão, retrocompatível com todo arquivo enviado antes desta
+    # coluna existir) ou "agenda" (ver app/sql/019_agenda_ingestion.sql).
+    # Independente de file_format (csv/xml/json é o CONTAINER; data_type
+    # é o CONTEÚDO/esquema de colunas esperado dentro dele).
+    data_type: Mapped[str] = mapped_column(String(20), nullable=False, default="faturamento")
     # Nome do arquivo como o usuário o conhece (ex: "faturamento_ago.csv") —
     # só preenchido no caminho HTTP de upload (POST /ingestion/upload, ver
     # app/sql/010_ingestion_original_filename.sql); nulo no caminho SQS,
