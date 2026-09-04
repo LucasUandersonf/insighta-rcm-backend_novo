@@ -23,6 +23,7 @@ import uuid
 
 import aioboto3
 
+from app.core.aws_s3 import s3_client_kwargs
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -45,11 +46,11 @@ class ContractStorageClient:
         self._session = aioboto3.Session()
 
     async def upload_pdf(self, *, key: str, pdf_bytes: bytes) -> None:
-        async with self._session.client("s3") as s3:
+        async with self._session.client("s3", **s3_client_kwargs()) as s3:
             await s3.put_object(Bucket=self._bucket, Key=key, Body=pdf_bytes, ContentType="application/pdf")
 
     async def download_pdf(self, *, key: str) -> bytes:
-        async with self._session.client("s3") as s3:
+        async with self._session.client("s3", **s3_client_kwargs()) as s3:
             response = await s3.get_object(Bucket=self._bucket, Key=key)
             async with response["Body"] as stream:
                 return await stream.read()

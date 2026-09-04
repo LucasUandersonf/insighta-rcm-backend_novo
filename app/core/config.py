@@ -118,6 +118,14 @@ class Settings(BaseSettings):
     # exigidos pela operadora para o recurso, não o PDF do contrato nem
     # os lotes de faturamento importados).
     AWS_S3_APPEALS_BUCKET: str | None = None
+
+    # Endpoint S3 customizado — ausente/None em produção real (boto3
+    # resolve a AWS sozinho). Existe só para apontar os três buckets
+    # acima para um serviço S3-compatível (ex: MinIO) num ambiente sem
+    # AWS de verdade, como um deploy de teste no Railway (ver DECISÃO
+    # completa em app/core/aws_s3.py).
+    AWS_S3_ENDPOINT_URL: str | None = None
+
     # DECISÃO — prazo de recurso é CONTRATUAL/operadora, não uma lei
     # federal única
     # ---------------------------------------------------------------
