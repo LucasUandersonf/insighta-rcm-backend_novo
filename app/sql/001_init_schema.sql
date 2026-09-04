@@ -51,7 +51,7 @@ CREATE TABLE core.tenants (
     trade_name      VARCHAR(255)  NOT NULL,
     cnpj            VARCHAR(18)   NOT NULL UNIQUE,
     plan_tier       VARCHAR(50)   NOT NULL DEFAULT 'starter'
-                        CHECK (plan_tier IN ('starter','pro','enterprise')),
+                        CHECK (plan_tier IN ('starter','professional','enterprise')),
     whatsapp_group_id  VARCHAR(100),      -- ID do grupo/número corporativo p/ Etapa 4
     is_active       BOOLEAN       NOT NULL DEFAULT true,
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),

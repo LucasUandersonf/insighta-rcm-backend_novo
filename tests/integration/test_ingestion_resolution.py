@@ -16,12 +16,19 @@ from sqlalchemy import text
 async def _seed_rejected_row(admin_engine, tenant_id, *, raw_value="UNIMED NAC.", patient_name="Paciente Importado") -> int:
     file_id = str(uuid.uuid4())
     async with admin_engine.begin() as conn:
+        # BUG DE TESTE CORRIGIDO: s3_key era um literal fixo — duas
+        # chamadas a este helper para o MESMO tenant (como o teste de
+        # resolução em lote faz) violavam
+        # uq_ingestion_files_idempotency_null_version (tenant_id,
+        # s3_bucket, s3_key), já que dois ingestion_files diferentes
+        # nunca poderiam apontar para a mesma chave. Cada arquivo
+        # "importado" pelo teste agora tem uma chave própria.
         await conn.execute(
             text(
                 "INSERT INTO core.ingestion_files (id, tenant_id, s3_bucket, s3_key, file_format, status) "
-                "VALUES (:id, :t, 'bucket-teste', 'tenants/x/incoming/csv/arquivo.csv', 'csv', 'processed')"
+                "VALUES (:id, :t, 'bucket-teste', :key, 'csv', 'processed')"
             ),
-            {"id": file_id, "t": tenant_id},
+            {"id": file_id, "t": tenant_id, "key": f"tenants/x/incoming/csv/arquivo-{file_id}.csv"},
         )
         payload = {
             "patient_cpf": "12345678900",

@@ -38,3 +38,32 @@ class ProfessionalAvailabilityRepository:
         self.session.add(block)
         await self.session.flush()
         return block
+
+    async def replace_for_professional(
+        self, *, tenant_id: uuid.UUID, professional_id: uuid.UUID, blocks: list[dict]
+    ) -> list[ProfessionalAvailability]:
+        """
+        Substitui a grade INTEIRA de um profissional — mesmo padrão de
+        ContractItemRepository.replace_items: a Tela de Profissionais
+        sempre manda a lista completa e final da grade revisada, então
+        "apagar tudo e regravar" evita um bloco órfão de uma versão
+        anterior sobrevivendo silenciosamente a uma edição seguinte.
+        """
+        existing = await self.list_by_professional(professional_id)
+        for block in existing:
+            await self.session.delete(block)
+        await self.session.flush()
+
+        saved = []
+        for block in blocks:
+            row = ProfessionalAvailability(
+                tenant_id=tenant_id,
+                professional_id=professional_id,
+                weekday=block["weekday"],
+                start_time=block["start_time"],
+                end_time=block["end_time"],
+            )
+            self.session.add(row)
+            saved.append(row)
+        await self.session.flush()
+        return saved

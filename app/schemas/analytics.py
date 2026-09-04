@@ -116,6 +116,19 @@ class AgendaMetricsResponse(BaseModel):
     # AnalyticsRepository.upcoming_risk_appointments) — alimenta o card
     # "Risco de falta — próximos dias" da Sala de Comando.
     upcoming_risk_appointments: list[UpcomingRiskAppointmentItem]
+    # Minutos disponíveis (grade semanal) MENOS minutos agendados, somado
+    # entre profissionais com grade cadastrada — o "outro lado" do
+    # problema de agenda em relação ao no-show: não "paciente faltou", e
+    # sim "nem tinha agendamento marcado nesse horário". Profissional sem
+    # grade cadastrada não entra na conta (ver DECISÃO em
+    # AnalyticsService._idle_capacity_totals).
+    total_idle_minutes: int
+    # Tradução em R$ de total_idle_minutes — ver DECISÃO completa em
+    # capacity_service.estimate_idle_capacity_revenue_lost. Mesma
+    # natureza de estimativa que estimated_revenue_at_risk (acima): não é
+    # número contábil fechado, é o ritmo observado projetado sobre o
+    # tempo vazio.
+    estimated_revenue_lost_to_idle_capacity: float
 
 
 class PlanLossItem(BaseModel):

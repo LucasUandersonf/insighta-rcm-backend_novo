@@ -9,9 +9,17 @@ import pytest
 
 
 def _unique_cnpj() -> str:
+    # BUG CORRIGIDO: `uuid.uuid4().hex[:14]` inclui letras a-f — a
+    # validação de CNPJ conta só dígitos (ver
+    # RegisterRequest.validate_cnpj_format), então a maioria das strings
+    # geradas antes tinha menos de 14 dígitos e falhava com 422 antes
+    # mesmo de chegar na regra de negócio que este arquivo testa. CNPJ
+    # exige exatamente 14 dígitos — usa só o componente numérico (int) de
+    # um uuid4, garantindo um valor totalmente numérico e ainda
+    # praticamente único entre execuções.
     import uuid
 
-    return uuid.uuid4().hex[:14]
+    return str(uuid.uuid4().int)[:14]
 
 
 async def test_register_creates_tenant_and_owner_and_returns_token(client):

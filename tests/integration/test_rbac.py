@@ -44,6 +44,20 @@ async def test_financeiro_can_create_contract_but_not_a_professional(client, adm
     assert professional_response.status_code == 403
 
 
+async def test_financeiro_cannot_edit_a_professional(client, admin_engine, tenant_a):
+    """Mesma barreira de test_financeiro_can_create_contract_but_not_a_professional,
+    agora sobre PATCH — owner cria o profissional, financeiro tenta editar."""
+    owner_headers = await _login_as(client, admin_engine, tenant_a, "owner")
+    create_resp = await client.post("/api/v1/professionals", json={"full_name": "Dr. Y"}, headers=owner_headers)
+    professional_id = create_resp.json()["id"]
+
+    financeiro_headers = await _login_as(client, admin_engine, tenant_a, "financeiro")
+    update_resp = await client.patch(
+        f"/api/v1/professionals/{professional_id}", json={"specialty": "Não deveria editar"}, headers=financeiro_headers
+    )
+    assert update_resp.status_code == 403
+
+
 async def test_auditor_is_read_only_everywhere_tested(client, admin_engine, tenant_a):
     headers = await _login_as(client, admin_engine, tenant_a, "auditor")
 

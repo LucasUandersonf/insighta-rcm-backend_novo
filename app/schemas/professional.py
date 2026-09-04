@@ -36,6 +36,23 @@ class AvailabilityBlockResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ProfessionalUpdateRequest(BaseModel):
+    """PATCH /professionals/{id} — todos os campos opcionais (payload
+    parcial, mesmo contrato de UserUpdateRequest). `availability`,
+    quando informado, SUBSTITUI a grade inteira (mesma semântica de
+    HomologateRequest.items em contracts.py: a Tela de Profissionais
+    sempre manda a lista completa e final da grade revisada, não um
+    diff incremental) — None mantém a grade atual intacta, [] some
+    com ela por completo (profissional passa a não ter capacidade
+    teórica instalada nenhuma)."""
+
+    full_name: str | None = None
+    professional_registry: str | None = None
+    specialty: str | None = None
+    is_active: bool | None = None
+    availability: list[AvailabilityBlockRequest] | None = None
+
+
 class ProfessionalResponse(BaseModel):
     id: UUID
     full_name: str
