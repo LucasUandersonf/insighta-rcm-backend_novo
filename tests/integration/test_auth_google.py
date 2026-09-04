@@ -17,7 +17,10 @@ from app.services.google_oauth_client import GoogleUserInfo
 
 
 def _unique_cnpj() -> str:
-    return uuid.uuid4().hex[:14]
+    # Mesmo bug de tests/integration/test_auth_register_and_password_reset.py:
+    # .hex inclui letras a-f, e a validação de CNPJ conta só dígitos —
+    # usa o componente numérico do uuid4 para garantir 14 dígitos de verdade.
+    return str(uuid.uuid4().int)[:14]
 
 
 def _fake_google_user(email: str, name: str = "Usuário Google"):

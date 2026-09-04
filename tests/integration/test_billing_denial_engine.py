@@ -191,6 +191,11 @@ async def test_list_high_risk_billing_returns_only_held_for_review(client, auth_
 
     high_risk_list = await client.get("/api/v1/billing/high-risk", headers=auth_headers_a)
     assert high_risk_list.status_code == 200
-    reasons = [item["denial_reasons"] for item in high_risk_list.json()]
-    assert len(high_risk_list.json()) == 1
+    # BUG DE TESTE CORRIGIDO: /billing/high-risk devolve o envelope
+    # paginado {items, total, limit, offset} (ver PaginatedResponse em
+    # app/schemas/pagination.py), não uma lista crua — este teste nunca
+    # foi atualizado quando a paginação chegou a este endpoint.
+    items = high_risk_list.json()["items"]
+    reasons = [item["denial_reasons"] for item in items]
+    assert len(items) == 1
     assert "missing_cid" in reasons[0]

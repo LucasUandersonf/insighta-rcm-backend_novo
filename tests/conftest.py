@@ -103,6 +103,7 @@ _SCHEMA_FILES = [
     "010_ingestion_original_filename.sql",
     "011_annual_revenue_goal.sql",
     "012_password_reset.sql",
+    "013_fix_plan_tier_check.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

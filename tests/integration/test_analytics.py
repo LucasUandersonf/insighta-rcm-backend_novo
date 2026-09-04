@@ -176,6 +176,58 @@ async def test_agenda_metrics_computes_idle_capacity_revenue_lost(client, auth_h
     assert body["estimated_revenue_lost_to_idle_capacity"] == 2200.0
 
 
+async def test_no_show_risk_breakdown_and_estimate_ignore_the_dashboard_window(client, auth_headers_a, admin_engine, tenant_a):
+    """BUG CORRIGIDO (achado via scripts/seed_demo_data.py):
+    no_show_risk_breakdown filtrava agendamentos 'scheduled' pela janela
+    do DASHBOARD (date_from/date_to, tipicamente uma janela no PASSADO,
+    ex: 'últimos 30 dias') — mas um agendamento 'scheduled' É, por
+    definição, um evento FUTURO. A interseção era estruturalmente vazia
+    em qualquer uso real do produto, zerando estimated_revenue_at_risk e
+    o insight de risco de falta sempre que a página era aberta com o
+    filtro de período padrão. Este teste consulta agenda-metrics com uma
+    janela inteiramente no PASSADO e prova que mesmo assim o risco de um
+    agendamento FUTURO aparece."""
+    from tests.integration.test_no_show_risk import _insert_past_appointment
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Faltoso Demo"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    # 3 faltas passadas na mesma combinação dia-da-semana+período —
+    # mesmo padrão de test_no_show_risk.py — garantindo risco "alto".
+    base_monday = date.today() - timedelta(days=date.today().weekday() + 7)
+    for weeks_back in range(3):
+        past_monday = base_monday - timedelta(weeks=weeks_back)
+        scheduled = datetime.combine(past_monday, datetime.min.time(), tzinfo=timezone.utc).replace(hour=14)
+        await _insert_past_appointment(admin_engine, tenant_a, patient_id, scheduled, "no_show")
+
+    # Nova consulta futura, mesma combinação dia/período -> nasce "alto".
+    days_until_monday = (0 - date.today().weekday()) % 7
+    next_monday = date.today() + timedelta(days=days_until_monday or 7)
+    future_scheduled = datetime.combine(next_monday, datetime.min.time(), tzinfo=timezone.utc).replace(hour=14)
+    future_appt = await client.post(
+        "/api/v1/appointments", json={"patient_id": patient_id, "scheduled_at": future_scheduled.isoformat()}, headers=auth_headers_a
+    )
+    assert future_appt.json()["no_show_risk_level"] == "alto"
+
+    # Faturamento qualquer, só para avg_charged_value não ser zero.
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=200.0)
+
+    # Janela típica de dashboard ("últimos 7 dias", terminando hoje) —
+    # não inclui a segunda-feira futura do agendamento de risco criado
+    # acima (sempre pelo menos 1 dia à frente).
+    date_from = (date.today() - timedelta(days=7)).isoformat()
+    date_to = date.today().isoformat()
+
+    response = await client.get(
+        f"/api/v1/analytics/agenda-metrics?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    risk_counts = {b["level"]: b["count"] for b in body["no_show_risk_breakdown"]}
+    assert risk_counts.get("alto", 0) >= 1
+    assert body["estimated_revenue_at_risk"] > 0
+
+
 async def test_smart_insights_flags_financial_hole_from_current_period(client, auth_headers_a, admin_engine, tenant_a):
     await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=300.0, charged_value=250.0)
     date_from, date_to = _window()

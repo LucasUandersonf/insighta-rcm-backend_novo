@@ -98,10 +98,15 @@ async def test_login_with_email_shared_across_tenants_requires_selection(client,
 async def test_login_with_tenant_id_after_selection_issues_correct_token(client, admin_engine, tenant_a, tenant_b):
     from tests.conftest import _insert_user
 
+    # BUG DE TESTE CORRIGIDO: role="financeiro" não tem permissão de
+    # escrita em /patients (ver _CAN_WRITE em app/api/v1/endpoints/patients.py)
+    # — a prova abaixo (criar paciente) sempre voltava 403, mascarando o
+    # que este teste de verdade quer provar (escopo do token por tenant).
+    # "atendimento" é quem de fato cadastra paciente.
     shared_email = "consultora2@multi-clinica.com"
-    user_a = await _insert_user(admin_engine, tenant_id=tenant_a, email=shared_email, role="financeiro", password="senha-mesma-123")
+    user_a = await _insert_user(admin_engine, tenant_id=tenant_a, email=shared_email, role="atendimento", password="senha-mesma-123")
 
-    await _insert_user(admin_engine, tenant_id=tenant_b, email=shared_email, role="financeiro", password="senha-mesma-123")
+    await _insert_user(admin_engine, tenant_id=tenant_b, email=shared_email, role="atendimento", password="senha-mesma-123")
 
     response = await client.post(
         "/api/v1/auth/login",

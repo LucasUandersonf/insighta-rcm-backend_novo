@@ -33,7 +33,16 @@ settings = get_settings()
 # protocolado OU de nip_aberta (uma NIP pode ser resolvida depois),
 # nunca a partir de 'aberto' direto — não faz sentido a operadora
 # responder um recurso que a clínica nem protocolou ainda.
-_RESOLVABLE_FROM = ("protocolado", "nip_aberta")
+#
+# BUG CORRIGIDO — 'indeferido' faltava nesta lista: o próprio model
+# (ver DECISÃO em app/models/denial_appeal.py) documenta o ciclo como
+# "aberto -> protocolado -> deferido|indeferido -> (opcional) nip_aberta",
+# ou seja, uma negativa da operadora (indeferido) NÃO é terminal por si
+# só — pode ser escalada para NIP depois. Sem 'indeferido' aqui, essa
+# escalada sempre voltava 409 mesmo sendo o fluxo documentado como
+# válido. 'deferido' continua de fora de propósito: um recurso DEFERIDO
+# (a clínica ganhou) não tem o que escalar para a ANS.
+_RESOLVABLE_FROM = ("protocolado", "indeferido", "nip_aberta")
 
 
 class DenialAppealService:

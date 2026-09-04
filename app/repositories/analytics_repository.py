@@ -463,21 +463,32 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {level: int(count) for level, count in result.all()}
 
-    async def no_show_risk_breakdown(self, date_from: date, date_to: date) -> dict[str, int]:
+    async def no_show_risk_breakdown(self, *, as_of: datetime) -> dict[str, int]:
         """Agrupa AGENDAMENTOS FUTUROS AINDA NÃO REALIZADOS (status
         'scheduled') por nível de risco preditivo de falta — a mesma
         semântica de `upcoming_high_risk_appointments_count` em
         reporting_repository.py, mas com o detalhamento completo dos
-        4 níveis (indeterminado/baixo/medio/alto), não só o alto."""
-        start, end = _bounds(date_from, date_to)
+        4 níveis (indeterminado/baixo/medio/alto), não só o alto.
+
+        BUG CORRIGIDO (achado via scripts/seed_demo_data.py) — esta
+        função recebia `date_from`/`date_to` e os usava para filtrar
+        `scheduled_at`, mas os dois chamadores (AnalyticsService.
+        get_agenda_metrics/get_smart_insights) sempre passam a janela do
+        DASHBOARD (ex: "últimos 30 dias"), não uma janela futura. Como
+        esta função só olha `status = 'scheduled'` (agendamento que
+        ainda vai acontecer), a interseção com uma janela no PASSADO é
+        estruturalmente vazia — o breakdown, `estimated_revenue_at_risk`
+        e o insight de risco de falta nunca tinham o que mostrar em
+        nenhum uso real do produto. Mesmo princípio já documentado (e já
+        correto) em `upcoming_risk_appointments`, logo abaixo: não filtra
+        por período do dashboard de propósito, sempre "a partir de
+        agora" — resolvido aqui do mesmo jeito, com `as_of` explícito
+        (não `datetime.now()` direto na query, para o service continuar
+        podendo controlar/testar o relógio)."""
         level_expr = func.coalesce(Appointment.no_show_risk_level, "indeterminado")
         stmt = (
             select(level_expr, func.count())
-            .where(
-                Appointment.status == "scheduled",
-                Appointment.scheduled_at >= start,
-                Appointment.scheduled_at <= end,
-            )
+            .where(Appointment.status == "scheduled", Appointment.scheduled_at >= as_of)
             .group_by(level_expr)
         )
         result = await self.session.execute(stmt)

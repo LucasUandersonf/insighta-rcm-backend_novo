@@ -266,7 +266,7 @@ class AnalyticsService:
             for hour, count in sorted(hour_histogram.items(), key=lambda item: item[0])
         ]
 
-        risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(date_from, date_to)
+        risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         avg_charged = await self.analytics_repo.avg_charged_value(date_from, date_to)
         # DECISÃO — estimativa, não número contábil fechado: multiplica o
         # volume de agendamentos com risco ALTO pelo valor médio cobrado
@@ -407,7 +407,15 @@ class AnalyticsService:
         payment_gap = await self.analytics_repo.payment_gap_total(date_from, date_to)
         avg_utilization = await self._avg_utilization(date_from, date_to)
         denial_findings = await self.analytics_repo.denial_findings_by_plan(date_from, date_to)
-        risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(date_from, date_to)
+        # "Sempre a partir de agora", nunca da janela do dashboard — ver
+        # DECISÃO em AnalyticsRepository.no_show_risk_breakdown. Isso é
+        # chamado uma vez para o período ATUAL e outra para o ANTERIOR
+        # (ver _period_insights_input), mas como não depende mais da
+        # janela, as duas chamadas devolvem o mesmo resultado — sem
+        # problema: high_risk_no_show_count do período ANTERIOR nunca é
+        # lido por nenhum insight (ver _no_show_risk_insight, só olha
+        # `current`).
+        risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)

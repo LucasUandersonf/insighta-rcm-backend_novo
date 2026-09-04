@@ -11,6 +11,7 @@ produzir um registro inválido (ex: PATCH que zera `phone_whatsapp` num
 destinatário que só tinha telefone).
 """
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 
@@ -70,6 +71,16 @@ class ReportRecipientService:
                 detail="Destinatário precisa manter ao menos um contato: phone_whatsapp ou email.",
             )
 
+        # BUG CORRIGIDO — `updated_at` só tinha `onupdate=func.now()`
+        # (server-side, embutido no próprio UPDATE): depois do flush, o
+        # atributo em memória fica "expirado" e o SQLAlchemy async tenta
+        # buscá-lo de volta com uma query implícita fora do greenlet
+        # certo, estourando MissingGreenlet bem aqui, no model_validate
+        # logo abaixo. Setar explicitamente em Python evita depender
+        # desse refresh implícito — mesmo padrão de homologated_at/
+        # resolved_at, setados em Python nos outros services deste
+        # projeto (nunca via onupdate de banco).
+        recipient.updated_at = datetime.now(timezone.utc)
         await self.repo.save(recipient)
         return ReportRecipientResponse.model_validate(recipient)
 

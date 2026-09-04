@@ -135,6 +135,12 @@ _POST_UPGRADE_SQL_FILES = [
     # construção (CREATE TABLE IF NOT EXISTS + DROP/CREATE FUNCTION) —
     # roda em TODO deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "012_password_reset.sql",
+    # BUG CRÍTICO DE PRODUÇÃO #3 (achado via scripts/seed_demo_data.py) —
+    # mesma categoria de #1/#2 acima: a CHECK constraint de plan_tier
+    # ficou para trás em 'pro' enquanto o resto do sistema já usava
+    # 'professional' havia tempo. Ver DECISÃO completa no próprio .sql.
+    # Auto-idempotente (DROP IF EXISTS + ADD) — roda em todo deploy.
+    "013_fix_plan_tier_check.sql",
 ]
 
 _ROLES_SQL = """
