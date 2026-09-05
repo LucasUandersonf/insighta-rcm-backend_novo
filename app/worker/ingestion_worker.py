@@ -117,6 +117,7 @@ async def _process_s3_object(*, bucket: str, key: str, version_id: str | None) -
             s3_version_id=version_id,
             file_format=resolved.file_format,
             raw_bytes=raw_bytes,
+            data_type=resolved.data_type,
         )
 
         if result.already_claimed:

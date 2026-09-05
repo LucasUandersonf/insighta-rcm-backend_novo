@@ -172,6 +172,10 @@ _POST_UPGRADE_SQL_FILES = [
     # (ADD COLUMN IF NOT EXISTS) — roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
     "020_no_show_thresholds.sql",
+    # Mapeador automático de coluna — core.ingestion_column_aliases.
+    # CREATE TABLE sem IF NOT EXISTS — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE). Ver DECISÃO completa no próprio .sql.
+    "021_ingestion_column_aliases.sql",
 ]
 
 _ROLES_SQL = """
@@ -285,6 +289,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "016_lotes_faturas.sql": "lotes",
     "017_glosas.sql": "glosas",
     "018_locais_tipo_paciente.sql": "locais",
+    "021_ingestion_column_aliases.sql": "ingestion_column_aliases",
 }
 
 

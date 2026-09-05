@@ -14,6 +14,7 @@ mesmo agendamento é tipicamente reexportado várias vezes conforme seu
 status muda (agendado -> confirmado -> atendido/faltou).
 """
 import io
+import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -188,8 +189,52 @@ async def test_agenda_without_insurance_plan_column_is_accepted(client, auth_hea
     assert appointment["insurance_plan_id"] is None
 
 
-async def test_agenda_upload_rejects_xml(client, auth_headers_a):
-    files = {"file": ("agenda.xml", io.BytesIO(b"<agenda></agenda>"), "application/xml")}
+async def test_agenda_upload_via_xml(client, auth_headers_a, admin_engine, tenant_a):
+    xml_bytes = (
+        b"<agendamentos><agendamento>"
+        b"<cpfPaciente>12345678900</cpfPaciente>"
+        b"<nomePaciente>Paciente Teste</nomePaciente>"
+        b"<dataAgendamento>2026-08-20T09:00:00</dataAgendamento>"
+        b"<status>Agendado</status>"
+        b"<codigoAgendamento>AG-XML-1</codigoAgendamento>"
+        b"</agendamento></agendamentos>"
+    )
+    files = {"file": ("agenda.xml", io.BytesIO(xml_bytes), "application/xml")}
+    response = await client.post("/api/v1/ingestion/upload", files=files, data={"data_type": "agenda"}, headers=auth_headers_a)
+    assert response.status_code == 201, response.text
+    assert response.json()["error_row_count"] == 0
+
+    appointment = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-XML-1"
+    )
+    assert appointment is not None
+    assert appointment["status"] == "scheduled"
+
+
+async def test_agenda_upload_via_json(client, auth_headers_a, admin_engine, tenant_a):
+    payload = [
+        {
+            "cpf_paciente": "12345678900",
+            "nome_paciente": "Paciente Teste",
+            "data_agendamento": "2026-08-20T09:00:00",
+            "status": "Confirmado",
+            "codigo_agendamento": "AG-JSON-1",
+        }
+    ]
+    files = {"file": ("agenda.json", io.BytesIO(json.dumps(payload).encode()), "application/json")}
+    response = await client.post("/api/v1/ingestion/upload", files=files, data={"data_type": "agenda"}, headers=auth_headers_a)
+    assert response.status_code == 201, response.text
+    assert response.json()["error_row_count"] == 0
+
+    appointment = await _fetch_one(
+        admin_engine, "SELECT * FROM core.appointments WHERE tenant_id = :t AND external_id = :e", t=tenant_a, e="AG-JSON-1"
+    )
+    assert appointment is not None
+    assert appointment["status"] == "confirmed"
+
+
+async def test_agenda_upload_rejects_pdf(client, auth_headers_a):
+    files = {"file": ("agenda.pdf", io.BytesIO(b"%PDF-1.4 nao eh um formato aceito"), "application/pdf")}
     response = await client.post("/api/v1/ingestion/upload", files=files, data={"data_type": "agenda"}, headers=auth_headers_a)
     assert response.status_code == 400
 

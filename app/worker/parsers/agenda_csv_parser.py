@@ -17,10 +17,10 @@ sem ela, assume meia-noite (00:00) — mesmo critério de "melhor aceitar
 com um dado a menos do que rejeitar a linha inteira" já usado em
 professional_name/local_name.
 
-Só CSV está implementado nesta primeira versão do template — XML/JSON
-de Agenda ficam para quando um cliente/ERP concreto precisar (mesmo
-critério incremental de app/worker/parsers/xml_parser.py ter sido
-adicionado só quando o formato Faturamento precisou dele).
+XML/JSON do mesmo template ficam em agenda_xml_parser.py/
+agenda_json_parser.py — lá, `scheduled_at` é um datetime ISO completo
+numa única chave/tag, sem a divisão data+hora deste parser (formato
+"moderno" o bastante pra não precisar da conveniência de planilha).
 """
 import csv
 import io

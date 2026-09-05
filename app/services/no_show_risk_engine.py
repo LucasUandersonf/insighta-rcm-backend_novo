@@ -49,12 +49,22 @@ normalization_service.py) busca o valor configurado do tenant e passa
 aqui; sem configuração, caem nos defaults acima. A função continua pura
 (sem tocar banco), só ganhou dois parâmetros com default.
 """
+import statistics
 from dataclasses import dataclass
 from datetime import datetime
 
 MIN_SPECIFIC_SAMPLES = 3
 DEFAULT_LOW_THRESHOLD = 0.10
 DEFAULT_MEDIUM_THRESHOLD = 0.30
+
+# Achado do usuário: os defaults acima são um chute de partida, não uma
+# calibração validada — MIN_PATIENTS_FOR_SUGGESTION é a amostra mínima de
+# PACIENTES (não de atendimentos) antes de sugerir um limiar calculado a
+# partir do histórico real da própria clínica. Mesmo raciocínio de
+# "nunca inventar confiança que a evidência não dá" de MIN_SPECIFIC_SAMPLES:
+# com poucos pacientes qualificados, qualquer percentil é ruído, não um
+# padrão real da clínica.
+MIN_PATIENTS_FOR_SUGGESTION = 10
 
 _COMPLETED_OR_NO_SHOW = ("completed", "no_show")
 
@@ -75,6 +85,54 @@ def resolve_thresholds(tenant) -> tuple[float, float]:
         float(tenant.no_show_medium_threshold) if tenant.no_show_medium_threshold is not None else DEFAULT_MEDIUM_THRESHOLD
     )
     return low, medium
+
+
+@dataclass
+class ThresholdSuggestion:
+    low_threshold: float
+    medium_threshold: float
+    sample_size: int  # quantos pacientes qualificados entraram no cálculo
+
+
+def suggest_thresholds(patient_no_show_rates: list[float]) -> ThresholdSuggestion | None:
+    """
+    Sugere `low_threshold`/`medium_threshold` a partir da DISTRIBUIÇÃO
+    REAL de taxa de falta por paciente desta clínica (ver
+    AnalyticsRepository.all_patient_no_show_rates) — não um cálculo
+    genérico igual pra qualquer clínica.
+
+    - `low_threshold` = mediana (P50): metade dos pacientes desta
+      clínica, com amostra suficiente, fica abaixo disso — "comportamento
+      típico" vira risco baixo.
+    - `medium_threshold` = percentil 85: só os 15% piores casos da
+      PRÓPRIA clínica entram na faixa de risco alto — calibrado ao
+      perfil real da especialidade, não a um corte importado de outro
+      lugar.
+
+    Retorna None com menos de MIN_PATIENTS_FOR_SUGGESTION pacientes
+    qualificados no histórico — mesma cautela de "indeterminado" já
+    usada no resto do motor: poucos pacientes tornam qualquer percentil
+    ruído estatístico, não um padrão real. Quem chama decide como
+    comunicar isso (ex: "ainda não há histórico suficiente").
+    """
+    if len(patient_no_show_rates) < MIN_PATIENTS_FOR_SUGGESTION:
+        return None
+
+    sorted_rates = sorted(patient_no_show_rates)
+    low = statistics.median(sorted_rates)
+    # statistics.quantiles(data, n=20) devolve 19 pontos de corte dividindo
+    # os dados em 20 grupos iguais — o ponto na posição i (1-indexado)
+    # corresponde ao percentil 5*i. Percentil 85 -> i=17 -> índice 16
+    # (0-indexado) na lista devolvida.
+    medium = statistics.quantiles(sorted_rates, n=20)[16]
+    # Defesa: com uma distribuição muito concentrada, P85 pode empatar ou
+    # ficar abaixo da mediana (ex: quase todo mundo com a MESMA taxa) —
+    # o motor exige low < medium (mesma regra de TenantService.update_own_tenant),
+    # então nunca sugerimos um par inválido.
+    if medium <= low:
+        medium = min(low + 0.01, 0.99)
+
+    return ThresholdSuggestion(low_threshold=round(low, 4), medium_threshold=round(medium, 4), sample_size=len(sorted_rates))
 
 
 @dataclass

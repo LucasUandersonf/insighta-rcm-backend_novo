@@ -30,6 +30,7 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
+from app.repositories.ingestion_column_alias_repository import IngestionColumnAliasRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
@@ -37,13 +38,17 @@ from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.ingestion import (
+    ColumnAliasResponse,
+    ColumnMappingPreviewResponse,
     IngestionFileResponse,
     RejectedRowResponse,
     ResolveInsurancePlanRequest,
     ResolveInsurancePlanResponse,
+    SaveColumnAliasesRequest,
     UploadIngestionFileResponse,
 )
 from app.schemas.pagination import PaginatedResponse
+from app.services.column_mapping_service import ALL_CANONICAL_FIELDS, EmptyCsvHeaderError, extract_csv_headers, suggest_mapping
 from app.services.ingestion_processing_service import FileParsingError, process_uploaded_file
 from app.services.ingestion_storage_client import IngestionStorageClient, IngestionStorageError, build_upload_key
 from app.services.normalization_service import NormalizationService
@@ -201,9 +206,8 @@ async def upload_ingestion_file(
     processamento na mesma requisição.
 
     `data_type` escolhe QUAL template de integração o arquivo segue —
-    "faturamento" (padrão, retrocompatível: CSV/XML/JSON) ou "agenda"
-    (só CSV por ora — ver app/sql/019_agenda_ingestion.sql e
-    agenda_csv_parser.py). Os dois compartilham o resto do pipeline.
+    "faturamento" ou "agenda" (ver app/sql/019_agenda_ingestion.sql) —
+    os dois aceitam CSV/XML/JSON e compartilham o resto do pipeline.
 
     - 201: arquivo novo, processado agora.
     - 200: MESMO arquivo (mesma chave de idempotência) já havia sido
@@ -228,12 +232,6 @@ async def upload_ingestion_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Formato de arquivo não reconhecido. Envie um arquivo .csv, .xml ou .json.",
         )
-    if data_type == "agenda" and file_format != "csv":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Template de Agenda só aceita arquivo .csv por ora.",
-        )
-
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo vazio.")
@@ -245,7 +243,7 @@ async def upload_ingestion_file(
     except IngestionStorageError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
-    s3_key = build_upload_key(current_user.tenant_id, file_format, filename)
+    s3_key = build_upload_key(current_user.tenant_id, data_type, file_format, filename)
     try:
         version_id = await storage.upload_bytes(key=s3_key, raw_bytes=raw_bytes)
     except Exception as exc:  # boto3 lança tipos variados de erro de rede/credencial
@@ -314,3 +312,108 @@ async def list_ingestion_files(
     files, total = await repo.list_files_paginated(limit=limit, offset=offset)
     items = [IngestionFileResponse.model_validate(f) for f in files]
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+# =====================================================================
+# Mapeador Automático de Coluna — ver DECISÃO em
+# app/sql/021_ingestion_column_aliases.sql e app/services/column_mapping_service.py.
+# Escopo desta versão: só CSV de Faturamento.
+# =====================================================================
+
+
+@router.post("/preview-headers", response_model=ColumnMappingPreviewResponse)
+async def preview_column_mapping(
+    db: DbSession,
+    file: UploadFile = File(...),
+    data_type: str = Form("faturamento"),
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> ColumnMappingPreviewResponse:
+    """
+    Etapa 1 do Mapeador Automático de Coluna: lê SÓ o cabeçalho do
+    arquivo (nunca processa/grava linha nenhuma) e devolve uma sugestão
+    de mapeamento para os campos obrigatórios que o cabeçalho padrão (ou
+    um alias já salvo) ainda não reconhece. O usuário revisa/corrige a
+    sugestão e confirma via POST /ingestion/column-aliases — só DEPOIS
+    disso um upload de verdade (POST /ingestion/upload) aplica o
+    mapeamento.
+    """
+    if data_type != "faturamento":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mapeador automático de coluna só está disponível para o template de Faturamento por ora.",
+        )
+
+    filename = file.filename or "arquivo"
+    file_format = _detect_file_format(filename, file.content_type)
+    if file_format != "csv":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mapeador automático de coluna só está disponível para arquivo .csv por ora.",
+        )
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo vazio.")
+
+    try:
+        raw_headers = extract_csv_headers(raw_bytes)
+    except EmptyCsvHeaderError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    existing_aliases = await IngestionColumnAliasRepository(db).get_mapping(UUID(current_user.tenant_id), data_type)
+    preview = suggest_mapping(raw_headers, existing_aliases)
+
+    return ColumnMappingPreviewResponse(
+        raw_headers=preview.raw_headers,
+        suggested_mapping=preview.suggested_mapping,
+        unresolved_required_fields=preview.unresolved_required_fields,
+    )
+
+
+@router.get("/column-aliases", response_model=list[ColumnAliasResponse])
+async def list_column_aliases(
+    db: DbSession,
+    data_type: str = Query("faturamento"),
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> list[ColumnAliasResponse]:
+    """Tela de revisão: todo mapeamento já confirmado por este tenant
+    para este template — cada linha pode ser removida individualmente
+    (DELETE /ingestion/column-aliases/{id})."""
+    aliases = await IngestionColumnAliasRepository(db).list_for_tenant(UUID(current_user.tenant_id), data_type)
+    return [ColumnAliasResponse.model_validate(a) for a in aliases]
+
+
+@router.post("/column-aliases", response_model=list[ColumnAliasResponse], status_code=status.HTTP_201_CREATED)
+async def save_column_aliases(
+    payload: SaveColumnAliasesRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> list[ColumnAliasResponse]:
+    """
+    Etapa 2 (confirmação) do Mapeador Automático de Coluna — normalmente
+    `suggested_mapping` do preview, já revisado. A partir daqui, todo
+    upload FUTURO deste tenant para este `data_type` aplica o mapeamento
+    sozinho (ver DECISÃO em ingestion_processing_service.py).
+    """
+    invalid_fields = set(payload.mapping.values()) - ALL_CANONICAL_FIELDS
+    if invalid_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Campo(s) canônico(s) não reconhecido(s): {', '.join(sorted(invalid_fields))}.",
+        )
+
+    repo = IngestionColumnAliasRepository(db)
+    await repo.save_many(UUID(current_user.tenant_id), payload.data_type, payload.mapping)
+    aliases = await repo.list_for_tenant(UUID(current_user.tenant_id), payload.data_type)
+    return [ColumnAliasResponse.model_validate(a) for a in aliases]
+
+
+@router.delete("/column-aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_column_alias(
+    alias_id: UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> None:
+    deleted = await IngestionColumnAliasRepository(db).delete(UUID(current_user.tenant_id), alias_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alias não encontrado neste tenant.")

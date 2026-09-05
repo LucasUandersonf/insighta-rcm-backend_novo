@@ -56,3 +56,15 @@ class TenantUpdateRequest(BaseModel):
     annual_revenue_goal: float | None = Field(default=None, gt=0)
     no_show_low_threshold: float | None = Field(default=None, gt=0, lt=1)
     no_show_medium_threshold: float | None = Field(default=None, gt=0, lt=1)
+
+
+class NoShowThresholdSuggestionResponse(BaseModel):
+    """GET /tenant/no-show-thresholds/suggested — ver DECISÃO completa em
+    no_show_risk_engine.suggest_thresholds. Campos None quando a clínica
+    ainda não tem histórico suficiente (menos de MIN_PATIENTS_FOR_SUGGESTION
+    pacientes qualificados) — nunca um valor calculado sobre amostra
+    pequena demais para significar algo real."""
+
+    low_threshold: float | None
+    medium_threshold: float | None
+    sample_size: int

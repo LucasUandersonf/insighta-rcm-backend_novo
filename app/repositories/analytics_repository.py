@@ -319,6 +319,33 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
+    async def all_patient_no_show_rates(self, *, min_sample: int = 3) -> list[float]:
+        """
+        Taxa de falta de CADA paciente com amostra suficiente
+        (>= min_sample atendimentos resolvidos), SEM filtro de data e SEM
+        exigir pelo menos 1 falta — diferente de `top_no_show_patients`
+        (a lista vermelha de quem já é problema), aqui é a distribuição
+        INTEIRA da clínica, inclusive pacientes com 0% de falta. Usado
+        só para SUGERIR um limiar de risco calibrado com o histórico real
+        desta clínica (ver no_show_risk_engine.suggest_thresholds) — não
+        alimenta nenhum dashboard.
+
+        Sem filtro de período de propósito: calibrar limiar com o
+        histórico INTEIRO da clínica é mais estável estatisticamente do
+        que uma janela recente pequena.
+        """
+        stmt = text(
+            """
+            SELECT COUNT(*) FILTER (WHERE a.status = 'no_show')::float / COUNT(*) AS rate
+            FROM core.appointments a
+            WHERE a.status IN ('completed', 'no_show')
+            GROUP BY a.patient_id
+            HAVING COUNT(*) >= :min_sample
+            """
+        )
+        result = await self.session.execute(stmt, {"min_sample": min_sample})
+        return [row[0] for row in result.all()]
+
     async def upcoming_risk_appointments(self, *, as_of: datetime, min_level: tuple[str, ...] = ("medio", "alto"), limit: int = 6) -> list[dict]:
         """
         Próximos agendamentos (status 'scheduled', ainda no futuro) com

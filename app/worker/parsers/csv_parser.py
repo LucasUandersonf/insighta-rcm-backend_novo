@@ -36,10 +36,12 @@ from pydantic import ValidationError
 from app.worker.schemas import RawBillingRow, RowParseResult
 
 # Mapeamento de cabeçalho esperado do CSV -> campo do schema canônico.
-# Centralizado aqui para o dia em que precisarmos suportar um layout de
-# CSV ligeiramente diferente por tenant (ficaria um dict por tenant, não
-# uma reescrita do parser).
-_EXPECTED_HEADERS = {
+# Público (sem underscore) porque também é consumido pelo Mapeador
+# Automático de Coluna (app/services/column_mapping_service.py), que
+# precisa saber quais cabeçalhos JÁ são reconhecidos por padrão antes de
+# sugerir um alias para os que não são — ver DECISÃO em
+# app/sql/021_ingestion_column_aliases.sql.
+EXPECTED_HEADERS = {
     "cpf_paciente": "patient_cpf",
     "nome_paciente": "patient_name",
     # Colunas OPCIONAIS (achado F-02 da Auditoria Go-Live): quando o
@@ -74,7 +76,17 @@ _OPTIONAL_STRING_FIELDS = (
 )
 
 
-def parse(raw_bytes: bytes) -> list[RowParseResult]:
+def parse(raw_bytes: bytes, header_aliases: dict[str, str] | None = None) -> list[RowParseResult]:
+    """
+    `header_aliases` (opcional) — {cabeçalho do arquivo: campo canônico}
+    já confirmados por este tenant no Mapeador Automático de Coluna (ver
+    IngestionColumnAliasRepository.get_mapping) — mesclado POR CIMA de
+    EXPECTED_HEADERS, então um alias pode ensinar um cabeçalho novo (ex:
+    "CPF_PAC" -> patient_cpf) sem precisar mexer no dicionário padrão.
+    None (o caso comum — a maioria dos tenants nunca precisa de alias)
+    mantém o comportamento de sempre.
+    """
+    combined_headers = {**EXPECTED_HEADERS, **(header_aliases or {})}
     text = raw_bytes.decode("utf-8-sig")  # utf-8-sig tolera BOM comum em export de sistema legado Windows
     reader = csv.DictReader(io.StringIO(text), delimiter=";")  # ';' é o separador mais comum em export BR (decimal usa vírgula)
 
@@ -83,7 +95,7 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
         try:
             mapped = {
                 canonical_field: raw_row.get(csv_header, "").strip()
-                for csv_header, canonical_field in _EXPECTED_HEADERS.items()
+                for csv_header, canonical_field in combined_headers.items()
             }
             # Campos opcionais: string vazia (coluna ausente ou célula em
             # branco) vira None, não "" — RawBillingRow.professional_name
