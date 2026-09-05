@@ -12,6 +12,7 @@ from fastapi import HTTPException, status
 
 from app.core.config import get_settings
 from app.models.denial_appeal import DenialAppeal, DenialAppealAttachment
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.denial_appeal_attachment_repository import DenialAppealAttachmentRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
@@ -56,6 +57,7 @@ class DenialAppealService:
         plan_repo: InsurancePlanRepository,
         company_repo: InsuranceCompanyRepository,
         tenant_repo: TenantRepository,
+        audit_repo: AuditLogRepository,
     ):
         self.repo = repo
         self.attachment_repo = attachment_repo
@@ -63,6 +65,7 @@ class DenialAppealService:
         self.plan_repo = plan_repo
         self.company_repo = company_repo
         self.tenant_repo = tenant_repo
+        self.audit_repo = audit_repo
 
     async def _resolve_deadline_days(self, insurance_plan_id: uuid.UUID) -> int | None:
         plan = await self.plan_repo.get_by_id(insurance_plan_id)
@@ -97,6 +100,16 @@ class DenialAppealService:
             created_by=created_by,
         )
         saved = await self.repo.add(appeal)
+        # Sem diff — ver DECISÃO em AuditLogRepository.record. `created_by`
+        # já é dado do próprio DenialAppeal; o audit log só prova QUE o
+        # recurso nasceu, POR QUEM, QUANDO.
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=created_by,
+            action="created",
+            entity_type="denial_appeal",
+            entity_id=saved.id,
+        )
         return self._to_response(saved, [])
 
     async def list_appeals(self, *, status_filter: str | None = None) -> list[DenialAppealResponse]:
@@ -125,20 +138,33 @@ class DenialAppealService:
     async def count_due_within(self, *, as_of: date, horizon_days: int) -> int:
         return await self.repo.count_due_within(as_of=as_of, horizon_days=horizon_days)
 
-    async def file_appeal(self, appeal_id: uuid.UUID, filed_at: datetime | None) -> DenialAppealResponse:
+    async def file_appeal(
+        self, tenant_id: str, actor_user_id: uuid.UUID, appeal_id: uuid.UUID, filed_at: datetime | None
+    ) -> DenialAppealResponse:
         appeal = await self._get_or_404(appeal_id)
         if appeal.status != "aberto":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Recurso está em status '{appeal.status}' — só é possível protocolar a partir de 'aberto'.",
             )
+        previous_status = appeal.status
         appeal.status = "protocolado"
         appeal.filed_at = filed_at or datetime.now(timezone.utc)
         await self.repo.save(appeal)
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="filed",
+            entity_type="denial_appeal",
+            entity_id=appeal.id,
+            diff={"status": {"before": previous_status, "after": appeal.status}},
+        )
         attachments = await self.attachment_repo.list_by_appeal(appeal.id)
         return self._to_response(appeal, attachments)
 
-    async def resolve_appeal(self, appeal_id: uuid.UUID, data: DenialAppealResolveRequest) -> DenialAppealResponse:
+    async def resolve_appeal(
+        self, tenant_id: str, actor_user_id: uuid.UUID, appeal_id: uuid.UUID, data: DenialAppealResolveRequest
+    ) -> DenialAppealResponse:
         appeal = await self._get_or_404(appeal_id)
         if appeal.status not in _RESOLVABLE_FROM:
             raise HTTPException(
@@ -148,6 +174,7 @@ class DenialAppealService:
                     "a partir de 'protocolado' (ou reabrir uma NIP em andamento)."
                 ),
             )
+        previous_status = appeal.status
         appeal.status = data.status
         appeal.resolution_notes = data.resolution_notes
         # 'nip_aberta' não é uma resolução final (é uma ESCALADA — o caso
@@ -156,6 +183,14 @@ class DenialAppealService:
         if data.status in ("deferido", "indeferido"):
             appeal.resolved_at = datetime.now(timezone.utc)
         await self.repo.save(appeal)
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="resolved",
+            entity_type="denial_appeal",
+            entity_id=appeal.id,
+            diff={"status": {"before": previous_status, "after": appeal.status}},
+        )
         attachments = await self.attachment_repo.list_by_appeal(appeal.id)
         return self._to_response(appeal, attachments)
 

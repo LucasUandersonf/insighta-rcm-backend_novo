@@ -41,8 +41,10 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 
 ## Tier 2 — Obrigatório antes de dado real de paciente (LGPD/HealthTech)
 
-### A auditoria que foi desenhada mas nunca implementada
-- [ ] **`core.audit_log` existe desde o primeiro DDL, com a justificativa "auditoria é obrigatória em HealthTech" — mas nada no código escreve nela.** Isso precisa ser resolvido antes de qualquer dado real de paciente entrar no sistema: quem acessou o quê, quando, e o quê mudou em `billing`/`patients` precisa ficar registrado de verdade, não só ter uma tabela pronta esperando.
+### A auditoria que foi desenhada mas nunca implementada — RESOLVIDO NESTA RODADA
+- [x] **BUG CORRIGIDO**: `core.audit_log` existia desde o primeiro DDL, com a justificativa "auditoria é obrigatória em HealthTech", mas nada no código escrevia nela — a tela "Log de Auditoria" sempre mostrava vazio. `AuditLogRepository.record()` agora é chamado a cada mutação sensível: criação de paciente, criação/liquidação de faturamento, criação/mudança de papel/desativação/reset de senha de usuário, e todo o ciclo de vida do recurso de glosa (criado/protocolado/resolvido). Ver DECISÃO completa em `app/repositories/audit_log_repository.py` e em cada service (`patient_service.py`, `billing_service.py`, `user_service.py`, `denial_appeal_service.py`).
+- [x] **Diff nunca carrega dado sensível** — eventos de criação não gravam `diff` nenhum (a própria linha, protegida por RLS, é a fonte de verdade); eventos de mudança de estado gravam só o campo operacional que mudou (status, papel, ativo/inativo), nunca CPF, nome, CID ou valor financeiro. Reset de senha nunca grava a senha (nem hash).
+- [ ] Ingestão em massa (upload de planilha) continua de propósito FORA do audit_log — centenas de linhas por arquivo tornariam o trilho ruidoso e a própria tela de histórico de upload (`core.ingestion_files`) já cobre "quem subiu qual arquivo, quando". Auditoria de mutação individual cobre a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
 
 ### LGPD especificamente
 - [ ] Política de retenção e exclusão de dado de paciente (CPF, CID, nome) — o que acontece quando uma clínica cancela a assinatura, ou um paciente pede exclusão?

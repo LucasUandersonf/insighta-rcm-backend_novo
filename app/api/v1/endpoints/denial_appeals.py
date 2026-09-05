@@ -10,6 +10,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import CurrentUser, DbSession, require_role
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.denial_appeal_attachment_repository import DenialAppealAttachmentRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
@@ -44,6 +45,7 @@ def _build_service(db: DbSession) -> DenialAppealService:
         InsurancePlanRepository(db),
         InsuranceCompanyRepository(db),
         TenantRepository(db),
+        AuditLogRepository(db),
     )
 
 
@@ -91,7 +93,7 @@ async def file_denial_appeal(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
 ) -> DenialAppealResponse:
-    return await _build_service(db).file_appeal(appeal_id, payload.filed_at)
+    return await _build_service(db).file_appeal(current_user.tenant_id, uuid.UUID(current_user.id), appeal_id, payload.filed_at)
 
 
 @router.post("/{appeal_id}/resolve", response_model=DenialAppealResponse)
@@ -101,7 +103,7 @@ async def resolve_denial_appeal(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
 ) -> DenialAppealResponse:
-    return await _build_service(db).resolve_appeal(appeal_id, payload)
+    return await _build_service(db).resolve_appeal(current_user.tenant_id, uuid.UUID(current_user.id), appeal_id, payload)
 
 
 @router.post("/{appeal_id}/attachments", response_model=DenialAppealAttachmentResponse, status_code=201)

@@ -634,6 +634,42 @@ esperar ninguém ler o log.
   de usuário ou dado clínico como contexto extra do Sentry — só tags
   técnicas de correlação (`request_id`, `tenant_id`, `role`).
 
+## Trilha de auditoria de acesso (LGPD/HealthTech)
+
+> **BUG CORRIGIDO (rodada de conformidade/LGPD):** `core.audit_log`
+> existia desde o primeiro DDL (`001_init_schema.sql`), com a
+> justificativa explícita "auditoria é obrigatória em HealthTech" — mas
+> nenhuma linha de código de fato escrevia nela. A leitura (endpoint
+> `GET /audit-log`, tela "Log de Auditoria") já existia de uma rodada
+> anterior, mas sempre mostrava vazio, porque não havia nada para
+> mostrar. `AuditLogRepository.record()` (novo) é chamado a partir de:
+>
+> | Serviço | Eventos auditados |
+> |---|---|
+> | `patient_service.py` | criação de paciente |
+> | `billing_service.py` | criação de faturamento; liquidação (`settle`) |
+> | `user_service.py` | criação de usuário; mudança de papel/status ativo; reset administrado de senha |
+> | `denial_appeal_service.py` | abertura, protocolo (`file`) e resolução (`resolve`) de recurso de glosa |
+>
+> **DECISÃO — o `diff` nunca carrega dado sensível.** O objetivo do
+> trilho é responder "quem mudou o quê, quando" — não ser uma SEGUNDA
+> cópia do dado clínico/financeiro (isso aumentaria a superfície de
+> exposição, o oposto do que LGPD pede). Eventos de criação (`created`)
+> nunca levam `diff` — a própria linha, já protegida por RLS, é a fonte
+> de verdade do que foi criado. Eventos de mudança de estado (`updated`,
+> `settled`, `resolved`) levam um `diff` raso só com o campo OPERACIONAL
+> que mudou (status, papel de acesso, flag ativo/inativo) — nunca CPF,
+> nome de paciente, CID, valor de guia/faturamento ou senha (nem hash).
+> `UserService.update_user` só grava uma linha quando papel OU status
+> ativo de fato mudam — editar só o nome não é um evento de controle de
+> acesso, não polui o trilho.
+>
+> **Fora do escopo, de propósito:** a ingestão em massa (upload de
+> planilha) não grava audit_log por linha — centenas de registros por
+> arquivo tornariam o trilho ruidoso, e `core.ingestion_files` já cobre
+> "quem subiu qual arquivo, quando" para esse caminho. O audit_log cobre
+> a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
+
 ## Performance — o que já foi corrigido e o que ainda falta
 Dois achados reais de uma auditoria (não suposição):
 - **Índices em `tenant_id` faltando** em `patients`, `contracts`,
@@ -727,7 +763,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `webhooks` (Meta Ads) | ✅ `test_webhooks.py` (assinatura HMAC, handshake, dedupe) |
 | `reports` (relatório semanal) | ✅ `test_reports.py` (com mock do WhatsApp) |
 | `report-recipients` (Gestão de Contatos para Relatórios) | ✅ `test_report_recipients.py` (CRUD, RBAC, validação "pelo menos um contato") |
-| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC) |
+| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC + escrita de verdade a partir de `patients`/`billing`/`users`/`denial-appeals`, ver "Trilha de auditoria de acesso" acima) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

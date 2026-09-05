@@ -5,6 +5,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import generate_temporary_password, hash_password, verify_password
 from app.models.user import User
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
     PasswordChangeRequest,
@@ -25,16 +26,27 @@ class UserService:
     de owner" é regra de negócio (evita a clínica ficar sem nenhum owner
     ativo, um estado de sistema inválido), não uma checagem de
     autorização de rota — por isso vive aqui, não em require_role().
+
+    DECISÃO — por que TODA mutação aqui vira audit_log
+    -------------------------------------------------------------------
+    Criar usuário, mudar papel de acesso, ativar/desativar e resetar
+    senha de outra pessoa são exatamente o tipo de ação que uma auditoria
+    de conformidade (LGPD/HealthTech) precisa provar "quem fez, quando" —
+    é literalmente controle de QUEM PODE ACESSAR o quê. Nenhum desses
+    eventos carrega senha (nem hash) no `diff`, só o metadado da mudança
+    (papel/status), pelo mesmo motivo de nunca gravar dado sensível
+    duplicado no audit log (ver AuditLogRepository.record).
     """
 
-    def __init__(self, repo: UserRepository):
+    def __init__(self, repo: UserRepository, audit_repo: AuditLogRepository):
         self.repo = repo
+        self.audit_repo = audit_repo
 
     async def list_users(self) -> list[UserResponse]:
         users = await self.repo.list_all()
         return [UserResponse.model_validate(u) for u in users]
 
-    async def create_user(self, tenant_id: str, data: UserCreateRequest) -> tuple[UserResponse, str]:
+    async def create_user(self, tenant_id: str, actor_user_id: uuid.UUID | None, data: UserCreateRequest) -> tuple[UserResponse, str]:
         existing = await self.repo.get_by_email(data.email)
         if existing is not None:
             raise HTTPException(
@@ -53,9 +65,19 @@ class UserService:
                 must_change_password=True,
             )
         )
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="created",
+            entity_type="user",
+            entity_id=user.id,
+            diff={"role": user.role},
+        )
         return UserResponse.model_validate(user), temp_password
 
-    async def update_user(self, current_user_id: str, user_id: uuid.UUID, data: UserUpdateRequest) -> UserResponse:
+    async def update_user(
+        self, tenant_id: str, current_user_id: str, user_id: uuid.UUID, data: UserUpdateRequest
+    ) -> UserResponse:
         user = await self.repo.get_by_id(user_id)
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado.")
@@ -72,6 +94,7 @@ class UserService:
                 detail="Você não pode alterar seu próprio papel de acesso — peça a outro owner/admin.",
             )
 
+        previous_role, previous_active = user.role, user.is_active
         if data.full_name is not None:
             user.full_name = data.full_name
         if data.role is not None:
@@ -79,9 +102,27 @@ class UserService:
         if data.is_active is not None:
             user.is_active = data.is_active
         await self.repo.save(user)
+
+        # Só grava se algo de fato ACESSO-RELEVANTE mudou (papel ou
+        # status ativo) — uma edição que só troca full_name não é um
+        # evento de controle de acesso, não precisa de trilha aqui.
+        changed: dict = {}
+        if user.role != previous_role:
+            changed["role"] = {"before": previous_role, "after": user.role}
+        if user.is_active != previous_active:
+            changed["is_active"] = {"before": previous_active, "after": user.is_active}
+        if changed:
+            await self.audit_repo.record(
+                tenant_id=uuid.UUID(tenant_id),
+                actor_user_id=uuid.UUID(current_user_id),
+                action="updated",
+                entity_type="user",
+                entity_id=user.id,
+                diff=changed,
+            )
         return UserResponse.model_validate(user)
 
-    async def admin_reset_password(self, user_id: uuid.UUID) -> PasswordResetResponse:
+    async def admin_reset_password(self, tenant_id: str, actor_user_id: uuid.UUID, user_id: uuid.UUID) -> PasswordResetResponse:
         user = await self.repo.get_by_id(user_id)
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado.")
@@ -89,6 +130,16 @@ class UserService:
         user.hashed_password = hash_password(temp_password)
         user.must_change_password = True
         await self.repo.save(user)
+        # Sem diff — a senha (nem hash) nunca entra no audit log; o fato
+        # de QUEM resetou a senha de QUEM já é o dado de conformidade
+        # relevante aqui.
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="password_reset",
+            entity_type="user",
+            entity_id=user.id,
+        )
         return PasswordResetResponse(temporary_password=temp_password)
 
     async def get_own_profile(self, user_id: uuid.UUID) -> UserResponse:
