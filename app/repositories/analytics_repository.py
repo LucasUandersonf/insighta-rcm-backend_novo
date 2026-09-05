@@ -346,7 +346,14 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"min_sample": min_sample})
         return [row[0] for row in result.all()]
 
-    async def upcoming_risk_appointments(self, *, as_of: datetime, min_level: tuple[str, ...] = ("medio", "alto"), limit: int = 6) -> list[dict]:
+    async def upcoming_risk_appointments(
+        self,
+        *,
+        as_of: datetime,
+        min_level: tuple[str, ...] = ("medio", "alto"),
+        limit: int = 6,
+        until: datetime | None = None,
+    ) -> list[dict]:
         """
         Próximos agendamentos (status 'scheduled', ainda no futuro) com
         risco de falta médio ou alto, mais próximos primeiro — a "lista de
@@ -359,6 +366,12 @@ class AnalyticsRepository:
         sempre "a partir de agora", igual a `DenialAppealRepository.
         count_due_within`: uma lista de ação não fica "vazia" só porque o
         gestor escolheu ver os últimos 7 dias no seletor do dashboard.
+
+        `until` — teto OPCIONAL adicionado para o alerta diário de risco
+        (app/worker/daily_alert_job.py), que quer só a janela das
+        próximas 24h, não "todo o futuro" como o card do dashboard
+        (chamador original, que nunca passa este parâmetro e continua
+        com o comportamento de sempre).
         """
         stmt = text(
             """
@@ -367,12 +380,15 @@ class AnalyticsRepository:
             JOIN core.patients p ON p.id = a.patient_id
             WHERE a.status = 'scheduled'
               AND a.scheduled_at >= :as_of
+              AND (CAST(:until AS timestamptz) IS NULL OR a.scheduled_at <= CAST(:until AS timestamptz))
               AND a.no_show_risk_level = ANY(:levels)
             ORDER BY a.scheduled_at ASC
             LIMIT :limit
             """
         )
-        result = await self.session.execute(stmt, {"as_of": as_of, "levels": list(min_level), "limit": limit})
+        result = await self.session.execute(
+            stmt, {"as_of": as_of, "until": until, "levels": list(min_level), "limit": limit}
+        )
         return [
             {"appointment_id": row[0], "patient_full_name": row[1], "scheduled_at": row[2], "risk_level": row[3]}
             for row in result.all()

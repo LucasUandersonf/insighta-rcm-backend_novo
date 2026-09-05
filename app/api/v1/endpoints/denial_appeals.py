@@ -7,7 +7,7 @@ dado financeiro/jurídico sensível, 'atendimento' fora.
 """
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.billing_repository import BillingRepository
@@ -15,6 +15,7 @@ from app.repositories.denial_appeal_attachment_repository import DenialAppealAtt
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.insurance_company_repository import InsuranceCompanyRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.schemas.denial_appeal import (
     DenialAppealAttachmentResponse,
     DenialAppealCreateRequest,
@@ -42,6 +43,7 @@ def _build_service(db: DbSession) -> DenialAppealService:
         BillingRepository(db),
         InsurancePlanRepository(db),
         InsuranceCompanyRepository(db),
+        TenantRepository(db),
     )
 
 
@@ -132,3 +134,28 @@ async def list_denial_appeal_attachments(
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
 ) -> list[DenialAppealAttachmentResponse]:
     return await _build_service(db).list_attachments(appeal_id)
+
+
+@router.get("/{appeal_id}/document")
+async def download_denial_appeal_document(
+    appeal_id: uuid.UUID,
+    db: DbSession,
+    justification: str | None = Query(
+        None, description="Justificativa de mérito do recurso — se omitida, o PDF sai com um placeholder pra completar."
+    ),
+    current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
+) -> Response:
+    """
+    Gera na hora (nunca fica salvo) o RASCUNHO em PDF do documento de
+    recurso, com todos os dados factuais já preenchidos — ver DECISÃO
+    completa em app/services/denial_appeal_pdf_builder.py. Leitura
+    (_CAN_READ), não escrita: gerar o documento não muda o status do
+    recurso, é só um jeito de sair daqui com o rascunho pronto pra
+    completar e protocolar pelo canal da operadora.
+    """
+    pdf_bytes = await _build_service(db).build_appeal_document(current_user.tenant_id, appeal_id, justification)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="recurso_glosa_{appeal_id}.pdf"'},
+    )

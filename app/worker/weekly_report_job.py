@@ -17,12 +17,11 @@ import asyncio
 import logging
 from datetime import date, timedelta
 
-from sqlalchemy import select
-
-from app.db.session import get_db_no_tenant, get_db_with_tenant
+from app.db.session import get_db_with_tenant
 from app.models.tenant import Tenant
 from app.services.report_send_service import send_report_to_recipients
 from app.services.whatsapp_client import WhatsAppClient
+from app.worker.active_tenants import list_active_tenants
 
 logger = logging.getLogger("weekly_report_job")
 
@@ -35,21 +34,6 @@ def _last_full_week() -> tuple[date, date]:
     last_monday = this_monday - timedelta(days=7)
     last_sunday = this_monday - timedelta(days=1)
     return last_monday, last_sunday
-
-
-async def _active_tenants() -> list[Tenant]:
-    """Antes filtrava por `Tenant.whatsapp_group_id.is_not(None))` — o
-    destino único de outrora. Agora o destino é dado por
-    `core.report_recipients` (N por tenant, ver DECISÃO em
-    app/sql/009_report_recipients.sql), então a elegibilidade não é mais
-    decidida aqui: qualquer tenant ativo é candidato, e
-    `_process_tenant` simplesmente não envia nada (e não é contado como
-    falha) se não houver nenhum destinatário elegível para
-    `report_send_service.REPORT_TYPE`."""
-    async for session in get_db_no_tenant():
-        result = await session.execute(select(Tenant).where(Tenant.is_active.is_(True)))
-        return list(result.scalars().all())
-    return []  # pragma: no cover
 
 
 async def _process_tenant(tenant: Tenant, period_start: date, period_end: date, client: WhatsAppClient) -> None:
@@ -72,7 +56,7 @@ async def _process_tenant(tenant: Tenant, period_start: date, period_end: date, 
 
 async def run() -> None:
     period_start, period_end = _last_full_week()
-    tenants = await _active_tenants()
+    tenants = await list_active_tenants()
     logger.info("Relatório semanal: %d tenant(s) ativo(s), período %s a %s", len(tenants), period_start, period_end)
 
     client = WhatsAppClient()  # levanta WhatsAppClientError cedo se credenciais não configuradas

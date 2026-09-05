@@ -22,3 +22,17 @@ class WeeklyReportResponse(BaseModel):
     sent: int = 0
     failed: int = 0
     detail: str
+
+
+class RiskAlertSendResponse(BaseModel):
+    """Resposta do disparo sob demanda de app/services/report_send_service.py
+    (send_daily_risk_alert) — mesmo formato de WeeklyReportResponse, sem
+    period_start/period_end porque o alerta é sempre "próximas 24h a
+    partir de agora", não um período configurável."""
+
+    sent_via_whatsapp: bool
+    recipients_checked: int = 0
+    high_risk_appointments: int = 0
+    sent: int = 0
+    failed: int = 0
+    detail: str

@@ -44,11 +44,12 @@ de reutilizar sem risco de vazar dado entre tenants.
 """
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant import Tenant
+from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -56,6 +57,7 @@ from app.repositories.report_recipient_repository import ReportRecipientReposito
 from app.repositories.reporting_repository import ReportingRepository
 from app.services.report_data_service import ReportDataService
 from app.services.report_pdf_builder import build_weekly_report_pdf
+from app.services.risk_alert_pdf_builder import RiskAlertAppointment, build_daily_risk_alert_pdf
 from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
 
 # Tipo de relatório usado para filtrar core.report_recipients (ver
@@ -65,12 +67,24 @@ from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
 # recebe este relatório se "weekly_summary" estiver nela.
 REPORT_TYPE = "weekly_summary"
 
+# Segundo tipo de relatório — ver DECISÃO completa em
+# send_daily_risk_alert() logo abaixo. Um destinatário com
+# `report_types` vazio (curinga "todos") também recebe este alerta; um
+# destinatário que só quer o resumo semanal precisa deixar este de fora
+# explicitamente na lista.
+DAILY_RISK_ALERT_REPORT_TYPE = "daily_risk_alert"
+
 
 @dataclass
 class ReportSendResult:
     recipients_checked: int  # destinatários com WhatsApp cadastrado, elegíveis para este tipo de relatório
     sent: int
     failed: int
+    # Só preenchido por send_daily_risk_alert (fica 0, o default, no
+    # relatório semanal) — quantos agendamentos de risco alto entraram
+    # no PDF enviado, para o chamador poder informar isso sem precisar
+    # rodar a mesma consulta de novo.
+    high_risk_appointments_found: int = 0
 
 
 async def send_report_to_recipients(
@@ -132,3 +146,77 @@ async def send_report_to_recipients(
             failed += 1
 
     return ReportSendResult(recipients_checked=len(whatsapp_recipients), sent=sent, failed=failed)
+
+
+async def send_daily_risk_alert(
+    db: AsyncSession,
+    tenant: Tenant,
+    as_of: datetime,
+    client_factory: Callable[[], WhatsAppClient],
+) -> ReportSendResult:
+    """
+    Alerta QUASE-EM-TEMPO-REAL (rodado várias vezes ao dia, ver
+    app/worker/daily_alert_job.py) dos agendamentos de risco ALTO de
+    falta nas próximas 24h — diferente de `send_report_to_recipients`,
+    que é semanal/sob-demanda e olha pra TRÁS (semana fechada).
+
+    DECISÃO — reaproveita o MESMO mecanismo de envio (template de
+    documento já aprovado), não um tipo de mensagem novo
+    -------------------------------------------------------------------
+    A API do WhatsApp Business só permite iniciar conversa via um
+    "message template" pré-aprovado pela Meta (ver DECISÃO em
+    whatsapp_client.py) — criar um alerta de TEXTO livre exigiria
+    aprovar um template novo na Meta, uma dependência de configuração de
+    conta fora do controle deste código. Em vez disso, o alerta é só
+    outro PDF (curto, de ação) enviado pelo MESMO caminho de documento
+    que já funciona (`WhatsAppClient.send_weekly_report` — o nome do
+    método é histórico, mas ele só encapsula "sobe PDF, manda template
+    de documento com esse media_id"; nada aqui é específico do
+    relatório semanal). Zero dependência nova de aprovação de template.
+
+    `recipients_checked == 0` continua sendo "sem destinatário
+    cadastrado" (mesmo caminho feliz de `send_report_to_recipients`) —
+    NUNCA constrói o client antes de confirmar que há pelo menos um. Já
+    "nenhum agendamento de risco alto nas próximas 24h" é um segundo
+    caminho feliz DIFERENTE (destinatário existe, só não há nada a
+    alertar agora), por isso reportado separado, em
+    `high_risk_appointments_found == 0` com `recipients_checked > 0` —
+    igualmente comum, e ainda mais frequente que o primeiro (a maioria
+    dos disparos do cron não deve encontrar nada de risco alto na
+    janela).
+    """
+    recipients = await ReportRecipientRepository(db).list_for_report_type(tenant.id, DAILY_RISK_ALERT_REPORT_TYPE)
+    whatsapp_recipients = [r for r in recipients if r.phone_whatsapp]
+    if not whatsapp_recipients:
+        return ReportSendResult(recipients_checked=0, sent=0, failed=0, high_risk_appointments_found=0)
+
+    window_end = as_of + timedelta(hours=24)
+    rows = await AnalyticsRepository(db).upcoming_risk_appointments(
+        as_of=as_of, min_level=("alto",), limit=200, until=window_end
+    )
+    if not rows:
+        return ReportSendResult(
+            recipients_checked=len(whatsapp_recipients), sent=0, failed=0, high_risk_appointments_found=0
+        )
+
+    appointments = [
+        RiskAlertAppointment(patient_full_name=row["patient_full_name"], scheduled_at=row["scheduled_at"], risk_level=row["risk_level"])
+        for row in rows
+    ]
+
+    client = client_factory()
+
+    pdf_bytes = build_daily_risk_alert_pdf(tenant.trade_name, appointments)
+    filename = f"alerta_risco_falta_{as_of.date().isoformat()}.pdf"
+
+    sent, failed = 0, 0
+    for recipient in whatsapp_recipients:
+        try:
+            await client.send_weekly_report(to_phone_number=recipient.phone_whatsapp, pdf_bytes=pdf_bytes, filename=filename)
+            sent += 1
+        except WhatsAppClientError:
+            failed += 1
+
+    return ReportSendResult(
+        recipients_checked=len(whatsapp_recipients), sent=sent, failed=failed, high_risk_appointments_found=len(appointments)
+    )

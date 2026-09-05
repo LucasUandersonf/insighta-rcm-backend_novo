@@ -28,7 +28,7 @@ core/security.py), então buscamos o tenant diretamente pela MESMA sessão
 árvore de isolamento, ver 001_init_schema.sql), então essa leitura
 funciona normalmente mesmo dentro de uma sessão tenant-aware.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -36,8 +36,8 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.models.tenant import Tenant
-from app.schemas.report import WeeklyReportRequest, WeeklyReportResponse
-from app.services.report_send_service import send_report_to_recipients
+from app.schemas.report import RiskAlertSendResponse, WeeklyReportRequest, WeeklyReportResponse
+from app.services.report_send_service import send_daily_risk_alert, send_report_to_recipients
 from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -95,5 +95,67 @@ async def send_weekly_report_now(
             f"Relatório enviado a {result.sent} de {result.recipients_checked} destinatário(s)."
             if result.failed == 0
             else f"Relatório enviado a {result.sent} de {result.recipients_checked} destinatário(s) — {result.failed} falha(s)."
+        ),
+    )
+
+
+@router.post("/risk-alert/send", response_model=RiskAlertSendResponse)
+async def send_daily_risk_alert_now(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role("admin", "owner")),
+) -> RiskAlertSendResponse:
+    """
+    Disparo sob demanda do "Alerta diário de risco de falta" — mesmo
+    caso de uso do botão "Enviar agora" do relatório semanal, aqui para
+    quem não quer esperar o próximo ciclo do cron
+    (app/worker/daily_alert_job.py) para confirmar quem está em risco
+    alto nas próximas 24h. Sempre "agora", sem período configurável —
+    ver DECISÃO em app/worker/daily_alert_job.py.
+    """
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == UUID(current_user.tenant_id)))
+    tenant = tenant_result.scalar_one()  # sempre existe: é o próprio tenant do usuário autenticado
+
+    try:
+        result = await send_daily_risk_alert(db, tenant, datetime.now(timezone.utc), WhatsAppClient)
+    except WhatsAppClientError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    if result.recipients_checked == 0:
+        return RiskAlertSendResponse(
+            sent_via_whatsapp=False,
+            recipients_checked=0,
+            high_risk_appointments=0,
+            sent=0,
+            failed=0,
+            detail=(
+                "Nenhum destinatário de alerta de risco com WhatsApp cadastrado para este tenant — "
+                "cadastre um em Setup > Destinatários de Relatório."
+            ),
+        )
+
+    if result.high_risk_appointments_found == 0:
+        return RiskAlertSendResponse(
+            sent_via_whatsapp=False,
+            recipients_checked=result.recipients_checked,
+            high_risk_appointments=0,
+            sent=0,
+            failed=0,
+            detail="Nenhum agendamento de risco alto nas próximas 24h — nada a alertar agora.",
+        )
+
+    return RiskAlertSendResponse(
+        sent_via_whatsapp=result.sent > 0,
+        recipients_checked=result.recipients_checked,
+        high_risk_appointments=result.high_risk_appointments_found,
+        sent=result.sent,
+        failed=result.failed,
+        detail=(
+            f"Alerta enviado a {result.sent} de {result.recipients_checked} destinatário(s) "
+            f"sobre {result.high_risk_appointments_found} agendamento(s) de risco alto."
+            if result.failed == 0
+            else (
+                f"Alerta enviado a {result.sent} de {result.recipients_checked} destinatário(s) "
+                f"sobre {result.high_risk_appointments_found} agendamento(s) de risco alto — {result.failed} falha(s)."
+            )
         ),
     )

@@ -17,6 +17,7 @@ from app.repositories.denial_appeal_attachment_repository import DenialAppealAtt
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.insurance_company_repository import InsuranceCompanyRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.schemas.denial_appeal import (
     DenialAppealAttachmentResponse,
     DenialAppealCreateRequest,
@@ -25,6 +26,7 @@ from app.schemas.denial_appeal import (
 )
 from app.services.appeal_deadline_calculator import compute_deadline
 from app.services.appeal_storage_client import AppealStorageClient, AppealStorageError, build_attachment_key
+from app.services.denial_appeal_pdf_builder import DenialAppealDocumentContext, build_denial_appeal_pdf
 
 settings = get_settings()
 
@@ -53,12 +55,14 @@ class DenialAppealService:
         billing_repo: BillingRepository,
         plan_repo: InsurancePlanRepository,
         company_repo: InsuranceCompanyRepository,
+        tenant_repo: TenantRepository,
     ):
         self.repo = repo
         self.attachment_repo = attachment_repo
         self.billing_repo = billing_repo
         self.plan_repo = plan_repo
         self.company_repo = company_repo
+        self.tenant_repo = tenant_repo
 
     async def _resolve_deadline_days(self, insurance_plan_id: uuid.UUID) -> int | None:
         plan = await self.plan_repo.get_by_id(insurance_plan_id)
@@ -188,6 +192,46 @@ class DenialAppealService:
         await self._get_or_404(appeal_id)
         attachments = await self.attachment_repo.list_by_appeal(appeal_id)
         return [DenialAppealAttachmentResponse.model_validate(a) for a in attachments]
+
+    async def build_appeal_document(self, tenant_id: str, appeal_id: uuid.UUID, justification: str | None) -> bytes:
+        """
+        Gera o RASCUNHO em PDF do documento de recurso — ver DECISÃO
+        completa em denial_appeal_pdf_builder.py (dados factuais
+        pré-preenchidos, justificativa de mérito fica a cargo do
+        usuário). `_get_or_404` primeiro pelo mesmo motivo de sempre:
+        nunca revelar via 404-vs-outro-erro se um appeal_id de outro
+        tenant existe (RLS já impede o SELECT de enxergar, mas o
+        contrato de erro fica consistente com o resto do produto).
+        """
+        await self._get_or_404(appeal_id)
+        context_row = await self.repo.get_document_context(appeal_id)
+        assert context_row is not None  # _get_or_404 já confirmou que o appeal existe
+
+        tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
+        assert tenant is not None  # tenant_id vem de um JWT já validado
+
+        context = DenialAppealDocumentContext(
+            tenant_legal_name=tenant.legal_name,
+            tenant_cnpj=tenant.cnpj,
+            appeal_type=context_row["appeal_type"],
+            operator_denial_reason=context_row["operator_denial_reason"],
+            denied_at=context_row["denied_at"],
+            deadline_at=context_row["deadline_at"],
+            insurance_plan_name=context_row["insurance_plan_name"],
+            patient_name=context_row["patient_name"],
+            patient_cpf=context_row["patient_cpf"],
+            professional_name=context_row["professional_name"],
+            professional_registry=context_row["professional_registry"],
+            procedure_code=context_row["procedure_code"],
+            cid_code=context_row["cid_code"],
+            service_date=context_row["service_date"],
+            charged_value=float(context_row["charged_value"]),
+            guia_tipo=context_row["guia_tipo"],
+            guia_numero=context_row["guia_numero"],
+            guia_senha=context_row["guia_senha"],
+            justification=justification,
+        )
+        return build_denial_appeal_pdf(context)
 
     async def _get_or_404(self, appeal_id: uuid.UUID) -> DenialAppeal:
         appeal = await self.repo.get_by_id(appeal_id)

@@ -163,3 +163,81 @@ async def test_atendimento_cannot_create_denial_appeal(client, admin_engine, ten
         headers=headers,
     )
     assert response.status_code == 403
+
+
+# =====================================================================
+# Documento de Recurso de Glosa (PDF) — ver DECISÃO em
+# app/services/denial_appeal_pdf_builder.py.
+# =====================================================================
+
+
+async def _create_appeal(client, auth_headers, billing_id: str, *, appeal_type="administrativa", reason="Falta de guia de autorização prévia.") -> str:
+    response = await client.post(
+        "/api/v1/denial-appeals",
+        json={
+            "billing_id": billing_id,
+            "appeal_type": appeal_type,
+            "operator_denial_reason": reason,
+            "denied_at": date.today().isoformat(),
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+async def test_download_appeal_document_returns_pdf_with_placeholder_justification(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    response = await client.get(f"/api/v1/denial-appeals/{appeal_id}/document", headers=auth_headers_a)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content[:4] == b"%PDF"
+    assert f"recurso_glosa_{appeal_id}" in response.headers["content-disposition"]
+
+
+async def test_download_appeal_document_embeds_custom_justification(client, auth_headers_a, admin_engine, tenant_a):
+    """Não dá pra abrir o PDF gerado e ler o texto num teste sem uma lib
+    de extração — mas o tamanho do arquivo muda de forma perceptível
+    entre o placeholder padrão e um texto bem mais longo, o suficiente
+    pra confirmar que o parâmetro `justification` de fato chega ao
+    documento em vez de ser ignorado."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    default_resp = await client.get(f"/api/v1/denial-appeals/{appeal_id}/document", headers=auth_headers_a)
+    assert default_resp.status_code == 200
+
+    long_justification = "Justificativa detalhada do caso. " * 40
+    custom_resp = await client.get(
+        f"/api/v1/denial-appeals/{appeal_id}/document",
+        params={"justification": long_justification},
+        headers=auth_headers_a,
+    )
+    assert custom_resp.status_code == 200
+    assert len(custom_resp.content) != len(default_resp.content)
+
+
+async def test_download_appeal_document_404_for_unknown_appeal(client, auth_headers_a):
+    response = await client.get(
+        "/api/v1/denial-appeals/00000000-0000-0000-0000-000000000000/document", headers=auth_headers_a
+    )
+    assert response.status_code == 404
+
+
+async def test_atendimento_cannot_download_appeal_document(client, admin_engine, tenant_a, auth_headers_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@appeal-document-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get(f"/api/v1/denial-appeals/{appeal_id}/document", headers=headers)
+    assert response.status_code == 403
