@@ -23,6 +23,7 @@ import uuid
 
 from sqlalchemy import text
 
+from app.services import report_send_service as rss_module
 from app.services import whatsapp_client as wc_module
 
 
@@ -109,6 +110,46 @@ async def test_send_weekly_report_to_multiple_recipients(client, auth_headers_a,
     assert body["recipients_checked"] == 2
     assert body["sent"] == 2
     assert set(sent_to) == {"+5511911111111", "+5511922222222"}
+
+
+async def test_send_weekly_report_total_failure_triggers_monitoring_alert(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    """Rodada de monitoramento/alertas: falha em 100% dos destinatários
+    (ex: token da Meta expirado) precisa virar um alerta ATIVO — não só
+    mais uma linha `INFO` no log que ninguém monitora. Ver DECISÃO em
+    report_send_service._alert_if_total_send_failure."""
+    await _insert_report_recipient(admin_engine, tenant_a, phone_whatsapp="+5511988887777")
+
+    monkeypatch.setattr(wc_module.settings, "WHATSAPP_ACCESS_TOKEN", "token-falso-de-teste")
+    monkeypatch.setattr(wc_module.settings, "WHATSAPP_PHONE_NUMBER_ID", "id-falso-de-teste")
+
+    async def failing_send(self, *, to_phone_number, pdf_bytes, filename):
+        raise wc_module.WhatsAppClientError("token expirado")
+
+    monkeypatch.setattr(wc_module.WhatsAppClient, "send_weekly_report", failing_send)
+
+    # `report_send_service.settings` é o MESMO objeto cacheado que
+    # `wc_module.settings` (ambos vêm de get_settings(), com @lru_cache)
+    # — setamos SENTRY_DSN aqui só para exercitar o branch que chama
+    # sentry_sdk.capture_message, sem depender de uma conta real.
+    monkeypatch.setattr(rss_module.settings, "SENTRY_DSN", "https://fake@sentry.example/1")
+    captured = {}
+
+    def fake_capture_message(message, level=None):
+        captured["message"] = message
+        captured["level"] = level
+
+    monkeypatch.setattr(rss_module.sentry_sdk, "capture_message", fake_capture_message)
+
+    response = await client.post("/api/v1/reports/weekly/send", json={}, headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sent"] == 0
+    assert body["failed"] == 1
+    assert captured["level"] == "error"
+    assert "relatório semanal" in captured["message"]
+    assert str(tenant_a) in captured["message"]
 
 
 async def test_send_weekly_report_requires_admin_or_owner_role(client, admin_engine, tenant_a):

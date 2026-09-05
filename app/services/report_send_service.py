@@ -42,12 +42,15 @@ DbSession já injetada pelo FastAPI) é responsabilidade do CHAMADOR — esta
 função nunca abre sessão nem decide tenant sozinha, o que a mantém segura
 de reutilizar sem risco de vazar dado entre tenants.
 """
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+import sentry_sdk
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.tenant import Tenant
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
@@ -59,6 +62,9 @@ from app.services.report_data_service import ReportDataService
 from app.services.report_pdf_builder import build_weekly_report_pdf
 from app.services.risk_alert_pdf_builder import RiskAlertAppointment, build_daily_risk_alert_pdf
 from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
+
+logger = logging.getLogger("report_send_service")
+settings = get_settings()
 
 # Tipo de relatório usado para filtrar core.report_recipients (ver
 # DECISÃO em app/sql/009_report_recipients.sql) — único tipo que este
@@ -85,6 +91,40 @@ class ReportSendResult:
     # no PDF enviado, para o chamador poder informar isso sem precisar
     # rodar a mesma consulta de novo.
     high_risk_appointments_found: int = 0
+
+
+def _alert_if_total_send_failure(*, tenant: Tenant, report_label: str, sent: int, failed: int, total: int) -> None:
+    """
+    DECISÃO — falha em 100% dos destinatários é um sinal DIFERENTE de
+    falha em alguns
+    -------------------------------------------------------------------
+    O fan-out de `send_report_to_recipients`/`send_daily_risk_alert` já
+    isola a falha de UM destinatário (número expirado/inválido na Meta)
+    das demais de propósito — isso é esperado, não é alarmante, e por
+    isso nunca gerou log nem alerta. Mas quando TODOS os destinatários
+    de um tenant falham ao mesmo tempo (`sent == 0` com pelo menos 1
+    tentativa), a causa mais provável não é "todo mundo trocou de
+    número na mesma semana" — é um problema SISTÊMICO da integração
+    (token de acesso expirado, template desaprovado/alterado no Meta
+    Business Manager) que vai continuar derrubando TODO envio seguinte
+    até alguém notar e agir. Isso ficava só como uma linha `INFO` no log
+    do cron, que ninguém monitora ativamente — agora também vira um erro
+    logado e, com Sentry configurado, um alerta ativo.
+    """
+    if sent > 0 or failed == 0:
+        return
+    logger.error(
+        "Falha total no envio de %s: tenant=%s (%s), %d de %d destinatário(s) falharam.",
+        report_label, tenant.id, tenant.trade_name, failed, total,
+    )
+    if settings.SENTRY_DSN:
+        sentry_sdk.set_tag("tenant_id", str(tenant.id))
+        sentry_sdk.capture_message(
+            f"Falha total ao enviar {report_label} via WhatsApp para tenant {tenant.id} "
+            f"({failed} de {total} destinatário(s)) — possível token expirado ou template "
+            "desaprovado na Meta.",
+            level="error",
+        )
 
 
 async def send_report_to_recipients(
@@ -145,6 +185,9 @@ async def send_report_to_recipients(
         except WhatsAppClientError:
             failed += 1
 
+    _alert_if_total_send_failure(
+        tenant=tenant, report_label="relatório semanal", sent=sent, failed=failed, total=len(whatsapp_recipients)
+    )
     return ReportSendResult(recipients_checked=len(whatsapp_recipients), sent=sent, failed=failed)
 
 
@@ -217,6 +260,9 @@ async def send_daily_risk_alert(
         except WhatsAppClientError:
             failed += 1
 
+    _alert_if_total_send_failure(
+        tenant=tenant, report_label="alerta de risco de falta", sent=sent, failed=failed, total=len(whatsapp_recipients)
+    )
     return ReportSendResult(
         recipients_checked=len(whatsapp_recipients), sent=sent, failed=failed, high_risk_appointments_found=len(appointments)
     )

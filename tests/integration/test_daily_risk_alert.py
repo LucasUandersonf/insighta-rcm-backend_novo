@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from app.services import report_send_service as rss_module
 from app.services import whatsapp_client as wc_module
 from tests.integration.test_no_show_risk import _insert_past_appointment
 
@@ -132,6 +133,43 @@ async def test_risk_alert_ignores_high_risk_appointment_beyond_24h_window(
     body = response.json()
     assert body["high_risk_appointments"] == 0
     assert body["sent_via_whatsapp"] is False
+
+
+async def test_risk_alert_total_failure_triggers_monitoring_alert(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    """Mesmo raciocínio de test_reports.py
+    (test_send_weekly_report_total_failure_triggers_monitoring_alert):
+    falha em 100% dos destinatários é sinal de problema sistêmico
+    (token expirado, template desaprovado), não de "um número ruim" —
+    precisa de alerta ativo, não só uma linha INFO no log."""
+    await _insert_report_recipient(admin_engine, tenant_a, phone_whatsapp="+5511988887777")
+    await _seed_high_risk_future_appointment(client, admin_engine, tenant_a, auth_headers_a, hours_ahead=3)
+
+    monkeypatch.setattr(wc_module.settings, "WHATSAPP_ACCESS_TOKEN", "token-falso-de-teste")
+    monkeypatch.setattr(wc_module.settings, "WHATSAPP_PHONE_NUMBER_ID", "id-falso-de-teste")
+
+    async def failing_send(self, *, to_phone_number, pdf_bytes, filename):
+        raise wc_module.WhatsAppClientError("token expirado")
+
+    monkeypatch.setattr(wc_module.WhatsAppClient, "send_weekly_report", failing_send)
+
+    monkeypatch.setattr(rss_module.settings, "SENTRY_DSN", "https://fake@sentry.example/1")
+    captured = {}
+
+    def fake_capture_message(message, level=None):
+        captured["message"] = message
+        captured["level"] = level
+
+    monkeypatch.setattr(rss_module.sentry_sdk, "capture_message", fake_capture_message)
+
+    response = await client.post("/api/v1/reports/risk-alert/send", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sent"] == 0
+    assert body["failed"] == 1
+    assert captured["level"] == "error"
+    assert "alerta de risco de falta" in captured["message"]
 
 
 async def test_risk_alert_requires_admin_or_owner_role(client, admin_engine, tenant_a):

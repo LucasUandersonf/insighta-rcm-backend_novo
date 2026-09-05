@@ -17,11 +17,26 @@ com o relógio, não com o calendário) — por isso, diferente de
 é sempre "agora" (`datetime.now(timezone.utc)`) na hora em que roda.
 
 Executar manualmente:  python -m app.worker.daily_alert_job
+
+DECISÃO — Sentry desde a primeira versão deste arquivo
+-------------------------------------------------------------------------
+Este job roda com frequência muito maior que o relatório semanal (a
+cada 1-2h, não 1x/semana) — se ele quebrar de forma sistêmica (ex: a
+mesma `WhatsAppClientError` de credencial expirada que afetaria o
+relatório semanal), o SILÊNCIO se repetiria a cada ciclo, não uma vez
+por semana, tornando ainda mais fácil não notar. Mesmo mecanismo
+adotado em `weekly_report_job.py` na mesma rodada (ver DECISÃO lá para
+o detalhe de por que isso faltava e o que corrige): `sentry_sdk.init()`
+guardado por `SENTRY_DSN`, sem mudança de comportamento para quem ainda
+não configurou Sentry.
 """
 import asyncio
 import logging
 from datetime import datetime, timezone
 
+import sentry_sdk
+
+from app.core.config import get_settings
 from app.db.session import get_db_with_tenant
 from app.models.tenant import Tenant
 from app.services.report_send_service import send_daily_risk_alert
@@ -29,6 +44,16 @@ from app.services.whatsapp_client import WhatsAppClient
 from app.worker.active_tenants import list_active_tenants
 
 logger = logging.getLogger("daily_alert_job")
+settings = get_settings()
+
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=settings.SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=False,
+    )
 
 
 async def _process_tenant(tenant: Tenant, as_of: datetime, client: WhatsAppClient) -> None:
@@ -69,10 +94,14 @@ async def run() -> None:
     for tenant in tenants:
         try:
             await _process_tenant(tenant, as_of, client)
-        except Exception:
+        except Exception as exc:
             # Mesmo princípio de isolamento de falha do weekly_report_job.py
             # (e do ingestion_worker.py): um tenant com dado inesperado não
-            # pode travar o alerta dos demais.
+            # pode travar o alerta dos demais. Reporte à Sentry é só
+            # observabilidade — mesmo raciocínio de weekly_report_job.py.
+            if settings.SENTRY_DSN:
+                sentry_sdk.set_tag("tenant_id", str(tenant.id))
+                sentry_sdk.capture_exception(exc)
             logger.exception("Falha inesperada ao gerar alerta de risco para tenant=%s", tenant.id)
 
 
