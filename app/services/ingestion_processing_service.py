@@ -46,13 +46,22 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
+from app.repositories.ingestion_column_alias_repository import IngestionColumnAliasRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.normalization_service import NormalizationService
-from app.worker.parsers import agenda_csv_parser, csv_parser, json_parser, xml_parser
+from app.worker.parsers import (
+    agenda_csv_parser,
+    agenda_json_parser,
+    agenda_xml_parser,
+    csv_parser,
+    json_parser,
+    xml_parser,
+)
 
 _PARSERS = {
     "csv": csv_parser.parse,
@@ -60,12 +69,12 @@ _PARSERS = {
     "json": json_parser.parse,
 }
 
-# Template "Agenda" (ver app/sql/019_agenda_ingestion.sql) — só CSV
-# implementado nesta primeira versão (ver docstring de
-# agenda_csv_parser.py sobre por que XML/JSON ficam para quando um
-# cliente/ERP concreto precisar).
+# Template "Agenda" (ver app/sql/019_agenda_ingestion.sql) — os 3
+# formatos, mesmo conjunto de Faturamento.
 _AGENDA_PARSERS = {
     "csv": agenda_csv_parser.parse,
+    "xml": agenda_xml_parser.parse,
+    "json": agenda_json_parser.parse,
 }
 
 
@@ -170,7 +179,15 @@ async def process_uploaded_file(
 
     try:
         parser = parsers[file_format]
-        parse_results = parser(raw_bytes)
+        if file_format == "csv" and data_type == "faturamento":
+            # Mapeador Automático de Coluna (ver DECISÃO em
+            # app/sql/021_ingestion_column_aliases.sql) — só o CSV de
+            # Faturamento consome alias por ora (ver DECISÃO no próprio
+            # column_mapping_service.py sobre Agenda ficar de fora).
+            header_aliases = await IngestionColumnAliasRepository(db).get_mapping(tenant_id, data_type)
+            parse_results = parser(raw_bytes, header_aliases or None)
+        else:
+            parse_results = parser(raw_bytes)
     except Exception as exc:
         error_message = f"Falha ao parsear arquivo {file_format}: {exc}"
         # Best-effort: registra o motivo da falha na própria linha, mesmo
@@ -193,6 +210,7 @@ async def process_uploaded_file(
         billing_repo=BillingRepository(db),
         local_repo=LocalRepository(db),
         guia_repo=GuiaRepository(db),
+        tenant_repo=TenantRepository(db),
     )
     if data_type == "agenda":
         summary = await normalization_service.normalize_agenda_rows(tenant_id, saved_rows, source_file=s3_key)

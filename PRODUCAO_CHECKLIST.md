@@ -67,6 +67,12 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [ ] Métricas (latência por endpoint, profundidade da fila SQS) e alertas — ainda não implementado, precisa de infraestrutura (Prometheus/CloudWatch Metrics) que não existe ainda.
 - [ ] Tracing distribuído (OpenTelemetry) — o `request_id` já dá correlação básica; tracing formal é passo seguinte quando a cadeia de chamadas ficar mais complexa.
 
+### Alertas de erro (Sentry) — IMPLEMENTADO NESTA RODADA (monitoramento)
+- [x] Sentry já cobria a API (`app/main.py`) e o worker de ingestão (`app/worker/ingestion_worker.py`).
+- [x] **BUG CORRIGIDO**: `weekly_report_job.py` e `daily_alert_job.py` (os dois crons de WhatsApp) nunca chamavam `sentry_sdk.init()` — uma quebra do job inteiro (ex: credencial expirada) morria em silêncio no log do container, sem NENHUM alerta. Corrigido nos dois, mesmo padrão do worker de ingestão.
+- [x] `report_send_service._alert_if_total_send_failure`: falha em 100% dos destinatários de um tenant (sinal de token expirado/template desaprovado na Meta, não de "um número ruim") agora gera log `ERROR` + alerta ativo no Sentry, em vez de só uma linha `INFO`.
+- [ ] Ainda falta (depende de infraestrutura real, fora do escopo desta rodada): agregação de métricas/alertas de infraestrutura (latência, fila, CPU/memória) via Prometheus/CloudWatch — hoje o alerta é por EXCEÇÃO capturada pelo Sentry, não por métrica de sistema.
+
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.
 - [x] N+1 corrigido em `ProfessionalService.list_professionals`.

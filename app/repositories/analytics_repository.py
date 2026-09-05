@@ -43,7 +43,7 @@ conexão/transação da requisição.
 """
 from datetime import date, datetime, time, timedelta, timezone
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
@@ -319,7 +319,41 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
-    async def upcoming_risk_appointments(self, *, as_of: datetime, min_level: tuple[str, ...] = ("medio", "alto"), limit: int = 6) -> list[dict]:
+    async def all_patient_no_show_rates(self, *, min_sample: int = 3) -> list[float]:
+        """
+        Taxa de falta de CADA paciente com amostra suficiente
+        (>= min_sample atendimentos resolvidos), SEM filtro de data e SEM
+        exigir pelo menos 1 falta — diferente de `top_no_show_patients`
+        (a lista vermelha de quem já é problema), aqui é a distribuição
+        INTEIRA da clínica, inclusive pacientes com 0% de falta. Usado
+        só para SUGERIR um limiar de risco calibrado com o histórico real
+        desta clínica (ver no_show_risk_engine.suggest_thresholds) — não
+        alimenta nenhum dashboard.
+
+        Sem filtro de período de propósito: calibrar limiar com o
+        histórico INTEIRO da clínica é mais estável estatisticamente do
+        que uma janela recente pequena.
+        """
+        stmt = text(
+            """
+            SELECT COUNT(*) FILTER (WHERE a.status = 'no_show')::float / COUNT(*) AS rate
+            FROM core.appointments a
+            WHERE a.status IN ('completed', 'no_show')
+            GROUP BY a.patient_id
+            HAVING COUNT(*) >= :min_sample
+            """
+        )
+        result = await self.session.execute(stmt, {"min_sample": min_sample})
+        return [row[0] for row in result.all()]
+
+    async def upcoming_risk_appointments(
+        self,
+        *,
+        as_of: datetime,
+        min_level: tuple[str, ...] = ("medio", "alto"),
+        limit: int = 6,
+        until: datetime | None = None,
+    ) -> list[dict]:
         """
         Próximos agendamentos (status 'scheduled', ainda no futuro) com
         risco de falta médio ou alto, mais próximos primeiro — a "lista de
@@ -332,6 +366,12 @@ class AnalyticsRepository:
         sempre "a partir de agora", igual a `DenialAppealRepository.
         count_due_within`: uma lista de ação não fica "vazia" só porque o
         gestor escolheu ver os últimos 7 dias no seletor do dashboard.
+
+        `until` — teto OPCIONAL adicionado para o alerta diário de risco
+        (app/worker/daily_alert_job.py), que quer só a janela das
+        próximas 24h, não "todo o futuro" como o card do dashboard
+        (chamador original, que nunca passa este parâmetro e continua
+        com o comportamento de sempre).
         """
         stmt = text(
             """
@@ -340,12 +380,15 @@ class AnalyticsRepository:
             JOIN core.patients p ON p.id = a.patient_id
             WHERE a.status = 'scheduled'
               AND a.scheduled_at >= :as_of
+              AND (CAST(:until AS timestamptz) IS NULL OR a.scheduled_at <= CAST(:until AS timestamptz))
               AND a.no_show_risk_level = ANY(:levels)
             ORDER BY a.scheduled_at ASC
             LIMIT :limit
             """
         )
-        result = await self.session.execute(stmt, {"as_of": as_of, "levels": list(min_level), "limit": limit})
+        result = await self.session.execute(
+            stmt, {"as_of": as_of, "until": until, "levels": list(min_level), "limit": limit}
+        )
         return [
             {"appointment_id": row[0], "patient_full_name": row[1], "scheduled_at": row[2], "risk_level": row[3]}
             for row in result.all()
@@ -427,6 +470,39 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {int(weekday): count for weekday, count in result.all()}
+
+    async def weekday_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Taxa de falta por dia da semana — diferente de
+        `appointment_weekday_histogram` (VOLUME bruto, inclui qualquer
+        status não cancelado), aqui só entram atendimentos RESOLVIDOS
+        (status 'completed' ou 'no_show' — mesmo filtro
+        `_COMPLETED_OR_NO_SHOW` de no_show_risk_engine.py): um
+        agendamento ainda 'scheduled' não tem desfecho conhecido, não
+        deveria contar nem a favor nem contra a taxa de um dia
+        específico, e um 'cancelled' é um comportamento diferente de
+        faltar sem avisar (mesmo raciocínio já documentado no motor).
+
+        Retorna {weekday: (no_show_count, total_relevante)} — a divisão
+        (e a decisão de tratar total=0 como "sem amostra", não como
+        0.0%) fica para o service, mesmo princípio de "None sobre zero"
+        usado no resto do produto.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, no_show_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show")),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/

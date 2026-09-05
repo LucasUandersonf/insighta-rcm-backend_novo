@@ -5,11 +5,14 @@ Mesmo espírito de test_denial_risk_engine.py: instanciamos Appointment
 como objeto Python comum, sem persistir nada, e testamos a regra de
 negócio isolada da infraestrutura de banco.
 """
+import statistics
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from app.models.appointment import Appointment
-from app.services.no_show_risk_engine import MIN_SPECIFIC_SAMPLES, assess
+from app.services.no_show_risk_engine import MIN_PATIENTS_FOR_SUGGESTION, MIN_SPECIFIC_SAMPLES, assess, suggest_thresholds
 
 
 def _appt(scheduled_at: datetime, status: str) -> Appointment:
@@ -82,9 +85,43 @@ def test_cancelled_appointments_are_excluded_from_the_sample():
     assert result.risk_level == "baixo"
 
 
+def test_suggest_thresholds_returns_none_below_minimum_patient_sample():
+    assert MIN_PATIENTS_FOR_SUGGESTION == 10
+    rates = [0.1] * (MIN_PATIENTS_FOR_SUGGESTION - 1)
+    assert suggest_thresholds(rates) is None
+
+
+def test_suggest_thresholds_uses_median_and_p85_of_the_clinics_own_distribution():
+    # 20 pacientes, taxas de 0.00 a 0.19 (passo de 0.01) — distribuição
+    # conhecida o bastante para prever mediana e P85 na mão.
+    rates = [round(i * 0.01, 2) for i in range(20)]
+
+    suggestion = suggest_thresholds(rates)
+
+    assert suggestion is not None
+    assert suggestion.sample_size == 20
+    assert suggestion.low_threshold == pytest.approx(statistics.median(rates), abs=0.001)
+    assert suggestion.medium_threshold > suggestion.low_threshold
+
+
+def test_suggest_thresholds_never_returns_medium_at_or_below_low():
+    # Distribuição sem variação nenhuma: mediana == P85 == mesmo valor —
+    # a função precisa se auto-corrigir para manter medium > low (mesma
+    # regra exigida por TenantService.update_own_tenant).
+    rates = [0.2] * 15
+
+    suggestion = suggest_thresholds(rates)
+
+    assert suggestion is not None
+    assert suggestion.medium_threshold > suggestion.low_threshold
+
+
 if __name__ == "__main__":
     test_no_history_is_indeterminado()
     test_uses_general_rate_when_specific_pattern_has_too_few_samples()
     test_uses_specific_pattern_when_enough_samples_even_if_it_diverges_from_general_rate()
     test_cancelled_appointments_are_excluded_from_the_sample()
+    test_suggest_thresholds_returns_none_below_minimum_patient_sample()
+    test_suggest_thresholds_uses_median_and_p85_of_the_clinics_own_distribution()
+    test_suggest_thresholds_never_returns_medium_at_or_below_low()
     print("Testes de no_show_risk_engine passaram.")

@@ -67,6 +67,18 @@ class WeekdayBucket(BaseModel):
     appointment_count: int
 
 
+class WeekdayNoShowRateBucket(BaseModel):
+    """Taxa de falta por dia da semana — diferente de WeekdayBucket
+    (volume bruto de agendamentos), aqui é a fração de faltas dentro dos
+    atendimentos RESOLVIDOS (completed+no_show) daquele dia. Ver
+    AnalyticsRepository.weekday_no_show_rate_breakdown."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    no_show_count: int
+    total_appointments: int  # só atendimentos resolvidos (completed+no_show), não o volume bruto
+    no_show_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -101,6 +113,11 @@ class AgendaMetricsResponse(BaseModel):
     # Gráfico de apoio (número/evidência) do insight textual de queda de
     # agenda por dia da semana — ver smart_insights_engine.py::_weekday_drop_insights.
     weekday_histogram: list[WeekdayBucket]
+    # Taxa de falta por dia da semana (não confundir com weekday_histogram
+    # acima, que é VOLUME) — responde diretamente "quinta-feira tem taxa
+    # de falta X%", não só "quinta-feira tem N agendamentos". Alimenta o
+    # insight textual em smart_insights_engine.py::_weekday_no_show_rate_insights.
+    weekday_no_show_rates: list[WeekdayNoShowRateBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em
@@ -129,6 +146,15 @@ class AgendaMetricsResponse(BaseModel):
     # número contábil fechado, é o ritmo observado projetado sobre o
     # tempo vazio.
     estimated_revenue_lost_to_idle_capacity: float
+    # Quantos profissionais ATIVOS ainda não têm grade semanal
+    # (professional_availability) cadastrada — todo profissional
+    # auto-criado pela ingestão de arquivo (Faturamento OU Agenda) nasce
+    # SEM grade, então total_idle_minutes/estimated_revenue_lost_to_idle_capacity
+    # ficam incompletos (silenciosamente excluem esse profissional) até
+    # alguém preencher isso manualmente em Profissionais. Este número
+    # existe pra essa incompletude parar de ser silenciosa — ver DECISÃO
+    # em AnalyticsService.get_agenda_metrics.
+    professionals_without_availability_count: int
 
 
 class PlanLossItem(BaseModel):

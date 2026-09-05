@@ -45,16 +45,22 @@ class IngestionStorageError(Exception):
     pass
 
 
-def build_upload_key(tenant_id: str, file_format: str, filename: str) -> str:
+def build_upload_key(tenant_id: str, data_type: str, file_format: str, filename: str) -> str:
     """
     MESMA convenção de app/worker/s3_key_resolver.py:
-        tenants/{tenant_id}/incoming/{csv|xml|json}/{arquivo}
-    Isso importa de verdade: é essa convenção que permitiria, no futuro,
-    o mesmo objeto ser roteado pelo caminho SQS sem qualquer mudança —
-    ver DECISÃO acima.
+        tenants/{tenant_id}/incoming/{csv|xml|json}/{arquivo}                (faturamento)
+        tenants/{tenant_id}/incoming/agenda/{csv|xml|json}/{arquivo}         (agenda)
+    Isso importa de verdade: é essa convenção que permite o mesmo objeto
+    ser roteado pelo caminho SQS sem qualquer mudança (ver DECISÃO
+    acima) — inclusive para o template de Agenda agora, que o worker SQS
+    já reconhece (ver s3_key_resolver.py). `data_type="faturamento"` NÃO
+    acrescenta segmento nenhum, de propósito: mantém a chave de todo
+    upload de Faturamento (formato ou template) idêntica a antes deste
+    parâmetro existir — nenhum arquivo já enviado muda de chave.
     """
     safe_filename = (filename or "arquivo").replace("/", "_").strip() or "arquivo"
-    return f"tenants/{tenant_id}/incoming/{file_format}/{safe_filename}"
+    prefix = f"{data_type}/" if data_type != "faturamento" else ""
+    return f"tenants/{tenant_id}/incoming/{prefix}{file_format}/{safe_filename}"
 
 
 class IngestionStorageClient:

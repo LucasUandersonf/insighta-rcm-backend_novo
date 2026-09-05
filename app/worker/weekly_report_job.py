@@ -12,32 +12,52 @@ Provisionamento do agendador é infraestrutura (Terraform), fora deste repo,
 mesmo tratamento dado ao bucket S3 e à fila SQS da Etapa 1.
 
 Executar manualmente:  python -m app.worker.weekly_report_job
+
+DECISÃO — Sentry também aqui, não só na API e no ingestion_worker.py
+-------------------------------------------------------------------------
+BUG CORRIGIDO (achado na rodada de monitoramento/alertas): este script
+nunca chamava `sentry_sdk.init()` — resultado prático, se o job inteiro
+quebrasse antes do laço por tenant (ex: `WhatsAppClient()` levantando
+`WhatsAppClientError` porque a credencial expirou, ou qualquer bug novo
+introduzido aqui), o processo simplesmente morria com uma stack trace no
+log do container, e NINGUÉM era avisado — silêncio indistinguível de
+"rodou certo e não tinha nada para enviar". Mesmo padrão de
+`app/worker/ingestion_worker.py`: com `SENTRY_DSN` configurada, o SDK
+instala um hook global que captura qualquer exceção não tratada que
+mate o processo, sem precisar de um `try/except` extra ao redor de
+`run()` — e cada falha POR TENANT dentro do laço (linha ~/except abaixo)
+também passa a ser reportada individualmente, não só logada.
 """
 import asyncio
 import logging
 from datetime import date, timedelta
 
-from sqlalchemy import select
+import sentry_sdk
 
-from app.db.session import get_db_no_tenant, get_db_with_tenant
+from app.core.config import get_settings
+from app.db.session import get_db_with_tenant
 from app.models.tenant import Tenant
-from app.repositories.capacity_repository import CapacityRepository
-from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
-from app.repositories.professional_repository import ProfessionalRepository
-from app.repositories.report_recipient_repository import ReportRecipientRepository
-from app.repositories.reporting_repository import ReportingRepository
-from app.services.report_data_service import ReportDataService
-from app.services.report_pdf_builder import build_weekly_report_pdf
-from app.services.whatsapp_client import WhatsAppClient, WhatsAppClientError
+from app.services.report_send_service import send_report_to_recipients
+from app.services.whatsapp_client import WhatsAppClient
+from app.worker.active_tenants import list_active_tenants
 
 logger = logging.getLogger("weekly_report_job")
+settings = get_settings()
 
-# Tipo de relatório usado para filtrar core.report_recipients (ver
-# DECISÃO em app/sql/009_report_recipients.sql) — único tipo que este
-# worker produz hoje. Um destinatário com `report_types` vazio recebe
-# este (e qualquer outro) tipo; um destinatário com lista não-vazia só
-# recebe este relatório se "weekly_summary" estiver nela.
-_REPORT_TYPE = "weekly_summary"
+# Mesmo padrão opcional de app/main.py/ingestion_worker.py: sem
+# SENTRY_DSN, nenhuma chamada de sentry_sdk.init() acontece e as
+# chamadas sentry_sdk.* abaixo viram no-op — zero mudança de
+# comportamento para quem ainda não configurou Sentry.
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=settings.SENTRY_PROFILES_SAMPLE_RATE,
+        # Mesma decisão de privacidade do resto do projeto: nunca dado de
+        # paciente/beneficiário vazando para a Sentry.
+        send_default_pii=False,
+    )
 
 
 def _last_full_week() -> tuple[date, date]:
@@ -50,69 +70,27 @@ def _last_full_week() -> tuple[date, date]:
     return last_monday, last_sunday
 
 
-async def _active_tenants() -> list[Tenant]:
-    """Antes filtrava por `Tenant.whatsapp_group_id.is_not(None))` — o
-    destino único de outrora. Agora o destino é dado por
-    `core.report_recipients` (N por tenant, ver DECISÃO em
-    app/sql/009_report_recipients.sql), então a elegibilidade não é mais
-    decidida aqui: qualquer tenant ativo é candidato, e
-    `_process_tenant` simplesmente não envia nada (e não é contado como
-    falha) se não houver nenhum destinatário elegível para
-    `_REPORT_TYPE`."""
-    async for session in get_db_no_tenant():
-        result = await session.execute(select(Tenant).where(Tenant.is_active.is_(True)))
-        return list(result.scalars().all())
-    return []  # pragma: no cover
-
-
 async def _process_tenant(tenant: Tenant, period_start: date, period_end: date, client: WhatsAppClient) -> None:
     async for session in get_db_with_tenant(str(tenant.id)):
-        recipients = await ReportRecipientRepository(session).list_for_report_type(tenant.id, _REPORT_TYPE)
-        # Só destinatários com WhatsApp cadastrado — email fica para uma
-        # integração futura (não existe client de e-mail no sistema hoje,
-        # ver app/services/whatsapp_client.py: é a única integração de
-        # envio de relatório que já existe, e é isso que reaproveitamos).
-        whatsapp_recipients = [r for r in recipients if r.phone_whatsapp]
+        # client_factory devolve o MESMO client já construído (ver
+        # DECISÃO em send_report_to_recipients) — o cron quer falhar
+        # rápido UMA VEZ se as credenciais da plataforma faltarem (ver
+        # run() abaixo), não reconstruir/revalidar por tenant.
+        result = await send_report_to_recipients(session, tenant, period_start, period_end, lambda: client)
 
-        if not whatsapp_recipients:
-            logger.info("Nenhum destinatário de WhatsApp elegível para tenant=%s (%s) — pulando.", tenant.id, tenant.trade_name)
-            return
-
-        data_service = ReportDataService(
-            ReportingRepository(session),
-            ProfessionalRepository(session),
-            ProfessionalAvailabilityRepository(session),
-            CapacityRepository(session),
-        )
-        report_data = await data_service.build_weekly_report(tenant.trade_name, period_start, period_end)
-
-    pdf_bytes = build_weekly_report_pdf(report_data)
-    filename = f"relatorio_semanal_{period_start.isoformat()}_a_{period_end.isoformat()}.pdf"
-
-    # Fan-out: um destinatário com número inválido/expirado na Meta não
-    # pode travar o envio para os demais do MESMO tenant — mesmo
-    # princípio de isolamento de falha aplicado por tenant em run()
-    # abaixo, agora um nível mais fundo (por destinatário).
-    sent, failed = 0, 0
-    for recipient in whatsapp_recipients:
-        try:
-            await client.send_weekly_report(to_phone_number=recipient.phone_whatsapp, pdf_bytes=pdf_bytes, filename=filename)
-            sent += 1
-        except WhatsAppClientError:
-            failed += 1
-            logger.exception(
-                "Falha ao enviar relatório via WhatsApp: tenant=%s recipient=%s", tenant.id, recipient.id
-            )
+    if result.recipients_checked == 0:
+        logger.info("Nenhum destinatário de WhatsApp elegível para tenant=%s (%s) — pulando.", tenant.id, tenant.trade_name)
+        return
 
     logger.info(
         "Relatório semanal processado: tenant=%s (%s) — %d enviado(s), %d falha(s) de %d destinatário(s).",
-        tenant.id, tenant.trade_name, sent, failed, len(whatsapp_recipients),
+        tenant.id, tenant.trade_name, result.sent, result.failed, result.recipients_checked,
     )
 
 
 async def run() -> None:
     period_start, period_end = _last_full_week()
-    tenants = await _active_tenants()
+    tenants = await list_active_tenants()
     logger.info("Relatório semanal: %d tenant(s) ativo(s), período %s a %s", len(tenants), period_start, period_end)
 
     client = WhatsAppClient()  # levanta WhatsAppClientError cedo se credenciais não configuradas
@@ -120,10 +98,16 @@ async def run() -> None:
     for tenant in tenants:
         try:
             await _process_tenant(tenant, period_start, period_end, client)
-        except Exception:
+        except Exception as exc:
             # Um tenant com dado inesperado não pode travar o relatório
             # dos demais — mesmo princípio de isolamento de falha do
             # ingestion_worker.py (uma mensagem problemática não trava a fila).
+            # O reporte à Sentry é só observabilidade, não muda esse
+            # comportamento — só garante que alguém é avisado em vez de
+            # só aparecer no log do container.
+            if settings.SENTRY_DSN:
+                sentry_sdk.set_tag("tenant_id", str(tenant.id))
+                sentry_sdk.capture_exception(exc)
             logger.exception("Falha inesperada ao gerar relatório para tenant=%s", tenant.id)
 
 

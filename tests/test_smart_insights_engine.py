@@ -247,6 +247,46 @@ def test_multiple_weekdays_can_drop_in_the_same_window():
     assert "segunda-feira" in insights[0].message
 
 
+def test_weekday_no_show_rate_above_average_is_flagged():
+    """Segunda-feira: 4 de 10 (40%) faltaram; sexta: 1 de 10 (10%) —
+    média do período = 5/20 = 25%. Segunda fica 15pp acima da média
+    (warning; crítico seria >=20pp) — sexta fica ABAIXO, não é alerta."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (4, 10), 5: (1, 10)},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert "segunda-feira" in insights[0].message.lower()
+    assert insights[0].severity == "warning"
+
+
+def test_weekday_no_show_rate_far_above_average_is_critical():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (8, 10), 5: (1, 10)},  # segunda 80%, média 45% -> +35pp
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "critical"
+
+
+def test_weekday_no_show_rate_close_to_average_is_not_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (3, 10), 5: (2, 10)},  # 30% vs 20%, média 25% -> +5pp
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_weekday_no_show_rate_small_sample_is_ignored_as_noise():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (2, 2), 5: (1, 10)},  # segunda: só 2 amostras
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""

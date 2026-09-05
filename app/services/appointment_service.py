@@ -7,8 +7,10 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
+from app.services.no_show_risk_engine import resolve_thresholds
 
 
 class AppointmentService:
@@ -18,11 +20,13 @@ class AppointmentService:
         patient_repo: PatientRepository,
         professional_repo: ProfessionalRepository,
         local_repo: LocalRepository,
+        tenant_repo: TenantRepository,
     ):
         self.appointment_repo = appointment_repo
         self.patient_repo = patient_repo
         self.professional_repo = professional_repo
         self.local_repo = local_repo
+        self.tenant_repo = tenant_repo
 
     async def create_appointment(self, tenant_id: str, created_by: str, data: AppointmentCreateRequest) -> AppointmentResponse:
         # Validação de integridade de negócio (além do FK do banco): o
@@ -73,9 +77,12 @@ class AppointmentService:
         # Motor de risco de falta (Fase 1): olha só para o histórico
         # PASSADO deste paciente, anterior ao horário deste novo
         # agendamento — nunca usa dado futuro nem o próprio registro
-        # sendo criado.
+        # sendo criado. Limiares vêm de Tenant (None = default do
+        # módulo) — ver DECISÃO em no_show_risk_engine.resolve_thresholds.
         history = await self.appointment_repo.list_past_by_patient(data.patient_id, before=data.scheduled_at)
-        risk = assess_no_show_risk(history, data.scheduled_at)
+        tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
+        low_threshold, medium_threshold = resolve_thresholds(tenant)
+        risk = assess_no_show_risk(history, data.scheduled_at, low_threshold=low_threshold, medium_threshold=medium_threshold)
         appointment.no_show_risk_level = risk.risk_level
         appointment.no_show_risk_score = risk.score
 

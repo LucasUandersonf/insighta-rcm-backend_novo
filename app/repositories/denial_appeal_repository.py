@@ -7,7 +7,7 @@ ver DECISÃO padrão em billing_repository.py).
 import uuid
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.denial_appeal import DenialAppeal
@@ -89,3 +89,42 @@ class DenialAppealRepository:
             DenialAppeal.deadline_at <= horizon_date,
         )
         return int((await self.session.execute(stmt)).scalar_one())
+
+    async def get_document_context(self, appeal_id: uuid.UUID) -> dict | None:
+        """
+        Todos os dados factuais para montar o RASCUNHO do documento de
+        Recurso de Glosa (ver app/services/denial_appeal_pdf_builder.py) —
+        um único SELECT com JOIN em vez de N ORM loads separados
+        (appeal -> billing -> appointment -> patient/professional,
+        billing -> insurance_plan, billing -> guia), já que este é um
+        acesso pontual (1 recurso por vez), não um dashboard.
+
+        `guia_*` e `professional_*` vêm NULL quando o billing não tem
+        guia vinculada (billing.guia_id nullable — ver DECISÃO em
+        app/sql/015_billing_guia.sql) ou o atendimento não tem
+        profissional atribuído — o builder do documento trata isso como
+        "não informado", nunca quebra por dado ausente.
+        """
+        stmt = text(
+            """
+            SELECT
+                da.appeal_type, da.operator_denial_reason, da.denied_at, da.deadline_at, da.status,
+                b.charged_value,
+                a.procedure_code, a.cid_code, a.scheduled_at AS service_date,
+                p.full_name AS patient_name, p.cpf AS patient_cpf,
+                prof.full_name AS professional_name, prof.professional_registry,
+                ip.display_name AS insurance_plan_name,
+                g.tipo AS guia_tipo, g.numero AS guia_numero, g.senha AS guia_senha
+            FROM core.denial_appeals da
+            JOIN core.billing b ON b.id = da.billing_id
+            JOIN core.appointments a ON a.id = b.appointment_id
+            JOIN core.patients p ON p.id = a.patient_id
+            JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+            LEFT JOIN core.professionals prof ON prof.id = a.professional_id
+            LEFT JOIN core.guias g ON g.id = b.guia_id
+            WHERE da.id = :appeal_id
+            """
+        )
+        result = await self.session.execute(stmt, {"appeal_id": appeal_id})
+        row = result.mappings().first()
+        return dict(row) if row is not None else None

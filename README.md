@@ -580,9 +580,26 @@ Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 ### Sentry (monitoramento de erros — opcional)
 Hoje um bug em produção só é descoberto quando um cliente reclama. O
 Sentry cobre essa lacuna: quando configurado, uma exceção não tratada na
-API (`app/main.py`) ou no worker de ingestão
-(`app/worker/ingestion_worker.py`) é reportada automaticamente, sem
+API (`app/main.py`), no worker de ingestão
+(`app/worker/ingestion_worker.py`) ou em qualquer um dos dois crons de
+disparo por WhatsApp (`app/worker/weekly_report_job.py`,
+`app/worker/daily_alert_job.py`) é reportada automaticamente, sem
 esperar ninguém ler o log.
+
+> **BUG CORRIGIDO (rodada de monitoramento/alertas):** os dois crons de
+> WhatsApp nunca chamavam `sentry_sdk.init()` — se o job inteiro
+> quebrasse antes do laço por tenant (ex: `WhatsAppClient()` levantando
+> `WhatsAppClientError` porque a credencial expirou), o processo morria
+> com uma stack trace no log do container e **ninguém era avisado**,
+> indistinguível de "rodou certo e não tinha nada para enviar". Corrigido
+> nos dois arquivos, no mesmo padrão do worker de ingestão. Além disso,
+> `app/services/report_send_service.py` ganhou
+> `_alert_if_total_send_failure`: falha em **100% dos destinatários** de
+> um tenant (não só de "um número inválido", que já era tolerado por
+> design) agora vira log `ERROR` + alerta ativo no Sentry — sinal de
+> problema sistêmico na integração (token expirado, template
+> desaprovado no Meta Business Manager), não de dado ruim de um único
+> destinatário.
 
 - **Sem `SENTRY_DSN` configurada: nada muda.** Nenhuma chamada de
   `sentry_sdk.init()` acontece — o mesmo padrão de toda outra integração

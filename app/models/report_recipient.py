@@ -34,7 +34,18 @@ class ReportRecipient(Base):
 
     # '{}' (vazio) = recebe todos os tipos de relatório — ver DECISÃO em
     # app/sql/009_report_recipients.sql.
-    report_types: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    #
+    # BUG CORRIGIDO — ARRAY(String) gera bind parameter VARCHAR[], mas a
+    # coluna real é TEXT[] (ver 009_report_recipients.sql). Postgres não
+    # tem operador `=`/`ANY` implícito entre TEXT[] e VARCHAR[] (ao
+    # contrário do caso escalar, onde text=varchar funciona sem cast) —
+    # toda comparação de array (ReportRecipientRepository.list_for_report_type,
+    # usado por report_send_service.py) explodia com
+    # "operator does not exist: text[] = character varying[]". Nunca
+    # pego antes porque nenhum teste de integração executava essa query
+    # com destinatários reais até report_send_service.py existir. ARRAY(Text)
+    # gera TEXT[] no bind, batendo com a coluna de verdade.
+    report_types: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
