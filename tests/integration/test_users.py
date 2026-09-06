@@ -78,6 +78,9 @@ async def test_any_role_can_read_own_profile(client, admin_engine, tenant_a, aut
     body = resp.json()
     assert body["email"] == owner_a["email"]
     assert body["role"] == "owner"
+    # Recém-criado, nunca viu o tour de boas-vindas — o frontend usa este
+    # null para decidir mostrar o OnboardingTour nesta sessão.
+    assert body["onboarding_completed_at"] is None
 
     # papel sem permissão de gestão de usuários (atendimento) também lê o
     # PRÓPRIO perfil sem 403 — self-service, não "gestão de usuários".
@@ -107,3 +110,19 @@ async def test_user_can_change_own_password_but_not_with_wrong_current_password(
 
     login_resp = await client.post("/api/v1/auth/login", json={"email": owner_a["email"], "password": "nova-senha-123"})
     assert login_resp.status_code == 200
+
+
+async def test_user_can_complete_onboarding_tour(client, auth_headers_a):
+    profile_before = await client.get("/api/v1/users/me", headers=auth_headers_a)
+    assert profile_before.json()["onboarding_completed_at"] is None
+
+    resp = await client.post("/api/v1/users/me/onboarding-complete", headers=auth_headers_a)
+    assert resp.status_code == 204
+
+    profile_after = await client.get("/api/v1/users/me", headers=auth_headers_a)
+    assert profile_after.json()["onboarding_completed_at"] is not None
+
+    # Idempotente — pedir de novo (ex: o usuário reabre o tour pela Central
+    # de Ajuda e pula de novo) só atualiza o timestamp, nunca é erro.
+    resp_again = await client.post("/api/v1/users/me/onboarding-complete", headers=auth_headers_a)
+    assert resp_again.status_code == 204

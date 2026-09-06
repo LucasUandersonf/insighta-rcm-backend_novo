@@ -214,6 +214,15 @@ _POST_UPGRADE_SQL_FILES = [
     # platform_risk_alerts). CREATE TABLE sem IF NOT EXISTS — precisa
     # do marcador.
     "029_platform_users.sql",
+    # Uso por recurso (feature_usage_last_30d) no painel de Customer
+    # Success — mesma função de 026, só ganhou uma coluna nova. DROP +
+    # CREATE — auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "030_platform_feature_usage.sql",
+    # Tour de boas-vindas guiado — core.users.onboarding_completed_at.
+    # Auto-idempotente (ADD COLUMN IF NOT EXISTS) — roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "031_user_onboarding.sql",
 ]
 
 _ROLES_SQL = """

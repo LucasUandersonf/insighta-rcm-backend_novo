@@ -40,6 +40,13 @@ class TenantUsageSummary(BaseModel):
     patients_total: int
     appointments_last_30d: int
     billings_last_30d: int
+    # Decomposição de events_last_30d por recurso (pacientes, agenda,
+    # faturamento, recurso de glosa, contratos, usuários) — mede MUTAÇÃO,
+    # não navegação/leitura (ver DECISÃO em
+    # app/sql/030_platform_feature_usage.sql). Orienta priorização de
+    # backlog: o frontend soma esta mesma estrutura entre todos os
+    # tenants para montar o ranking "recursos mais usados na plataforma".
+    feature_usage_last_30d: dict[str, int]
     # Calculados em PlatformReportingService a partir dos campos acima —
     # nunca vêm direto do banco (ver DECISÃO no service sobre a régua de
     # classificação, deliberadamente simples nesta v1 e fácil de ajustar

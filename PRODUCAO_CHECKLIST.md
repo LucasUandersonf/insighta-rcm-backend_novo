@@ -97,6 +97,11 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [ ] Só e-mail por enquanto — WhatsApp para a equipe interna foi avaliado e descartado nesta rodada (exigiria template pré-aprovado pela Meta só para uso interno, desproporcional).
 - [ ] Agendamento externo (cron/EventBridge) do `platform_risk_alert_job.py` ainda não provisionado — mesma pendência de infraestrutura dos outros dois jobs (`weekly_report_job.py`/`daily_alert_job.py`).
 
+### Onboarding guiado + priorização orientada a dado real — IMPLEMENTADO NESTA RODADA
+- [x] **Tour de boas-vindas guiado**: `OnboardingTourProvider`/`OnboardingTour.tsx` no frontend, `core.users.onboarding_completed_at` (por PESSOA, não por clínica) + `POST /users/me/onboarding-complete` no backend. Abre sozinho na primeira sessão de cada usuário, aponta para a navegação REAL (mesma `NAV_ITEMS`/RBAC da barra lateral), pode ser revisto quando quiser pela Central de Ajuda.
+- [x] **Uso por recurso (`feature_usage_last_30d`)**: `core.platform_tenant_usage_summary()` decompõe o uso agregado em 6 recursos (pacientes/agenda/faturamento/recurso de glosa/contratos/usuários), reaproveitando `core.audit_log` + `core.patients`/`core.appointments` — sem tabela nova, sem instrumentar navegação. `PlatformDashboardPage.tsx` mostra o ranking "Recursos mais usados na plataforma" (soma entre todas as clínicas), o sinal de dado real que faltava para orientar priorização de backlog.
+- [ ] Mede MUTAÇÃO (ação real de escrita), não NAVEGAÇÃO/LEITURA de tela — uma clínica que só abre a Sala de Comando sem editar nada aparece com uso baixo mesmo estando ativa lá. Telemetria completa de navegação ficaria para uma rodada dedicada de instrumentação de frontend.
+
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.
 - [x] N+1 corrigido em `ProfessionalService.list_professionals`.

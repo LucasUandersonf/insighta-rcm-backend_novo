@@ -57,6 +57,9 @@ class UserResponse(BaseModel):
     must_change_password: bool
     last_login_at: datetime | None
     created_at: datetime
+    # Tour de boas-vindas guiado (ver 031_user_onboarding.sql) — null =
+    # o frontend ainda deve mostrar o tour nesta sessão.
+    onboarding_completed_at: datetime | None
 
     model_config = {"from_attributes": True}
 

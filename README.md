@@ -730,6 +730,49 @@ aquele aviso" sem abrir um chamado de suporte.
 > como `failed` sem gastar mais uma tentativa numa URL que ninguém mais
 > quer — só volta a disparar se ele reativar e um evento NOVO acontecer.
 
+## Tour de boas-vindas guiado
+
+Item de maturidade de produto: até esta rodada não existia nenhum
+onboarding dentro do produto — um cliente novo abria o sistema pela
+primeira vez e precisava descobrir sozinho onde cada coisa está.
+`core.users.onboarding_completed_at` (NULL = ainda não viu) guarda, por
+PESSOA (não por clínica), se aquele colaborador específico já passou
+pelo tour — um financeiro contratado meses depois do owner que criou a
+conta também nunca viu a ferramenta antes e vê o tour na própria
+primeira entrada.
+
+`POST /users/me/onboarding-complete` (self-service, qualquer papel,
+idempotente) marca o tour como visto/pulado — "pular" e "concluir"
+gravam do mesmo jeito, a intenção é só "não mostrar de novo sozinho",
+não medir quem prestou atenção em cada passo. `GET /users/me` devolve o
+campo para o frontend decidir se mostra o tour nesta sessão.
+
+> **DECISÃO — TIMESTAMPTZ, não BOOLEAN.** Mesmo raciocínio de
+> `patients.anonymized_at`/`tenants.annual_revenue_goal`: guardar QUANDO,
+> não só SE, não custa nada a mais e já responde de graça "quantos dos
+> usuários que entraram nesta semana já passaram pelo tour?" sem coluna
+> nova depois.
+
+### Frontend — `OnboardingTour.tsx` aponta para a navegação REAL
+
+`OnboardingTourProvider` (`src/context/OnboardingTourContext.tsx`) monta
+os passos a partir da MESMA lista `NAV_ITEMS`/`ADMIN_NAV_ITEMS` que a
+barra lateral usa (`Sidebar.tsx`, exportadas de propósito) e do MESMO
+filtro de papel — um item escondido pelo RBAC do usuário nunca vira um
+passo do tour apontando para algo que ele não pode acessar. Cada passo
+destaca o item de verdade da barra lateral (via `data-tour-id`), não uma
+screenshot ou ilustração à parte — nunca desatualiza se a navegação
+mudar. Abre sozinho na primeira sessão de cada usuário
+(`onboarding_completed_at === null`) e pode ser revisto quando quiser
+pela Central de Ajuda ("Rever tour de boas-vindas").
+
+> **DECISÃO — sem overlay escuro cobrindo a tela inteira.** Só o item
+> apontado ganha um anel de destaque (o "buraco" de luz vem de um
+> `box-shadow` gigante no próprio anel — técnica de spotlight sem
+> precisar de `clip-path`/máscara SVG); o resto da tela continua legível
+> e clicável por trás. A intenção é orientar, não travar o uso normal do
+> sistema enquanto o tour está aberto.
+
 ## Customer Success orientado a dados (painel interno da plataforma)
 
 Item de maturidade de produto que fecha a última frente de base sugerida
@@ -807,6 +850,28 @@ total de pacientes, consultas e faturamentos recentes — e um
 > 1-4 eventos = "atenção"; 5+ = "engajado"; tenant desativado = "inativo"
 > sempre, mesmo com atividade recente). É uma heurística de v1,
 > deliberadamente simples e fácil de recalibrar sem nova migration.
+
+### Uso por recurso — `feature_usage_last_30d`
+
+`GET /platform/tenants-usage` também devolve, por tenant, uma
+decomposição de `events_last_30d` em 6 recursos (`pacientes`, `agenda`,
+`faturamento`, `recurso_de_glosa`, `contratos`, `usuarios`) — não só
+"está engajado?", mas "usando O QUÊ, especificamente?". O frontend soma
+esta mesma estrutura entre todas as clínicas para montar o ranking
+"Recursos mais usados na plataforma" (`PlatformDashboardPage.tsx`), o
+sinal mais direto para priorização de backlog: até esta rodada a
+priorização era conduzida por decisão direta do PO, sem dado de uso real
+por trás (normal antes do primeiro cliente — deixa de ser depois).
+
+> **DECISÃO — mede MUTAÇÃO, não NAVEGAÇÃO/LEITURA.** Reaproveita
+> `core.audit_log.entity_type` (billing/denial_appeal/contract/user) +
+> contagem direta em `core.patients`/`core.appointments` — nenhuma tabela
+> nova, nenhum evento de "cliquei nesta tela" instrumentado no frontend.
+> Uma clínica que abre a Sala de Comando todo dia mas nunca edita nada
+> ali aparece com contagem zero — suficiente para decidir em qual FRENTE
+> DE ENGENHARIA investir mais (dirigido por AÇÃO real no dado), mas não
+> é telemetria completa de uso de produto. Ver DECISÃO completa em
+> `app/sql/030_platform_feature_usage.sql`.
 
 ### Frontend — rota separada, fora do produto
 
@@ -1092,6 +1157,8 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
 | `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
 | Catálogo de eventos de webhook (`denial_appeal.resolved`, `no_show_risk.high`) | ✅ `test_webhook_more_events.py` (dispara nas três transições de resolução do recurso de glosa, dispara só no risco "alto" de falta — nunca em risco baixo/indeterminado, nunca PII no corpo em nenhum dos dois) |
+| `users/me/onboarding-complete` (tour de boas-vindas guiado) | ✅ `test_users.py` (perfil recém-criado começa com `onboarding_completed_at` nulo, conclusão grava o timestamp, idempotente — pedir de novo não é erro) |
+| `platform/tenants-usage` — `feature_usage_last_30d` (uso por recurso) | ✅ `test_platform_customer_success.py` (decompõe corretamente em pacientes/agenda/faturamento/recurso de glosa/contratos/usuários a partir de `audit_log`+`patients`+`appointments`, todas as 6 chaves sempre presentes mesmo zeradas) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

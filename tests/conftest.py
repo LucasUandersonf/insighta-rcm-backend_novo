@@ -120,6 +120,8 @@ _SCHEMA_FILES = [
     "027_platform_risk_alerts.sql",
     "028_webhook_delivery_queue.sql",
     "029_platform_users.sql",
+    "030_platform_feature_usage.sql",
+    "031_user_onboarding.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

@@ -72,6 +72,7 @@ class PlatformReportingService:
                     patients_total=row.patients_total,
                     appointments_last_30d=row.appointments_last_30d,
                     billings_last_30d=row.billings_last_30d,
+                    feature_usage_last_30d=row.feature_usage_last_30d,
                     days_since_last_activity=days_since_last_activity,
                     engagement_status=engagement_status,
                 )

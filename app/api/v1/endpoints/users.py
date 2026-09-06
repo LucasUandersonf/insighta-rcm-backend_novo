@@ -91,6 +91,19 @@ async def admin_reset_password(
     return await _build_service(db).admin_reset_password(current_user.tenant_id, UUID(current_user.id), user_id)
 
 
+@router.post("/me/onboarding-complete", status_code=204)
+async def complete_onboarding(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW_SELF)),
+) -> None:
+    """Marca o tour de boas-vindas guiado como visto/pulado (self-service,
+    qualquer papel) — chamado pelo frontend ao concluir ou pular o tour.
+    Idempotente: também é chamado de novo se o usuário reabrir o tour
+    manualmente pela Central de Ajuda (ver OnboardingTour.tsx), o backend
+    não distingue "primeira vez" de "revisão"."""
+    await _build_service(db).complete_onboarding(current_user.id)
+
+
 @router.post("/me/change-password", status_code=204)
 async def change_own_password(
     payload: PasswordChangeRequest,

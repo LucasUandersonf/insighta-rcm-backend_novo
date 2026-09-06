@@ -200,6 +200,66 @@ async def test_deactivated_tenant_is_classified_as_inativo_even_with_activity(cl
     assert item["engagement_status"] == "inativo"
 
 
+# =====================================================================
+# feature_usage_last_30d — decomposição por RECURSO (não só engajamento
+# agregado), ver DECISÃO em app/sql/030_platform_feature_usage.sql.
+# =====================================================================
+
+
+async def test_feature_usage_breaks_down_by_resource(client, admin_engine, tenant_a):
+    patient_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.patients (id, tenant_id, full_name) VALUES (:id, :t, 'Paciente Uso')"),
+            {"id": patient_id, "t": tenant_a},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) "
+                "VALUES (:t, :p, now(), 'scheduled')"
+            ),
+            {"t": tenant_a, "p": patient_id},
+        )
+        for entity_type in ("billing", "billing", "denial_appeal", "contract", "user"):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.audit_log (tenant_id, action, entity_type, entity_id) "
+                    "VALUES (:tenant_id, 'created', :entity_type, :entity_id)"
+                ),
+                {"tenant_id": tenant_a, "entity_type": entity_type, "entity_id": str(uuid.uuid4())},
+            )
+
+    token = await _platform_login(client)
+    resp = await client.get("/api/v1/platform/tenants-usage", headers={"Authorization": f"Bearer {token}"})
+    item = next(i for i in resp.json() if i["tenant_id"] == tenant_a)
+    usage = item["feature_usage_last_30d"]
+    assert usage == {
+        "pacientes": 1,
+        "agenda": 1,
+        "faturamento": 2,
+        "recurso_de_glosa": 1,
+        "contratos": 1,
+        "usuarios": 1,
+    }
+
+
+async def test_feature_usage_defaults_to_zero_for_every_key_with_no_activity(client, tenant_a):
+    token = await _platform_login(client)
+    resp = await client.get("/api/v1/platform/tenants-usage", headers={"Authorization": f"Bearer {token}"})
+    item = next(i for i in resp.json() if i["tenant_id"] == tenant_a)
+    # Todas as 6 chaves sempre presentes, mesmo zeradas — o frontend soma
+    # esta mesma estrutura entre tenants para o ranking da plataforma, uma
+    # chave ausente quebraria essa soma agregada.
+    assert item["feature_usage_last_30d"] == {
+        "pacientes": 0,
+        "agenda": 0,
+        "faturamento": 0,
+        "recurso_de_glosa": 0,
+        "contratos": 0,
+        "usuarios": 0,
+    }
+
+
 async def test_active_users_count_reflects_only_active_users(client, admin_engine, tenant_a, owner_a):
     from tests.conftest import _insert_user
 

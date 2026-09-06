@@ -34,3 +34,6 @@ class User(Base):
     password_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Tour de boas-vindas guiado (ver 031_user_onboarding.sql) — NULL =
+    # ainda não viu, qualquer timestamp = concluiu ou pulou.
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
