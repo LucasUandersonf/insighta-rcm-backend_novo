@@ -23,9 +23,11 @@ from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.denial_risk_engine import assess
+from app.services.webhook_dispatch_service import dispatch_event
 
 
 class BillingService:
@@ -37,6 +39,7 @@ class BillingService:
         guia_repo: GuiaRepository | None = None,
         *,
         audit_repo: AuditLogRepository,
+        webhook_repo: WebhookSubscriptionRepository | None = None,
     ):
         self.billing_repo = billing_repo
         self.appointment_repo = appointment_repo
@@ -53,6 +56,12 @@ class BillingService:
         # mesmo risco em qualquer chamador futuro que esquecesse de
         # passá-lo.
         self.audit_repo = audit_repo
+        # Opcional (default None), diferente de audit_repo: disparo de
+        # webhook é um RECURSO OPT-IN do tenant (só existe efeito se ele
+        # tiver cadastrado alguma assinatura em Integrações), não uma
+        # obrigação legal como a trilha de auditoria — ver DECISÃO em
+        # webhook_dispatch_service.py.
+        self.webhook_repo = webhook_repo
 
     async def create_billing(
         self, tenant_id: str, actor_user_id: uuid.UUID | None, data: BillingCreateRequest
@@ -108,6 +117,22 @@ class BillingService:
         await self.audit_repo.record(
             tenant_id=uuid.UUID(tenant_id), actor_user_id=actor_user_id, action="created", entity_type="billing", entity_id=saved.id
         )
+        # Primeiro evento real do motor de webhooks OUTBOUND (ver DECISÃO
+        # em webhook_dispatch_service.py) — held_for_review é o momento em
+        # que o cliente mais quer ser avisado num canal que ele já olha
+        # (Slack/CRM), sem precisar abrir o painel para descobrir.
+        if risk.should_hold_for_review and self.webhook_repo is not None:
+            await dispatch_event(
+                self.webhook_repo,
+                event_type="billing.held_for_review",
+                payload={
+                    "billing_id": saved.id,
+                    "appointment_id": saved.appointment_id,
+                    "denial_risk_level": saved.denial_risk_level,
+                    "denial_reasons": saved.denial_reasons,
+                    "charged_value": float(saved.charged_value),
+                },
+            )
         return BillingResponse.model_validate(saved)
 
     async def list_high_risk(self) -> list[BillingResponse]:

@@ -122,6 +122,24 @@ def generate_api_key() -> tuple[str, str]:
     return raw, raw[:12]
 
 
+def generate_webhook_secret() -> str:
+    """Segredo de assinatura para core.webhook_subscriptions (webhooks
+    OUTBOUND — ver app/sql/025_webhook_subscriptions.sql). Diferente de
+    generate_api_key()/senha, este valor FICA em claro no banco: é a
+    própria plataforma quem assina cada entrega com ele, não quem
+    verifica — não há hash a comparar, então não há por que hashear."""
+    return secrets.token_hex(32)
+
+
+def sign_webhook_payload(*, payload: bytes, secret: str) -> str:
+    """Assina um corpo de webhook OUTBOUND no MESMO formato que
+    verify_meta_webhook_signature() verifica um INBOUND (`sha256=<hex>`)
+    — mesma convenção nos dois sentidos, para quem olha os dois lados do
+    código reconhecer o padrão. Usado por webhook_dispatch_service.py."""
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
 def verify_meta_webhook_signature(*, payload: bytes, signature_header: str | None, secret: str) -> bool:
     """
     Verifica o header X-Hub-Signature-256 que a Meta envia em todo

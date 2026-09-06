@@ -114,6 +114,8 @@ _SCHEMA_FILES = [
     "021_ingestion_column_aliases.sql",
     "022_patient_lgpd_erasure.sql",
     "023_announcements_and_support.sql",
+    "024_api_key_resolver.sql",
+    "025_webhook_subscriptions.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -158,6 +160,13 @@ GRANT EXECUTE ON FUNCTION core.resolve_login(CITEXT) TO app_test_runtime;
 ALTER FUNCTION core.resolve_user_by_email(CITEXT) OWNER TO auth_resolver_owner_test;
 REVOKE ALL ON FUNCTION core.resolve_user_by_email(CITEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_user_by_email(CITEXT) TO app_test_runtime;
+
+-- Autenticação por API key (ver 024_api_key_resolver.sql) — mesmo padrão
+-- acima, reaproveitando a MESMA role auth_resolver_owner_test.
+GRANT SELECT ON core.api_keys TO auth_resolver_owner_test;
+ALTER FUNCTION core.resolve_api_key_candidates(VARCHAR) OWNER TO auth_resolver_owner_test;
+REVOKE ALL ON FUNCTION core.resolve_api_key_candidates(VARCHAR) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.resolve_api_key_candidates(VARCHAR) TO app_test_runtime;
 """
 
 
@@ -294,7 +303,7 @@ async def clean_tables(_test_database, admin_engine):
                     core.contract_items, core.contracts, core.insurance_plan_aliases, core.insurance_plans,
                     core.insurance_companies, core.patients,
                     core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants,
-                    core.announcement_reads, core.support_requests,
+                    core.announcement_reads, core.support_requests, core.webhook_subscriptions,
                     -- platform_announcements é a ÚNICA tabela sem tenant_id (ver
                     -- DECISÃO em app/sql/023_announcements_and_support.sql) — nunca
                     -- seria alcançada pelo CASCADE de truncar core.tenants acima

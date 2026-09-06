@@ -77,6 +77,15 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [x] `report_send_service._alert_if_total_send_failure`: falha em 100% dos destinatários de um tenant (sinal de token expirado/template desaprovado na Meta, não de "um número ruim") agora gera log `ERROR` + alerta ativo no Sentry, em vez de só uma linha `INFO`.
 - [ ] Ainda falta (depende de infraestrutura real, fora do escopo desta rodada): agregação de métricas/alertas de infraestrutura (latência, fila, CPU/memória) via Prometheus/CloudWatch — hoje o alerta é por EXCEÇÃO capturada pelo Sentry, não por métrica de sistema.
 
+### Integrações genéricas (webhooks/API) — IMPLEMENTADO NESTA RODADA
+- [x] **BUG CORRIGIDO (sentido INBOUND)**: chaves de API (`POST /integrations/api-keys`) existiam desde `006_platform_admin.sql`, mas nenhum endpoint jamais as verificava — um cliente podia emitir uma chave e ela não servia para nada. `POST /integrations/ingest` resolve isso: o ERP/CRM/planilha do próprio cliente agora consegue empurrar arquivo de faturamento/agenda autenticando só com `X-API-Key`, sem sessão de usuário.
+- [x] Resolução de tenant a partir do prefixo da chave via `core.resolve_api_key_candidates` (SECURITY DEFINER, mesmo `auth_resolver_owner` já usado por login/reset de senha — nenhum papel novo criado).
+- [x] **Sentido OUTBOUND**: `core.webhook_subscriptions` — cliente cadastra URL (Slack/Zapier/CRM próprio) + `event_types`; `webhook_dispatch_service.dispatch_event` entrega assinado por HMAC-SHA256 (mesma convenção `sha256=<hex>` do webhook Meta, invertida: aqui a plataforma assina). Primeiro evento ligado: `billing.held_for_review`.
+- [x] Falha de entrega (timeout, DNS, 4xx/5xx do destino) nunca derruba a operação que disparou o evento — captada por assinatura individual, logada e reportada ao Sentry quando configurado.
+- [ ] **Fila de retry de verdade** para entrega de webhook — hoje é "tenta uma vez, timeout curto de 5s, sem retry". Um destino fora do ar por 30 segundos simplesmente perde aquele evento. Fica para quando houver fila de mensageria disponível (mesma SQS já usada pela ingestão seria o candidato natural).
+- [ ] Catálogo de eventos ainda é só `billing.held_for_review` — `denial_appeal.resolved` foi cogitado nesta rodada e ficou para a próxima leva de eventos, junto com qualquer evento de agenda/no-show.
+- [ ] UI de gestão de webhooks no frontend (tela de Setup/Integrações) — o CRUD via API está pronto e testado; a tela ainda não foi construída nesta rodada.
+
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.
 - [x] N+1 corrigido em `ProfessionalService.list_professionals`.

@@ -601,6 +601,80 @@ compartilhada" de `core.report_recipients`).
 > configurada, a pergunta continua sendo salva normalmente — só o aviso
 > por e-mail não sai.
 
+## Integrações genéricas (webhooks/API)
+
+Até esta rodada, a única integração externa da plataforma era o webhook
+INBOUND da Meta Ads (seção acima). Isso deixava de fora exatamente o que
+todo cliente B2B pergunta: "dá para o meu ERP/CRM/planilha falar direto
+com vocês?" e "dá para o sistema me avisar no meu Slack/CRM quando algo
+importante acontecer?". Esta rodada resolve os dois sentidos.
+
+### Sentido INBOUND — API key para `POST /integrations/ingest`
+
+`POST /integrations/api-keys` (owner/admin) emite uma chave (`iarcm_...`,
+só exibida na criação — mesmo padrão de segredo de senha) que o ERP/CRM/
+script do próprio cliente usa para autenticar chamadas, sem sessão de
+usuário nem JWT (que expira em minutos — inviável para um script rodando
+sozinho de madrugada).
+
+> **BUG CORRIGIDO — chaves emitidas, nunca verificadas em lugar nenhum.**
+> `POST /integrations/api-keys` existe desde `006_platform_admin.sql`,
+> mas nenhum endpoint jamais autenticava uma chamada usando a chave
+> gerada — um cliente podia emitir uma chave na tela de Setup e ela não
+> servia para nada. `POST /integrations/ingest` é a peça que faltava.
+
+`POST /integrations/ingest` (header `X-API-Key`, sem JWT) roda o MESMO
+pipeline de `POST /ingestion/upload` (claim → parse → salvar → normalizar
+— ver `app/services/ingestion_processing_service.py`), reaproveitado por
+import cross-endpoint de propósito (não uma cópia — ver comentário em
+`app/api/v1/endpoints/integrations.py` sobre por que uma extração para
+service próprio foi avaliada e descartada nesta rodada: exigiria mexer no
+endpoint JWT já testado em produção só para acomodar este caminho novo).
+
+Resolver "de qual tenant é essa chave" ANTES de existir um tenant no
+contexto (mesmo problema de login e reset de senha) usa o mesmo padrão
+SECURITY DEFINER já estabelecido: `core.resolve_api_key_candidates`
+(`app/sql/024_api_key_resolver.sql`) devolve candidatas pelo PREFIXO
+(não sensível) da chave, dono `auth_resolver_owner` (BYPASSRLS) — o
+MESMO papel já usado por login/reset, nunca um papel novo por caso de
+uso. O hash de cada candidata é então verificado com `verify_password`,
+igual a uma senha.
+
+### Sentido OUTBOUND — `core.webhook_subscriptions`
+
+`POST /integrations/webhooks` (owner/admin) cadastra uma URL HTTPS
+(Slack incoming webhook, Zapier/Make, o próprio CRM) e opcionalmente uma
+lista de `event_types` (vazio = recebe todos — mesma convenção de
+`core.report_recipients.report_types`). A resposta da criação é a ÚNICA
+vez que o `secret` de assinatura aparece em texto puro — o cliente
+precisa dele para configurar a verificação do próprio lado.
+`GET/PATCH/DELETE /integrations/webhooks/{id}` completam o CRUD.
+
+`app/services/webhook_dispatch_service.py` (`dispatch_event`) entrega o
+evento a toda assinatura ativa elegível, assinando o corpo com
+HMAC-SHA256 no MESMO formato `sha256=<hex>` que `verify_meta_webhook_signature`
+já verifica no sentido inbound — só invertido (aqui a plataforma ASSINA,
+o cliente VERIFICA). O primeiro evento real ligado a este motor é
+`billing.held_for_review` (`BillingService.create_billing`): um
+faturamento que o motor de risco de glosa decidiu segurar para revisão
+manual é algo que o cliente quer saber imediatamente num canal que ele já
+usa, não só ao abrir o painel depois.
+
+> **DECISÃO — falha de entrega nunca quebra a operação que disparou o
+> evento.** Criar um faturamento não pode falhar porque o Slack do
+> cliente está fora do ar. `dispatch_event()` captura toda exceção POR
+> ASSINATURA individualmente (timeout curto de 5s, sem retry — uma fila
+> de retry de verdade fica fora do escopo desta rodada) e nunca propaga
+> para o chamador; falhas de entrega vão para o log e, se configurado,
+> para o Sentry.
+>
+> **DECISÃO — nunca PII/dado clínico no corpo do evento.** O payload
+> carrega só identificadores e metadados operacionais (ids, status,
+> valores agregados) — nunca nome de paciente, CPF etc. O corpo trafega
+> para um servidor de TERCEIROS escolhido pelo cliente, fora do nosso
+> controle — mesmo espírito de `AuditLogRepository.record` (o `diff`
+> nunca carrega PII/financeiro), reforçado aqui pelo destino ser externo.
+
 ## Observabilidade e erros amigáveis
 Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 - **Todo erro da API** (400 a 500) sai no mesmo formato:
@@ -839,7 +913,11 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `webhooks` (Meta Ads) | ✅ `test_webhooks.py` (assinatura HMAC, handshake, dedupe) |
 | `reports` (relatório semanal) | ✅ `test_reports.py` (com mock do WhatsApp) |
 | `report-recipients` (Gestão de Contatos para Relatórios) | ✅ `test_report_recipients.py` (CRUD, RBAC, validação "pelo menos um contato") |
-| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC + escrita de verdade a partir de `patients`/`billing`/`users`/`denial-appeals`, ver "Trilha de auditoria de acesso" acima) |
+| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC + escrita de verdade a partir de `patients`/`billing`/`users`/`denial-appeals`/`contracts`, ver "Trilha de auditoria de acesso" acima) |
+| `announcements` (Central de Notificações) | ✅ `test_announcements.py` (listagem, `is_read`/`unread_count`, marcar como lida, idempotência) |
+| `support-requests` (Central de Ajuda) | ✅ `test_support_requests.py` (criação, histórico por tenant, RBAC, e-mail best-effort não derruba a resposta) |
+| `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
+| `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

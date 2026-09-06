@@ -21,6 +21,7 @@ from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.billing_service import BillingService
@@ -35,6 +36,7 @@ def _build_service(db: DbSession) -> BillingService:
         ContractItemRepository(db),
         GuiaRepository(db),
         audit_repo=AuditLogRepository(db),
+        webhook_repo=WebhookSubscriptionRepository(db),
     )
 
 

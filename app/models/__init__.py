@@ -28,3 +28,4 @@ from app.models.report_recipient import ReportRecipient  # noqa: F401
 from app.models.support_request import SupportRequest  # noqa: F401
 from app.models.tenant import Tenant  # noqa: F401
 from app.models.user import User  # noqa: F401
+from app.models.webhook_subscription import WebhookSubscription  # noqa: F401
