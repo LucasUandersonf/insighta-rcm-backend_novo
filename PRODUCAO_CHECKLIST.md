@@ -47,10 +47,12 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [ ] Ingestão em massa (upload de planilha) continua de propósito FORA do audit_log — centenas de linhas por arquivo tornariam o trilho ruidoso e a própria tela de histórico de upload (`core.ingestion_files`) já cobre "quem subiu qual arquivo, quando". Auditoria de mutação individual cobre a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
 
 ### LGPD especificamente
-- [ ] Política de retenção e exclusão de dado de paciente (CPF, CID, nome) — o que acontece quando uma clínica cancela a assinatura, ou um paciente pede exclusão?
-- [ ] Criptografia em repouso no banco (RDS oferece nativamente — precisa ser ligado explicitamente).
-- [ ] Revisão de quem, dentro da equipe, tem acesso de produção ao banco (mesmo você, como desenvolvedor, acessando diretamente é um evento que devia ficar registrado).
-- [ ] Termo de uso / política de privacidade alinhados com o que de fato é armazenado (CID é dado de saúde sensível).
+- [x] **Direito de eliminação do titular (art. 18, VI) — IMPLEMENTADO**: `POST /patients/{id}/anonymize` (admin/owner) substitui nome/CPF/data de nascimento por um placeholder — nunca `DELETE` físico, porque isso quebraria a integridade com `appointments`/`billing` (histórico que a clínica é OBRIGADA a reter por obrigação legal de retenção fiscal/contábil, o que a própria LGPD art. 16 permite). Ver `app/sql/022_patient_lgpd_erasure.sql` e `app/services/patient_service.py`.
+- [x] **Auditoria de contratos — IMPLEMENTADO** (fecha o item de auditoria da rodada anterior): criação e homologação de contrato agora também gravam em `core.audit_log` (mesmo mecanismo de patients/billing/users/denial-appeals).
+- [ ] **Política de retenção formal, por escrito** (o que acontece quando uma clínica cancela a assinatura: prazo de retenção do tenant inteiro, quando o dado é de fato purgado) — o mecanismo de anonimização POR PACIENTE existe; falta a política de retenção NO NÍVEL DO TENANT (cancelamento de assinatura), que é uma decisão de negócio/jurídica, não só código.
+- [ ] Criptografia em repouso no banco — **infraestrutura, não código**: RDS/Cloud SQL oferecem nativamente, mas precisa ser ligado explicitamente na hora de provisionar o banco gerenciado (fora do alcance de uma sessão de desenvolvimento sem acesso a esse provisionamento).
+- [ ] Revisão de quem, dentro da equipe, tem acesso de produção ao banco (mesmo o desenvolvedor acessando diretamente é um evento que devia ficar registrado) — processo operacional, não código.
+- [ ] Termo de uso / política de privacidade alinhados com o que de fato é armazenado (CID é dado de saúde sensível) — texto jurídico, não código.
 
 ### Segurança além do RLS
 - [ ] Scan de dependências vulneráveis (`pip-audit`, Dependabot) — nenhuma das ~30 dependências do `requirements.txt` foi auditada quanto a CVEs.

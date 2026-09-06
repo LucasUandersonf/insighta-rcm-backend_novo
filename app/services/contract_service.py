@@ -15,17 +15,19 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 
 from app.models.contract import Contract
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.contract_repository import ContractRepository
 from app.schemas.contract import ContractCreateRequest, ContractItemResponse, ContractResponse
 
 
 class ContractService:
-    def __init__(self, repo: ContractRepository, item_repo: ContractItemRepository):
+    def __init__(self, repo: ContractRepository, item_repo: ContractItemRepository, audit_repo: AuditLogRepository):
         self.repo = repo
         self.item_repo = item_repo
+        self.audit_repo = audit_repo
 
-    async def create_contract(self, tenant_id: str, data: ContractCreateRequest) -> ContractResponse:
+    async def create_contract(self, tenant_id: str, actor_user_id: uuid.UUID | None, data: ContractCreateRequest) -> ContractResponse:
         tenant_uuid = uuid.UUID(tenant_id)
         contract = Contract(
             id=uuid.uuid4(),
@@ -42,6 +44,14 @@ class ContractService:
             tenant_id=tenant_uuid,
             contract_id=saved.id,
             items=[item.model_dump() for item in data.items],
+        )
+        # Cadastro manual já nasce homologado (foi um humano quem digitou
+        # a tabela) — um único evento de auditoria cobre os dois fatos
+        # (criado + já ativo para o motor de glosa), sem `diff` (ver
+        # DECISÃO em AuditLogRepository.record — a tabela de preços em si
+        # não é duplicada aqui).
+        await self.audit_repo.record(
+            tenant_id=tenant_uuid, actor_user_id=actor_user_id, action="created", entity_type="contract", entity_id=saved.id
         )
         return self._to_response(saved, items)
 

@@ -646,10 +646,11 @@ esperar ninguém ler o log.
 >
 > | Serviço | Eventos auditados |
 > |---|---|
-> | `patient_service.py` | criação de paciente |
+> | `patient_service.py` | criação de paciente; **eliminação a pedido do titular** (`anonymize`, ver seção própria abaixo) |
 > | `billing_service.py` | criação de faturamento; liquidação (`settle`) |
 > | `user_service.py` | criação de usuário; mudança de papel/status ativo; reset administrado de senha |
 > | `denial_appeal_service.py` | abertura, protocolo (`file`) e resolução (`resolve`) de recurso de glosa |
+> | `contract_service.py` / `contract_intake_service.py` | criação (cadastro manual ou upload de PDF); **homologação** (`homologated`) — o momento em que a tabela de preços passa a valer para o motor de glosa |
 >
 > **DECISÃO — o `diff` nunca carrega dado sensível.** O objetivo do
 > trilho é responder "quem mudou o quê, quando" — não ser uma SEGUNDA
@@ -669,6 +670,35 @@ esperar ninguém ler o log.
 > arquivo tornariam o trilho ruidoso, e `core.ingestion_files` já cobre
 > "quem subiu qual arquivo, quando" para esse caminho. O audit_log cobre
 > a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
+
+### Direito de eliminação do titular (LGPD art. 18, VI)
+
+`POST /patients/{id}/anonymize` (restrito a `admin`/`owner` — mais
+restrito que o `_CAN_WRITE` de criar/ver paciente, porque é uma decisão
+de conformidade IRREVERSÍVEL, não rotina de recepção) atende ao pedido
+de um paciente para ter seu dado pessoal removido.
+
+**DECISÃO — anonimização, nunca `DELETE` físico.** Excluir a linha de
+`core.patients` quebraria a integridade referencial com
+`appointments`/`billing` — histórico que a clínica é OBRIGADA a reter
+por obrigação legal (retenção fiscal/contábil de faturamento). A própria
+LGPD (art. 16) permite manter o dado nesse cenário; o mecanismo aqui é
+sempre substituir `full_name` por um placeholder e zerar
+`cpf`/`birth_date`/`acquisition_source`/`acquisition_campaign_id`,
+preservando o `id` e o vínculo com o histórico agregado. Marca
+`patients.anonymized_at` (novo, `app/sql/022_patient_lgpd_erasure.sql`)
+— um paciente já anonimizado não pode ser anonimizado de novo (`409`).
+Não existe endpoint de "desfazer": é deliberadamente uma via de mão
+única. Gera uma linha em `core.audit_log` (`action=anonymized`) sem
+`diff` — o próprio "antes" é o dado que está sendo eliminado, gravá-lo
+ali derrotaria o propósito do pedido.
+
+**O que isto NÃO resolve ainda (ver PRODUCAO_CHECKLIST.md):** uma
+política de retenção formal no nível do TENANT (o que acontece quando a
+clínica inteira cancela a assinatura) é uma decisão de negócio/jurídica
+que ainda precisa ser escrita, além de código; criptografia em repouso
+no banco é configuração de infraestrutura na hora de provisionar o
+banco gerenciado, fora do alcance deste repositório.
 
 ## Performance — o que já foi corrigido e o que ainda falta
 Dois achados reais de uma auditoria (não suposição):

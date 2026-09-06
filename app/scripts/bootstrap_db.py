@@ -176,6 +176,11 @@ _POST_UPGRADE_SQL_FILES = [
     # CREATE TABLE sem IF NOT EXISTS — precisa do marcador (ver
     # _POST_UPGRADE_MARKER_TABLE). Ver DECISÃO completa no próprio .sql.
     "021_ingestion_column_aliases.sql",
+    # Direito de eliminação do titular (LGPD art. 18, VI) —
+    # patients.anonymized_at. Auto-idempotente (ADD COLUMN IF NOT
+    # EXISTS) — roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
+    "022_patient_lgpd_erasure.sql",
 ]
 
 _ROLES_SQL = """

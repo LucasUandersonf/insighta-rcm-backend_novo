@@ -31,6 +31,10 @@ router = APIRouter(prefix="/patients", tags=["patients"])
 # 'atendimento' pode cadastrar pacientes (é o dia a dia da recepção);
 # 'auditor' fica de fora por ser role somente-leitura.
 _CAN_WRITE = ("atendimento", "admin", "owner")
+# Anonimizar é IRREVERSÍVEL e é uma decisão de conformidade (LGPD), não
+# rotina de recepção — por isso mais restrito que _CAN_WRITE
+# (atendimento fica de fora, mesmo podendo criar/ver o paciente).
+_CAN_ANONYMIZE = ("admin", "owner")
 
 
 def _build_service(db: DbSession) -> PatientService:
@@ -58,3 +62,21 @@ async def list_patients(
     anterior deste endpoint."""
     items, total = await _build_service(db).list_patients_paginated(limit=limit, offset=offset)
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.post("/{patient_id}/anonymize", response_model=PatientResponse)
+async def anonymize_patient(
+    patient_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_ANONYMIZE)),
+) -> PatientResponse:
+    """
+    Direito de eliminação do titular (LGPD art. 18, VI) — ver DECISÃO
+    completa em PatientService.anonymize_patient e
+    app/sql/022_patient_lgpd_erasure.sql. Substitui nome/CPF/data de
+    nascimento por um placeholder (nunca exclui a linha — o histórico
+    de agendamentos/faturamento vinculado precisa continuar íntegro por
+    obrigação legal de retenção). Irreversível: não existe endpoint de
+    "desanonimizar".
+    """
+    return await _build_service(db).anonymize_patient(current_user.tenant_id, uuid.UUID(current_user.id), patient_id)

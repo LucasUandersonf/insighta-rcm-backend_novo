@@ -29,6 +29,7 @@ from datetime import date, datetime, timezone
 from fastapi import HTTPException, status
 
 from app.models.contract import Contract
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.contract_repository import ContractRepository
 from app.schemas.contract import (
@@ -48,14 +49,16 @@ from app.services.contract_storage_client import ContractStorageClient, Contract
 
 
 class ContractIntakeService:
-    def __init__(self, repo: ContractRepository, item_repo: ContractItemRepository):
+    def __init__(self, repo: ContractRepository, item_repo: ContractItemRepository, audit_repo: AuditLogRepository):
         self.repo = repo
         self.item_repo = item_repo
+        self.audit_repo = audit_repo
 
     async def create_draft(
         self,
         *,
         tenant_id: str,
+        actor_user_id: uuid.UUID | None,
         insurance_plan_id: uuid.UUID,
         valid_from: date,
         valid_until: date | None,
@@ -87,6 +90,13 @@ class ContractIntakeService:
 
         contract.pdf_s3_key = pdf_key
         saved = await self.repo.add(contract)
+        # Sem diff — ver DECISÃO em AuditLogRepository.record. Ainda é
+        # 'rascunho' (sem itens/preços persistidos), então não há nada de
+        # financeiro a proteger ainda; o evento só prova QUEM subiu QUAL
+        # PDF, QUANDO.
+        await self.audit_repo.record(
+            tenant_id=tenant_uuid, actor_user_id=actor_user_id, action="created", entity_type="contract", entity_id=saved.id
+        )
         return _to_response(saved, [])
 
     async def run_extraction(self, contract_id: uuid.UUID) -> ExtractionPreviewResponse:
@@ -159,6 +169,7 @@ class ContractIntakeService:
         self, *, tenant_id: str, contract_id: uuid.UUID, homologated_by: uuid.UUID, items: list[ContractItemInput]
     ) -> ContractResponse:
         contract = await self._get_or_404(contract_id)
+        previous_status = contract.status
 
         saved_items = await self.item_repo.replace_items(
             tenant_id=uuid.UUID(tenant_id),
@@ -171,6 +182,19 @@ class ContractIntakeService:
         contract.homologated_at = datetime.now(timezone.utc)
         await self.repo.save(contract)
 
+        # Momento mais sensível do fluxo de contratos: é a partir daqui
+        # que a tabela de preços passa a valer para o motor de glosa
+        # (ContractItemRepository.find_agreed_price) — só a transição de
+        # status entra no diff, nunca os preços em si (ver DECISÃO em
+        # AuditLogRepository.record).
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=homologated_by,
+            action="homologated",
+            entity_type="contract",
+            entity_id=contract.id,
+            diff={"status": {"before": previous_status, "after": contract.status}},
+        )
         return _to_response(contract, saved_items)
 
     async def _get_or_404(self, contract_id: uuid.UUID) -> Contract:

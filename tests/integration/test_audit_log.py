@@ -13,6 +13,10 @@ por duas rodadas seguidas só teve metade do trabalho feito:
    deste arquivo (mais abaixo) prova isso fim-a-fim: aciona o endpoint
    HTTP de verdade (POST /patients, POST /billing, etc.) e confere que
    uma linha aparece em GET /audit-log, sem tocar o `admin_engine`.
+3. Rodada seguinte (fecha o resto do trilho de LGPD): contract_service.py
+   e contract_intake_service.py (criação e homologação de contrato) e o
+   direito de eliminação do titular (patient_service.anonymize_patient)
+   entram na mesma suíte.
 """
 import uuid as uuid_module
 
@@ -276,3 +280,86 @@ async def test_denial_appeal_lifecycle_writes_audit_log_at_each_step(client, aut
 
     resolved_entry = next(i for i in items if i["action"] == "resolved")
     assert resolved_entry["diff"]["status"] == {"before": "protocolado", "after": "deferido"}
+
+
+# =====================================================================
+# Rodada seguinte (fecha o resto do trilho de LGPD): contratos e direito
+# de eliminação do titular.
+# =====================================================================
+from tests.integration.test_contracts import _create_insurance_plan as _create_plan_for_contract  # noqa: E402
+
+
+async def test_create_contract_writes_audit_log(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_plan_for_contract(admin_engine, tenant_a)
+
+    resp = await client.post(
+        "/api/v1/contracts",
+        json={
+            "insurance_plan_id": plan_id,
+            "valid_from": "2026-01-01",
+            "items": [{"tuss_code": "40404040", "procedure_name": "Consulta", "agreed_price": 200.0}],
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201
+    contract_id = resp.json()["id"]
+
+    audit_resp = await client.get("/api/v1/audit-log", headers=auth_headers_a)
+    entry = _find_entry(audit_resp.json()["items"], entity_type="contract", action="created")
+    assert entry is not None
+    assert entry["entity_id"] == contract_id
+    # Nunca duplica a tabela de preços no audit log.
+    assert entry["diff"] is None
+
+
+async def test_homologate_contract_writes_audit_log_with_status_diff(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_plan_for_contract(admin_engine, tenant_a)
+
+    # Insere um contrato em 'em_revisao' direto pelo banco — evita
+    # precisar mockar S3/IA só para chegar no estado que antecede a
+    # homologação (mesmo atalho de test_contract_extraction_reconciliation.py).
+    contract_id = str(uuid_module.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status) "
+                "VALUES (:id, :t, :plan, '2026-01-01', 'em_revisao')"
+            ),
+            {"id": contract_id, "t": tenant_a, "plan": plan_id},
+        )
+
+    resp = await client.post(
+        f"/api/v1/contracts/{contract_id}/homologate",
+        json={"items": [{"tuss_code": "10101012", "procedure_name": "Consulta", "agreed_price": 180.0}]},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200
+
+    audit_resp = await client.get("/api/v1/audit-log", headers=auth_headers_a)
+    entry = _find_entry(audit_resp.json()["items"], entity_type="contract", action="homologated")
+    assert entry is not None
+    assert entry["entity_id"] == contract_id
+    assert entry["diff"]["status"] == {"before": "em_revisao", "after": "homologado"}
+
+
+async def test_anonymize_patient_writes_audit_log_without_pii(client, auth_headers_a):
+    create_resp = await client.post(
+        "/api/v1/patients",
+        json={"full_name": "Paciente Para Esquecer", "cpf": "12345678900"},
+        headers=auth_headers_a,
+    )
+    patient_id = create_resp.json()["id"]
+
+    anon_resp = await client.post(f"/api/v1/patients/{patient_id}/anonymize", headers=auth_headers_a)
+    assert anon_resp.status_code == 200
+
+    audit_resp = await client.get("/api/v1/audit-log", headers=auth_headers_a)
+    entry = _find_entry(audit_resp.json()["items"], entity_type="patient", action="anonymized")
+    assert entry is not None
+    assert entry["entity_id"] == patient_id
+    assert entry["diff"] is None
+    # O nome/CPF originais nunca aparecem em nenhum campo do registro de
+    # auditoria — nem o "antes" nem o "depois".
+    dump = str(audit_resp.json())
+    assert "Paciente Para Esquecer" not in dump
+    assert "12345678900" not in dump

@@ -21,3 +21,9 @@ class Patient(Base):
     acquisition_source: Mapped[str | None] = mapped_column(String(50))
     acquisition_campaign_id: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Direito de eliminação do titular (LGPD art. 18, VI) — ver DECISÃO
+    # completa em app/sql/022_patient_lgpd_erasure.sql e
+    # app/services/patient_service.py (anonymize_patient). NULL = dado
+    # pessoal intacto; preenchido = full_name/cpf/birth_date/acquisition_*
+    # já foram substituídos por um placeholder (nunca DELETE físico).
+    anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
