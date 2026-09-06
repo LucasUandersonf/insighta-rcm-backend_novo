@@ -3,8 +3,8 @@ tests/integration/test_platform_risk_alerts.py — alertas proativos de
 Customer Success (ver DECISÃO completa em app/services/platform_alert_service.py
 e app/sql/027_platform_risk_alerts.sql).
 
-Mesma técnica de test_platform_customer_success.py (monkeypatch de
-platform_module.settings para a senha) + mesma técnica de
+Mesma técnica de test_platform_customer_success.py para o login
+individual (insere direto em core.platform_users) + mesma técnica de
 test_support_requests.py (monkeypatch de EmailClient.send) para provar
 o e-mail sem depender de SMTP real.
 """
@@ -12,18 +12,32 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 
-from app.api.v1.endpoints import platform as platform_module
+from app.core.security import hash_password
 from app.services import platform_alert_service as alert_service_module
 
+_EMAIL = "equipe@insighta-rcm.com"
 _PASSWORD = "senha-super-secreta-da-equipe"
 _ALERT_EMAIL = "cs@insighta-rcm.com"
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _platform_admin_user(admin_engine, clean_tables):
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.platform_users (id, email, hashed_password, full_name) "
+                "VALUES (:id, :email, :hashed, 'Equipe de Teste')"
+            ),
+            {"id": str(uuid.uuid4()), "email": _EMAIL, "hashed": hash_password(_PASSWORD)},
+        )
+    yield
+
+
 @pytest.fixture(autouse=True)
-def _configure_platform(monkeypatch):
-    monkeypatch.setattr(platform_module.settings, "PLATFORM_ADMIN_PASSWORD", _PASSWORD)
+def _configure_alert_email(monkeypatch):
     monkeypatch.setattr(alert_service_module.settings, "PLATFORM_ALERT_EMAIL", _ALERT_EMAIL)
     yield
 
@@ -40,7 +54,7 @@ def _sent_emails(monkeypatch):
 
 
 async def _platform_login(client) -> str:
-    resp = await client.post("/api/v1/platform/login", json={"password": _PASSWORD})
+    resp = await client.post("/api/v1/platform/login", json={"email": _EMAIL, "password": _PASSWORD})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 

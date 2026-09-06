@@ -6,16 +6,26 @@ app/api/platform_admin_auth.py).
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 
 class PlatformLoginRequest(BaseModel):
+    email: EmailStr
     password: str
 
 
 class PlatformLoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class PlatformAuditLogEntryResponse(BaseModel):
+    id: int
+    actor_email: str
+    action: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class TenantUsageSummary(BaseModel):

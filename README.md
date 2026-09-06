@@ -749,24 +749,34 @@ opera a Insighta**, nunca de um usuário de clínica.
 > comercial grave. Por isso ele tem autenticação PRÓPRIA, totalmente
 > separada do login de clínica.
 
-### Autenticação — senha única da equipe, não login de usuário
+### Autenticação — login individual, `core.platform_users`
 
-`POST /platform/login` aceita só `{"password": "..."}`, comparado (tempo
-constante, `hmac.compare_digest`) contra `settings.PLATFORM_ADMIN_PASSWORD`
-— sem `PLATFORM_ADMIN_PASSWORD` configurada, responde 503 em vez de
-aceitar (ou pior, nunca autenticar) qualquer senha. O JWT emitido
-(`create_platform_admin_token`, `app/core/security.py`) carrega só a
-claim `scope: "platform_admin"` — nunca `sub`/`tenant_id`/`role` — e dura
-4h (mais que o token de clínica: é uma ferramenta interna sem fluxo de
-refresh construído). `app/api/platform_admin_auth.py::get_platform_admin`
-é a dependency que todo endpoint de `/platform` (exceto o login) exige;
-rejeita explicitamente um JWT de usuário de clínica que por acaso chegue
-ali (mesma chave de assinatura, mas sem a claim `scope`).
+`POST /platform/login` aceita `{"email": "...", "password": "..."}`,
+verificado contra `core.platform_users` (`verify_password`, mesmo
+mecanismo de senha de usuário de clínica). O JWT emitido
+(`create_platform_admin_token`, `app/core/security.py`) carrega `sub`
+(id do platform_user) + a claim `scope: "platform_admin"` — nunca
+`tenant_id`/`role` — e dura 4h (mais que o token de clínica: é uma
+ferramenta interna sem fluxo de refresh construído).
+`app/api/platform_admin_auth.py::get_platform_admin` é a dependency que
+todo endpoint de `/platform` (exceto o login) exige; devolve uma
+`PlatformAdminIdentity` (com o id extraído de `sub`) e rejeita
+explicitamente um JWT de usuário de clínica que por acaso chegue ali
+(mesma chave de assinatura, mas sem a claim `scope`).
 
-Senha única compartilhada é uma escolha deliberada de escopo para a v1 —
-suficiente para uma equipe pequena; criar uma tabela própria de "usuários
-da plataforma" com login individual é a evolução natural se esse uso
-crescer.
+> **DECISÃO — substituiu a senha única compartilhada da v1 deste
+> painel.** Era uma escolha deliberada de escopo para uma equipe
+> pequena; com mais de uma ação real acontecendo no painel (ver
+> `POST /platform/alerts/run` abaixo), passou a fazer sentido saber QUEM
+> fez o quê — `core.platform_audit_log` guarda isso (`GET /platform/audit-log`).
+> Sem RBAC próprio ainda nesta v1 (todo `platform_user` pode tudo) —
+> evolução natural se o time crescer.
+>
+> **Sem self-signup, de propósito.** Contas são criadas/resetadas via
+> `python -m app.scripts.create_platform_user --email ... --full-name ...`
+> (mesmo raciocínio de `publish_announcement.py`: quem opera a
+> plataforma não é um cliente). Sem `--password`, o script gera uma
+> senha temporária e a imprime uma única vez no terminal.
 
 ### Relatório — `core.platform_tenant_usage_summary()`
 
@@ -1078,7 +1088,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `support-requests` (Central de Ajuda) | ✅ `test_support_requests.py` (criação, histórico por tenant, RBAC, e-mail best-effort não derruba a resposta) |
 | `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
 | `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
-| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
+| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login individual por e-mail/senha, conta desativada não loga, `last_login_at`/`platform_audit_log` gravados, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo, `GET /platform/audit-log`) |
 | `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
 | `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
 | Catálogo de eventos de webhook (`denial_appeal.resolved`, `no_show_risk.high`) | ✅ `test_webhook_more_events.py` (dispara nas três transições de resolução do recurso de glosa, dispara só no risco "alto" de falta — nunca em risco baixo/indeterminado, nunca PII no corpo em nenhum dos dois) |

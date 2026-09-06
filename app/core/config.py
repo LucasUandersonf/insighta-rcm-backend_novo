@@ -229,13 +229,11 @@ class Settings(BaseSettings):
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0
 
     # --- Customer Success orientado a dados (painel interno da plataforma) ---
-    # Senha ÚNICA e compartilhada da EQUIPE que opera a Insighta — nunca
-    # ligada a nenhum tenant/usuário de clínica (ver DECISÃO completa em
-    # app/api/platform_admin_auth.py). Mesma degradação graciosa das
-    # demais credenciais opcionais acima: sem PLATFORM_ADMIN_PASSWORD
-    # configurada, POST /platform/login responde 503 em vez de aceitar
-    # (ou pior, silenciosamente nunca autenticar) qualquer senha.
-    PLATFORM_ADMIN_PASSWORD: str | None = None
+    # Login individual por pessoa (core.platform_users, ver DECISÃO em
+    # app/sql/029_platform_users.sql) — substituiu a senha única
+    # compartilhada da v1 deste painel. Contas são criadas/resetadas via
+    # `python -m app.scripts.create_platform_user` (equipe pequena, sem
+    # self-signup), nunca por variável de ambiente.
 
     # Caixa da EQUIPE (não de cliente) que recebe o aviso quando uma
     # clínica entra em "risco" no painel acima — ver
