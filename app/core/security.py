@@ -93,6 +93,37 @@ def create_access_token(*, user_id: str, tenant_id: str, role: str) -> str:
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+# Sessão do painel interno de Customer Success (ver
+# app/api/platform_admin_auth.py) dura mais que o token de usuário de
+# clínica (30 min, settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES) de propósito:
+# é uma ferramenta operacional da própria equipe Insighta, sem fluxo de
+# refresh token construído — expirar em 30 min forçaria logar de novo no
+# meio de uma sessão de análise. 4h é um meio-termo razoável para uma
+# ferramenta interna de acesso esporádico, não diário.
+_PLATFORM_ADMIN_TOKEN_EXPIRE_MINUTES = 240
+
+
+def create_platform_admin_token() -> str:
+    """
+    JWT do painel interno de Customer Success — MESMA chave/algoritmo do
+    JWT de usuário (settings.JWT_SECRET_KEY), mas SEM `sub`/`tenant_id`/
+    `role`: não existe usuário nem tenant nesta sessão, só a claim
+    `scope`, que app/api/platform_admin_auth.py exige bater com
+    "platform_admin" antes de aceitar o token em qualquer endpoint de
+    /platform. Isso também impede, por construção, que este token seja
+    aceito por engano em qualquer endpoint de negócio normal — CurrentUser
+    (app/api/deps.py) exige `payload["tenant_id"]`, que este token nunca
+    carrega.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(minutes=_PLATFORM_ADMIN_TOKEN_EXPIRE_MINUTES)
+    payload: dict[str, Any] = {
+        "scope": "platform_admin",
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
 def decode_access_token(token: str) -> dict[str, Any]:
     """
     Lança jose.JWTError se o token for inválido, expirado ou tiver

@@ -26,6 +26,7 @@ from app.api.v1.endpoints import (
     locais,
     lotes,
     patients,
+    platform,
     professionals,
     report_recipients,
     reports,
@@ -61,3 +62,4 @@ api_router.include_router(report_recipients.router)
 api_router.include_router(audit_log.router)
 api_router.include_router(announcements.router)
 api_router.include_router(support_requests.router)
+api_router.include_router(platform.router)

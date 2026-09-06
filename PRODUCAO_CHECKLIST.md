@@ -86,6 +86,13 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [ ] Catálogo de eventos ainda é só `billing.held_for_review` — `denial_appeal.resolved` foi cogitado nesta rodada e ficou para a próxima leva de eventos, junto com qualquer evento de agenda/no-show.
 - [ ] UI de gestão de webhooks no frontend (tela de Setup/Integrações) — o CRUD via API está pronto e testado; a tela ainda não foi construída nesta rodada.
 
+### Customer Success orientado a dados — IMPLEMENTADO NESTA RODADA
+- [x] Painel interno (`/plataforma`, autenticação por senha única da equipe, separada de qualquer login de clínica) mostrando uso agregado por tenant: usuários ativos, última atividade, eventos de auditoria (30d), pacientes/consultas/faturamentos.
+- [x] Régua de engajamento (novo/risco/atenção/engajado/inativo) calculada em Python a partir de `core.audit_log` — nenhuma instrumentação nova precisou ser criada.
+- [x] Role de banco própria (`platform_reporting_owner`), separada de `auth_resolver_owner` — nunca aumenta o raio de estrago de um bug/vazamento na função de login.
+- [ ] Senha única compartilhada é aceitável para uma equipe pequena; se a equipe/uso crescer, evoluir para login individual por usuário da plataforma (tabela própria, fora de `core.users`).
+- [ ] Nenhum alerta proativo ainda (ex: e-mail automático quando uma clínica entra em "risco") — hoje é um painel que alguém precisa abrir e olhar, não um monitoramento ativo.
+
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.
 - [x] N+1 corrigido em `ProfessionalService.list_professionals`.

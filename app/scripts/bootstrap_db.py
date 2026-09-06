@@ -194,6 +194,12 @@ _POST_UPGRADE_SQL_FILES = [
     # core.webhook_subscriptions. CREATE TABLE sem IF NOT EXISTS — precisa
     # do marcador (ver _POST_UPGRADE_MARKER_TABLE).
     "025_webhook_subscriptions.sql",
+    # Customer Success orientado a dados — função agregadora cross-tenant
+    # (SECURITY DEFINER, role própria platform_reporting_owner, NÃO
+    # reaproveita auth_resolver_owner — ver DECISÃO no próprio .sql).
+    # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
+    # em _POST_UPGRADE_MARKER_TABLE.
+    "026_platform_customer_success.sql",
 ]
 
 _ROLES_SQL = """
@@ -225,6 +231,16 @@ GRANT SELECT ON core.api_keys TO auth_resolver_owner;
 ALTER FUNCTION core.resolve_api_key_candidates(VARCHAR) OWNER TO auth_resolver_owner;
 REVOKE ALL ON FUNCTION core.resolve_api_key_candidates(VARCHAR) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_api_key_candidates(VARCHAR) TO app_runtime;
+
+-- Customer Success orientado a dados (ver 026_platform_customer_success.sql)
+-- — role PRÓPRIA, de propósito diferente de auth_resolver_owner (ver
+-- DECISÃO no próprio .sql): esta agrega dado cross-tenant para o painel
+-- interno da plataforma, não resolve "qual tenant é este" antes do login.
+GRANT USAGE ON SCHEMA core TO platform_reporting_owner;
+GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.appointments, core.billing TO platform_reporting_owner;
+ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner;
+REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_runtime;
 """
 
 
@@ -367,7 +383,14 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             # nesta jornada: ver comentário em _ROLES_SQL).
             await conn.execute("CREATE ROLE auth_resolver_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
-        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner)...")
+        platform_reporting_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_reporting_owner')"
+        )
+        if not platform_reporting_owner_exists:
+            logger.info("Criando role platform_reporting_owner...")
+            await conn.execute("CREATE ROLE platform_reporting_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
+        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner)...")
         await conn.execute(_ROLES_SQL)
     finally:
         await conn.close()

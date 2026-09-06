@@ -675,6 +675,83 @@ usa, não só ao abrir o painel depois.
 > controle — mesmo espírito de `AuditLogRepository.record` (o `diff`
 > nunca carrega PII/financeiro), reforçado aqui pelo destino ser externo.
 
+## Customer Success orientado a dados (painel interno da plataforma)
+
+Item de maturidade de produto que fecha a última frente de base sugerida
+("nenhum SaaS B2B sobrevive sem monitorar se o cliente está de fato
+usando a ferramenta"): um painel que mostra, por clínica, quem está
+engajado e quem está em risco de cancelar — **exclusivo da equipe que
+opera a Insighta**, nunca de um usuário de clínica.
+
+> **DECISÃO — por que isto não é "mais uma tela dentro do papel de
+> owner".** Todo papel que existe hoje (`owner`, `admin`, `financeiro`,
+> `atendimento`, `auditor`) é um papel DENTRO de um tenant — o RLS
+> garante que mesmo o `owner` mais poderoso nunca vê nada fora do
+> próprio tenant. Este painel é o oposto por definição: uma visão que
+> atravessa TODOS os tenants ao mesmo tempo, de propósito. Se esse dado
+> fosse acessível por qualquer papel de clínica, cada cliente enxergaria
+> o quanto os OUTROS clientes usam o produto — vazamento de informação
+> comercial grave. Por isso ele tem autenticação PRÓPRIA, totalmente
+> separada do login de clínica.
+
+### Autenticação — senha única da equipe, não login de usuário
+
+`POST /platform/login` aceita só `{"password": "..."}`, comparado (tempo
+constante, `hmac.compare_digest`) contra `settings.PLATFORM_ADMIN_PASSWORD`
+— sem `PLATFORM_ADMIN_PASSWORD` configurada, responde 503 em vez de
+aceitar (ou pior, nunca autenticar) qualquer senha. O JWT emitido
+(`create_platform_admin_token`, `app/core/security.py`) carrega só a
+claim `scope: "platform_admin"` — nunca `sub`/`tenant_id`/`role` — e dura
+4h (mais que o token de clínica: é uma ferramenta interna sem fluxo de
+refresh construído). `app/api/platform_admin_auth.py::get_platform_admin`
+é a dependency que todo endpoint de `/platform` (exceto o login) exige;
+rejeita explicitamente um JWT de usuário de clínica que por acaso chegue
+ali (mesma chave de assinatura, mas sem a claim `scope`).
+
+Senha única compartilhada é uma escolha deliberada de escopo para a v1 —
+suficiente para uma equipe pequena; criar uma tabela própria de "usuários
+da plataforma" com login individual é a evolução natural se esse uso
+crescer.
+
+### Relatório — `core.platform_tenant_usage_summary()`
+
+`GET /platform/tenants-usage` devolve, para cada tenant: usuários ativos,
+data da última atividade, eventos de auditoria nos últimos 30 dias,
+total de pacientes, consultas e faturamentos recentes — e um
+`engagement_status` calculado (`engajado`/`atencao`/`risco`/`novo`/`inativo`).
+
+> **DECISÃO — role NOVA (`platform_reporting_owner`), não reaproveita
+> `auth_resolver_owner`.** `auth_resolver_owner` existe para resolver
+> QUEM É O TENANT antes do login (sempre devolvendo candidatas estreitas:
+> um usuário, uma chave). Esta função é outra categoria de problema: uma
+> vez que já sabemos quem está pedindo (o operador da plataforma), ela
+> devolve dado agregado de TODOS os tenants de uma vez, de propósito.
+> Misturar as duas responsabilidades na mesma role aumentaria o raio de
+> estrago de qualquer bug/vazamento futuro em qualquer uma das duas.
+>
+> **DECISÃO — reaproveita `core.audit_log` como sinal de "uso".** Em vez
+> de instrumentar um evento novo, `MAX(created_at)`/`COUNT(*)` sobre
+> `core.audit_log` (já escrito de verdade em toda mutação sensível desde
+> a rodada de LGPD) já é um proxy real de "quando essa clínica foi vista
+> fazendo alguma coisa pela última vez" — reuso de infraestrutura
+> existente, sem duplicar instrumentação.
+>
+> **DECISÃO — régua de engajamento vive em Python, não em SQL.**
+> `PlatformReportingService._classify_engagement` decide os limiares
+> (tenant com menos de 7 dias = "novo"; 0 eventos em 30 dias = "risco";
+> 1-4 eventos = "atenção"; 5+ = "engajado"; tenant desativado = "inativo"
+> sempre, mesmo com atividade recente). É uma heurística de v1,
+> deliberadamente simples e fácil de recalibrar sem nova migration.
+
+### Frontend — rota separada, fora do produto
+
+`/plataforma/login` + `/plataforma` (`src/routes/PlatformProtectedRoute.tsx`)
+são rotas completamente fora do `AuthContext`/RBAC de clínica — usam um
+token guardado sob uma chave de `localStorage` própria
+(`insighta_platform_admin_token`) e um cliente HTTP dedicado
+(`src/lib/platform-api-client.ts`), nunca o `apiClient` principal. Nenhum
+link dentro do produto aponta para essas rotas.
+
 ## Observabilidade e erros amigáveis
 Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 - **Todo erro da API** (400 a 500) sai no mesmo formato:
@@ -918,6 +995,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `support-requests` (Central de Ajuda) | ✅ `test_support_requests.py` (criação, histórico por tenant, RBAC, e-mail best-effort não derruba a resposta) |
 | `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
 | `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
+| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

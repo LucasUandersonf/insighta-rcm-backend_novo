@@ -116,6 +116,7 @@ _SCHEMA_FILES = [
     "023_announcements_and_support.sql",
     "024_api_key_resolver.sql",
     "025_webhook_subscriptions.sql",
+    "026_platform_customer_success.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -167,6 +168,19 @@ GRANT SELECT ON core.api_keys TO auth_resolver_owner_test;
 ALTER FUNCTION core.resolve_api_key_candidates(VARCHAR) OWNER TO auth_resolver_owner_test;
 REVOKE ALL ON FUNCTION core.resolve_api_key_candidates(VARCHAR) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_api_key_candidates(VARCHAR) TO app_test_runtime;
+
+-- Customer Success orientado a dados (ver 026_platform_customer_success.sql)
+-- — role PRÓPRIA (não reaproveita auth_resolver_owner_test, ver DECISÃO
+-- no próprio .sql): agrega dado cross-tenant para o painel interno da
+-- plataforma, categoria de problema diferente de "resolver o tenant".
+DROP ROLE IF EXISTS platform_reporting_owner_test;
+CREATE ROLE platform_reporting_owner_test NOLOGIN NOSUPERUSER;
+ALTER ROLE platform_reporting_owner_test BYPASSRLS;
+GRANT USAGE ON SCHEMA core TO platform_reporting_owner_test;
+GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.appointments, core.billing TO platform_reporting_owner_test;
+ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner_test;
+REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_test_runtime;
 """
 
 

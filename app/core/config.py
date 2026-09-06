@@ -227,6 +227,15 @@ class Settings(BaseSettings):
     # explícita do operador ligar, não um padrão "grátis" que pode
     # estourar o free tier sem ninguém perceber.
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0
+
+    # --- Customer Success orientado a dados (painel interno da plataforma) ---
+    # Senha ÚNICA e compartilhada da EQUIPE que opera a Insighta — nunca
+    # ligada a nenhum tenant/usuário de clínica (ver DECISÃO completa em
+    # app/api/platform_admin_auth.py). Mesma degradação graciosa das
+    # demais credenciais opcionais acima: sem PLATFORM_ADMIN_PASSWORD
+    # configurada, POST /platform/login responde 503 em vez de aceitar
+    # (ou pior, silenciosamente nunca autenticar) qualquer senha.
+    PLATFORM_ADMIN_PASSWORD: str | None = None
     # Amostragem de profiling — mesma lógica do tracing acima, desligada
     # por padrão.
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
