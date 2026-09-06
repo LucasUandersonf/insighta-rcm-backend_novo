@@ -38,3 +38,14 @@ class TenantUsageSummary(BaseModel):
     engagement_status: str
 
     model_config = {"from_attributes": True}
+
+
+class PlatformAlertRunResponse(BaseModel):
+    """Resultado de uma execução de PlatformAlertService — nomes de
+    clínica (não ids) porque quem lê isto é sempre um humano da equipe,
+    disparando manualmente via POST /platform/alerts/run ou lendo o log
+    do job agendado."""
+
+    new_alerts: list[str]
+    reminders_sent: list[str]
+    recovered: list[str]

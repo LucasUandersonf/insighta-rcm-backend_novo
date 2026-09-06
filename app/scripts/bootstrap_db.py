@@ -200,6 +200,11 @@ _POST_UPGRADE_SQL_FILES = [
     # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
     # em _POST_UPGRADE_MARKER_TABLE.
     "026_platform_customer_success.sql",
+    # Alertas proativos de Customer Success — core.platform_risk_alerts
+    # (mesma exceção sem tenant_id/RLS de platform_announcements, ver
+    # DECISÃO no próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa
+    # do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "027_platform_risk_alerts.sql",
 ]
 
 _ROLES_SQL = """
@@ -334,6 +339,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "021_ingestion_column_aliases.sql": "ingestion_column_aliases",
     "023_announcements_and_support.sql": "platform_announcements",
     "025_webhook_subscriptions.sql": "webhook_subscriptions",
+    "027_platform_risk_alerts.sql": "platform_risk_alerts",
 }
 
 

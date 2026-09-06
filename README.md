@@ -752,6 +752,34 @@ token guardado sob uma chave de `localStorage` própria
 (`src/lib/platform-api-client.ts`), nunca o `apiClient` principal. Nenhum
 link dentro do produto aponta para essas rotas.
 
+### Alertas proativos — `core.platform_risk_alerts` + `platform_risk_alert_job.py`
+
+O painel acima só ajuda quem lembra de abrir a tela. `POST /platform/alerts/run`
+(também disparável sob demanda, protegido pelo mesmo login do painel) e
+`app/worker/platform_risk_alert_job.py` (agendado externamente, 1x/dia
+sugerido — ver DECISÃO no próprio arquivo) avisam a **equipe Insighta**
+por e-mail assim que uma clínica entra em `risco`.
+
+> **DECISÃO — alerta só na TRANSIÇÃO para "risco", com lembrete
+> periódico.** Reenviar o mesmo aviso a cada execução do job inundaria a
+> caixa de entrada e ensinaria a equipe a ignorá-lo — o clássico "alarme
+> que sempre toca". `core.platform_risk_alerts` guarda, por clínica, o
+> episódio de risco EM ABERTO (mesma exceção sem tenant_id/RLS de
+> `platform_announcements` — ver DECISÃO no próprio `.sql`): alerta NOVO
+> quando não havia episódio; LEMBRETE só depois de 7 dias sem novo aviso
+> se a clínica continuar em risco; episódio fechado (linha apagada,
+> nenhum e-mail de "recuperada") assim que ela sai do risco — uma
+> entrada FUTURA conta como alerta novo, não reenvio do mesmo episódio.
+>
+> **DECISÃO — e-mail, não WhatsApp.** O backlog original citava as duas
+> opções; WhatsApp exigiria um template pré-aprovado pela Meta só para
+> um aviso interno da própria equipe — desproporcional ao problema.
+> `settings.PLATFORM_ALERT_EMAIL` reaproveita o mesmo `EmailClient` já
+> usado por `SUPPORT_EMAIL`. Sem essa variável configurada, o job
+> continua rodando e o episódio continua sendo registrado normalmente —
+> só o e-mail não sai, com um log de nível ERROR (não silencioso, já que
+> aqui o aviso É o produto).
+
 ## Observabilidade e erros amigáveis
 Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 - **Todo erro da API** (400 a 500) sai no mesmo formato:
@@ -996,6 +1024,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
 | `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
 | `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
+| `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

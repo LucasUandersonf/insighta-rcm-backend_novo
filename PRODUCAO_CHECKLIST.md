@@ -91,7 +91,9 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [x] Régua de engajamento (novo/risco/atenção/engajado/inativo) calculada em Python a partir de `core.audit_log` — nenhuma instrumentação nova precisou ser criada.
 - [x] Role de banco própria (`platform_reporting_owner`), separada de `auth_resolver_owner` — nunca aumenta o raio de estrago de um bug/vazamento na função de login.
 - [ ] Senha única compartilhada é aceitável para uma equipe pequena; se a equipe/uso crescer, evoluir para login individual por usuário da plataforma (tabela própria, fora de `core.users`).
-- [ ] Nenhum alerta proativo ainda (ex: e-mail automático quando uma clínica entra em "risco") — hoje é um painel que alguém precisa abrir e olhar, não um monitoramento ativo.
+- [x] **Alertas proativos — IMPLEMENTADO NESTA RODADA**: `POST /platform/alerts/run` + `app/worker/platform_risk_alert_job.py` avisam a equipe por e-mail assim que uma clínica entra em "risco" (`core.platform_risk_alerts` guarda o episódio em aberto, evitando reenviar o mesmo aviso a cada execução — só um lembrete após 7 dias se continuar em risco).
+- [ ] Só e-mail por enquanto — WhatsApp para a equipe interna foi avaliado e descartado nesta rodada (exigiria template pré-aprovado pela Meta só para uso interno, desproporcional).
+- [ ] Agendamento externo (cron/EventBridge) do `platform_risk_alert_job.py` ainda não provisionado — mesma pendência de infraestrutura dos outros dois jobs (`weekly_report_job.py`/`daily_alert_job.py`).
 
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.

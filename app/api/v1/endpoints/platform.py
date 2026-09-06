@@ -21,7 +21,9 @@ from app.core.rate_limit import limiter
 from app.core.security import create_platform_admin_token
 from app.db.session import get_db_no_tenant
 from app.repositories.platform_reporting_repository import PlatformReportingRepository
-from app.schemas.platform import PlatformLoginRequest, PlatformLoginResponse, TenantUsageSummary
+from app.repositories.platform_risk_alert_repository import PlatformRiskAlertRepository
+from app.schemas.platform import PlatformAlertRunResponse, PlatformLoginRequest, PlatformLoginResponse, TenantUsageSummary
+from app.services.platform_alert_service import PlatformAlertService
 from app.services.platform_reporting_service import PlatformReportingService
 
 router = APIRouter(prefix="/platform", tags=["platform"])
@@ -55,3 +57,22 @@ async def list_tenants_usage(db: AsyncSession = Depends(get_db_no_tenant)) -> li
     """
     service = PlatformReportingService(PlatformReportingRepository(db))
     return await service.list_tenant_usage()
+
+
+@router.post("/alerts/run", response_model=PlatformAlertRunResponse, dependencies=[PlatformAdminDep])
+async def run_risk_alerts(db: AsyncSession = Depends(get_db_no_tenant)) -> PlatformAlertRunResponse:
+    """
+    Dispara manualmente a checagem de alertas de risco — útil para testar
+    sem esperar o agendador externo (mesmo espírito de
+    POST /reports/weekly/send). Em produção, roda periodicamente via
+    app/worker/platform_risk_alert_job.py (cron/EventBridge Scheduler).
+    """
+    service = PlatformAlertService(
+        PlatformReportingService(PlatformReportingRepository(db)),
+        PlatformRiskAlertRepository(db),
+    )
+    result = await service.check_and_send_risk_alerts()
+    # get_db_no_tenant não commita sozinha (diferente da sessão
+    # tenant-aware) — ver mesma exigência em app/services/auth_service.py.
+    await db.commit()
+    return result

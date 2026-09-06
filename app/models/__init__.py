@@ -22,6 +22,7 @@ from app.models.marketing_spend import MarketingSpend  # noqa: F401
 from app.models.marketing_webhook_event import MarketingWebhookEvent  # noqa: F401
 from app.models.password_reset_token import PasswordResetToken  # noqa: F401
 from app.models.patient import Patient  # noqa: F401
+from app.models.platform_risk_alert import PlatformRiskAlert  # noqa: F401
 from app.models.professional import Professional  # noqa: F401
 from app.models.professional_availability import ProfessionalAvailability  # noqa: F401
 from app.models.report_recipient import ReportRecipient  # noqa: F401

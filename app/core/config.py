@@ -236,6 +236,17 @@ class Settings(BaseSettings):
     # configurada, POST /platform/login responde 503 em vez de aceitar
     # (ou pior, silenciosamente nunca autenticar) qualquer senha.
     PLATFORM_ADMIN_PASSWORD: str | None = None
+
+    # Caixa da EQUIPE (não de cliente) que recebe o aviso quando uma
+    # clínica entra em "risco" no painel acima — ver
+    # app/services/platform_alert_service.py. Mesma degradação graciosa
+    # de SUPPORT_EMAIL: sem PLATFORM_ALERT_EMAIL configurado, o job
+    # continua rodando e o estado (core.platform_risk_alerts) continua
+    # sendo mantido normalmente — só o e-mail não sai (e um log de nível
+    # ERROR, não silencioso, avisa que a configuração está faltando,
+    # já que aqui o "aviso" É o produto: diferente de SUPPORT_EMAIL,
+    # não tem tela nenhuma cobrindo a mesma informação de outro jeito).
+    PLATFORM_ALERT_EMAIL: str | None = None
     # Amostragem de profiling — mesma lógica do tracing acima, desligada
     # por padrão.
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
