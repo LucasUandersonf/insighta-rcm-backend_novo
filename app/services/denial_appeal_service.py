@@ -25,9 +25,11 @@ from app.schemas.denial_appeal import (
     DenialAppealResolveRequest,
     DenialAppealResponse,
 )
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.services.appeal_deadline_calculator import compute_deadline
 from app.services.appeal_storage_client import AppealStorageClient, AppealStorageError, build_attachment_key
 from app.services.denial_appeal_pdf_builder import DenialAppealDocumentContext, build_denial_appeal_pdf
+from app.services.webhook_dispatch_service import dispatch_event
 
 settings = get_settings()
 
@@ -58,6 +60,7 @@ class DenialAppealService:
         company_repo: InsuranceCompanyRepository,
         tenant_repo: TenantRepository,
         audit_repo: AuditLogRepository,
+        webhook_repo: WebhookSubscriptionRepository | None = None,
     ):
         self.repo = repo
         self.attachment_repo = attachment_repo
@@ -66,6 +69,10 @@ class DenialAppealService:
         self.company_repo = company_repo
         self.tenant_repo = tenant_repo
         self.audit_repo = audit_repo
+        # Opcional (default None), mesmo critério de BillingService.webhook_repo:
+        # disparo de webhook é um recurso OPT-IN do tenant, não uma
+        # obrigação de auditoria.
+        self.webhook_repo = webhook_repo
 
     async def _resolve_deadline_days(self, insurance_plan_id: uuid.UUID) -> int | None:
         plan = await self.plan_repo.get_by_id(insurance_plan_id)
@@ -191,6 +198,25 @@ class DenialAppealService:
             entity_id=appeal.id,
             diff={"status": {"before": previous_status, "after": appeal.status}},
         )
+        # Segundo evento ligado ao motor de webhooks (ver DECISÃO em
+        # webhook_dispatch_service.py) — dispara nas TRÊS transições
+        # possíveis aqui (deferido/indeferido/nip_aberta), não só nas
+        # terminais: mesmo uma escalada para NIP é uma mudança de estado
+        # que o CRM/planilha do cliente quer refletir, não só "ganhou ou
+        # perdeu". Payload sem operator_denial_reason/resolution_notes —
+        # texto livre digitado por humano pode conter nome de paciente.
+        if self.webhook_repo is not None:
+            await dispatch_event(
+                self.webhook_repo,
+                event_type="denial_appeal.resolved",
+                payload={
+                    "appeal_id": appeal.id,
+                    "billing_id": appeal.billing_id,
+                    "appeal_type": appeal.appeal_type,
+                    "status": appeal.status,
+                    "previous_status": previous_status,
+                },
+            )
         attachments = await self.attachment_repo.list_by_appeal(appeal.id)
         return self._to_response(appeal, attachments)
 

@@ -17,6 +17,7 @@ from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.insurance_company_repository import InsuranceCompanyRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.denial_appeal import (
     DenialAppealAttachmentResponse,
     DenialAppealCreateRequest,
@@ -46,6 +47,7 @@ def _build_service(db: DbSession) -> DenialAppealService:
         InsuranceCompanyRepository(db),
         TenantRepository(db),
         AuditLogRepository(db),
+        webhook_repo=WebhookSubscriptionRepository(db),
     )
 
 

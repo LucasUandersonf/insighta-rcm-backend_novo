@@ -654,11 +654,34 @@ precisa dele para configurar a verificação do próprio lado.
 evento a toda assinatura ativa elegível, assinando o corpo com
 HMAC-SHA256 no MESMO formato `sha256=<hex>` que `verify_meta_webhook_signature`
 já verifica no sentido inbound — só invertido (aqui a plataforma ASSINA,
-o cliente VERIFICA). O primeiro evento real ligado a este motor é
-`billing.held_for_review` (`BillingService.create_billing`): um
-faturamento que o motor de risco de glosa decidiu segurar para revisão
-manual é algo que o cliente quer saber imediatamente num canal que ele já
-usa, não só ao abrir o painel depois.
+o cliente VERIFICA). Três eventos ligados até agora, todos disparados a
+partir de um ÚNICO registro criado/alterado via endpoint normal (nunca
+de um path de ingestão em lote — ver DECISÃO logo abaixo):
+
+- `billing.held_for_review` (`BillingService.create_billing`) — um
+  faturamento que o motor de risco de glosa decidiu segurar para revisão
+  manual é algo que o cliente quer saber imediatamente num canal que ele
+  já usa, não só ao abrir o painel depois.
+- `denial_appeal.resolved` (`DenialAppealService.resolve_appeal`) —
+  dispara nas três transições possíveis (deferido/indeferido/nip_aberta),
+  não só nas terminais: mesmo uma escalada para NIP é uma mudança de
+  estado que o CRM/planilha do cliente quer refletir.
+- `no_show_risk.high` (`AppointmentService.create_appointment`) — só no
+  nível "alto", não em todo agendamento criado; o cliente quer ser
+  avisado do que precisa de ação (ligar para confirmar presença), não
+  de cada consulta marcada.
+
+> **DECISÃO — nenhum evento é disparado a partir de ingestão em lote.**
+> A maior parte dos agendamentos/faturamentos entra pelo upload de
+> planilha (`app/services/normalization_service.py`), não pelos
+> endpoints `POST /appointments`/`POST /billing`. Ligar `dispatch_event`
+> também ali faria um arquivo com centenas de linhas gerar dezenas de
+> chamadas HTTP síncronas durante o próprio upload — arriscando travar
+> um caminho crítico já bem testado, só para ganhar avisos em tempo real
+> de um cenário (importação em massa) que já é, por natureza, um
+> processo em lote, não "em tempo real". Os três eventos acima nascem
+> todos de uma ação humana pontual (criar 1 registro), onde o disparo
+> síncrono é imperceptível.
 
 > **DECISÃO — falha de entrega nunca quebra a operação que disparou o
 > evento.** Criar um faturamento não pode falhar porque o Slack do
@@ -1058,6 +1081,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
 | `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
 | `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
+| Catálogo de eventos de webhook (`denial_appeal.resolved`, `no_show_risk.high`) | ✅ `test_webhook_more_events.py` (dispara nas três transições de resolução do recurso de glosa, dispara só no risco "alto" de falta — nunca em risco baixo/indeterminado, nunca PII no corpo em nenhum dos dois) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

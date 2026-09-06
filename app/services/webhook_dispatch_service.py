@@ -7,12 +7,20 @@ DECISÃO — catálogo de eventos ainda não é fechado
 -------------------------------------------------------------------------
 `event_types` aceita qualquer string no formato "dominio.evento" (ver
 app/schemas/webhook_subscription.py) porque o conjunto de eventos que a
-plataforma dispara ainda está crescendo. O primeiro evento real ligado a
-este motor é "billing.held_for_review" (BillingService.create_billing) —
-um faturamento que o motor de risco de glosa decidiu segurar para revisão
-manual é, por natureza, algo que o cliente quer saber IMEDIATAMENTE numa
-ferramenta que ele já usa (Slack, o próprio CRM/ERP), não só ao abrir o
-painel depois.
+plataforma dispara ainda está crescendo. Eventos ligados até agora, todos
+disparados a partir de um ÚNICO registro criado/alterado via endpoint
+normal (nunca de um path de ingestão em lote — ver DECISÃO em
+AppointmentService.webhook_repo sobre por que):
+
+  - "billing.held_for_review" (BillingService.create_billing) — um
+    faturamento que o motor de risco de glosa decidiu segurar para
+    revisão manual é algo que o cliente quer saber IMEDIATAMENTE numa
+    ferramenta que ele já usa, não só ao abrir o painel depois.
+  - "denial_appeal.resolved" (DenialAppealService.resolve_appeal) —
+    dispara nas três transições possíveis (deferido/indeferido/
+    nip_aberta), não só nas terminais.
+  - "no_show_risk.high" (AppointmentService.create_appointment) — só no
+    nível "alto", não em todo agendamento criado.
 
 DECISÃO — falha de entrega NUNCA quebra a operação que disparou o evento
 -------------------------------------------------------------------------
