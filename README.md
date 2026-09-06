@@ -663,10 +663,9 @@ usa, não só ao abrir o painel depois.
 > **DECISÃO — falha de entrega nunca quebra a operação que disparou o
 > evento.** Criar um faturamento não pode falhar porque o Slack do
 > cliente está fora do ar. `dispatch_event()` captura toda exceção POR
-> ASSINATURA individualmente (timeout curto de 5s, sem retry — uma fila
-> de retry de verdade fica fora do escopo desta rodada) e nunca propaga
-> para o chamador; falhas de entrega vão para o log e, se configurado,
-> para o Sentry.
+> ASSINATURA individualmente (timeout curto de 5s na tentativa imediata)
+> e nunca propaga para o chamador; a tentativa imediata falhar não
+> perde o evento — ver fila de retentativa logo abaixo.
 >
 > **DECISÃO — nunca PII/dado clínico no corpo do evento.** O payload
 > carrega só identificadores e metadados operacionais (ids, status,
@@ -674,6 +673,39 @@ usa, não só ao abrir o painel depois.
 > para um servidor de TERCEIROS escolhido pelo cliente, fora do nosso
 > controle — mesmo espírito de `AuditLogRepository.record` (o `diff`
 > nunca carrega PII/financeiro), reforçado aqui pelo destino ser externo.
+
+### Fila de retentativa — `core.webhook_delivery_queue` + `webhook_retry_job.py`
+
+A tentativa imediata dentro de `dispatch_event()` continua existindo (a
+operação que disparou o evento não pode esperar retries dentro da mesma
+requisição) — o que mudou é o que acontece quando ela falha. Em vez de
+só logar e perder o evento, ele é **enfileirado** e o worker
+`app/worker/webhook_retry_job.py` (agendado externamente, sugestão a
+cada 1-5 min) tenta de novo depois, com **backoff exponencial**: 1m, 5m,
+30m, 2h, 6h — 6 tentativas no total contando a imediata. Depois de
+esgotar, a linha vira `status='failed'` (desiste) e um alerta vai para o
+Sentry, se configurado. `GET /integrations/webhooks/deliveries` dá
+visibilidade das últimas 50 entregas (tela "Entregas recentes" em
+Integrações) — o cliente consegue ver "por que meu Slack não recebeu
+aquele aviso" sem abrir um chamado de suporte.
+
+> **DECISÃO — fila em Postgres, não SQS.** O backlog original previa
+> "quando houver fila de mensageria disponível" — hoje não há SQS
+> provisionado (Tier 1 do `PRODUCAO_CHECKLIST.md`), e esperar essa
+> decisão de infraestrutura deixaria o problema real (perder o evento)
+> sem solução por tempo indeterminado. Uma tabela com `next_attempt_at`
+> + um job que varre "o que está vencido" é o padrão clássico de
+> fila-em-banco — resolve de verdade, e migrar para SQS depois (se o
+> volume justificar) troca só o worker/repositório, não o contrato de
+> dado. Diferente de `platform_risk_alerts`/`platform_announcements`,
+> esta tabela tem RLS normal — é dado da CLÍNICA, não bookkeeping da
+> Insighta.
+>
+> **DECISÃO — desiste (não reagenda para sempre) quando a assinatura é
+> desativada no meio do caminho.** Se o cliente desativa o webhook entre
+> a falha original e a retentativa, `process_due_retries` marca a linha
+> como `failed` sem gastar mais uma tentativa numa URL que ninguém mais
+> quer — só volta a disparar se ele reativar e um evento NOVO acontecer.
 
 ## Customer Success orientado a dados (painel interno da plataforma)
 
@@ -1025,6 +1057,7 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
 | `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
 | `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
+| `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

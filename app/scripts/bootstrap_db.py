@@ -205,6 +205,10 @@ _POST_UPGRADE_SQL_FILES = [
     # DECISÃO no próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa
     # do marcador (ver _POST_UPGRADE_MARKER_TABLE).
     "027_platform_risk_alerts.sql",
+    # Fila de retentativa para webhooks — core.webhook_delivery_queue
+    # (RLS normal, dado da clínica — ver DECISÃO no próprio .sql). CREATE
+    # TABLE sem IF NOT EXISTS — precisa do marcador.
+    "028_webhook_delivery_queue.sql",
 ]
 
 _ROLES_SQL = """
@@ -340,6 +344,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "023_announcements_and_support.sql": "platform_announcements",
     "025_webhook_subscriptions.sql": "webhook_subscriptions",
     "027_platform_risk_alerts.sql": "platform_risk_alerts",
+    "028_webhook_delivery_queue.sql": "webhook_delivery_queue",
 }
 
 

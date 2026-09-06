@@ -118,6 +118,7 @@ _SCHEMA_FILES = [
     "025_webhook_subscriptions.sql",
     "026_platform_customer_success.sql",
     "027_platform_risk_alerts.sql",
+    "028_webhook_delivery_queue.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -319,7 +320,7 @@ async def clean_tables(_test_database, admin_engine):
                     core.insurance_companies, core.patients,
                     core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants,
                     core.announcement_reads, core.support_requests, core.webhook_subscriptions,
-                    core.platform_risk_alerts,
+                    core.platform_risk_alerts, core.webhook_delivery_queue,
                     -- platform_announcements é a ÚNICA tabela sem tenant_id (ver
                     -- DECISÃO em app/sql/023_announcements_and_support.sql) — nunca
                     -- seria alcançada pelo CASCADE de truncar core.tenants acima

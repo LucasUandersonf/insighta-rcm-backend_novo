@@ -21,9 +21,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.api.api_key_auth import ApiKeyDbSession, ApiKeyIdentityDep
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.api_key_repository import ApiKeyRepository
+from app.repositories.webhook_delivery_queue_repository import WebhookDeliveryQueueRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.integration import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeyResponse
 from app.schemas.ingestion import UploadIngestionFileResponse
+from app.schemas.webhook_delivery import WebhookDeliveryEntryResponse
 from app.schemas.webhook_subscription import (
     WebhookSubscriptionCreatedResponse,
     WebhookSubscriptionCreateRequest,
@@ -101,6 +103,24 @@ async def create_webhook(
 ) -> WebhookSubscriptionCreatedResponse:
     service = WebhookSubscriptionService(WebhookSubscriptionRepository(db))
     return await service.create_subscription(current_user.tenant_id, UUID(current_user.id), payload)
+
+
+@router.get("/webhooks/deliveries", response_model=list[WebhookDeliveryEntryResponse])
+async def list_webhook_deliveries(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+) -> list[WebhookDeliveryEntryResponse]:
+    """
+    Visibilidade operacional da fila de retentativa (ver
+    app/sql/028_webhook_delivery_queue.sql) — as 50 entregas mais
+    recentes, pendentes/entregues/desistidas juntas, para o cliente
+    diagnosticar "por que meu Slack não recebeu aquele aviso" sem
+    precisar abrir um chamado de suporte. Rota declarada ANTES de
+    /webhooks/{subscription_id} de propósito: senão "deliveries" seria
+    interpretado como um subscription_id.
+    """
+    entries = await WebhookDeliveryQueueRepository(db).list_recent()
+    return [WebhookDeliveryEntryResponse.model_validate(e) for e in entries]
 
 
 @router.patch("/webhooks/{subscription_id}", response_model=WebhookSubscriptionResponse)
