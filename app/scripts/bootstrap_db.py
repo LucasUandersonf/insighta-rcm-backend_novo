@@ -181,6 +181,11 @@ _POST_UPGRADE_SQL_FILES = [
     # EXISTS) — roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
     "022_patient_lgpd_erasure.sql",
+    # Central de Notificações + Central de Ajuda — platform_announcements
+    # (sem RLS, ver DECISÃO no próprio .sql) + announcement_reads +
+    # support_requests. CREATE TABLE sem IF NOT EXISTS — precisa do
+    # marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "023_announcements_and_support.sql",
 ]
 
 _ROLES_SQL = """
@@ -295,6 +300,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "017_glosas.sql": "glosas",
     "018_locais_tipo_paciente.sql": "locais",
     "021_ingestion_column_aliases.sql": "ingestion_column_aliases",
+    "023_announcements_and_support.sql": "platform_announcements",
 }
 
 

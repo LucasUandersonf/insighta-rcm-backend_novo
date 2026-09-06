@@ -113,6 +113,7 @@ _SCHEMA_FILES = [
     "020_no_show_thresholds.sql",
     "021_ingestion_column_aliases.sql",
     "022_patient_lgpd_erasure.sql",
+    "023_announcements_and_support.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -292,7 +293,14 @@ async def clean_tables(_test_database, admin_engine):
                     core.denial_appeal_attachments, core.denial_appeals, core.billing, core.appointments,
                     core.contract_items, core.contracts, core.insurance_plan_aliases, core.insurance_plans,
                     core.insurance_companies, core.patients,
-                    core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants
+                    core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants,
+                    core.announcement_reads, core.support_requests,
+                    -- platform_announcements é a ÚNICA tabela sem tenant_id (ver
+                    -- DECISÃO em app/sql/023_announcements_and_support.sql) — nunca
+                    -- seria alcançada pelo CASCADE de truncar core.tenants acima
+                    -- (nada nela referencia tenants), então precisa entrar na lista
+                    -- explicitamente ou vazaria entre testes.
+                    core.platform_announcements
                 RESTART IDENTITY CASCADE
                 """
             )

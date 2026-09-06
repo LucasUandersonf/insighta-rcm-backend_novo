@@ -204,6 +204,15 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Insighta RCM"
     SMTP_USE_TLS: bool = True
 
+    # Central de Ajuda (Setup > "Tirar dúvida") — endereço que recebe uma
+    # cópia de cada pergunta enviada pelo cliente via POST /support-requests.
+    # Mesma degradação graciosa de SMTP_HOST acima: sem SUPPORT_EMAIL (ou
+    # sem SMTP configurado), a pergunta continua sendo salva em
+    # core.support_requests normalmente — só o e-mail de aviso não sai,
+    # e vira log estruturado (ver EmailClient.send). Nunca bloqueia o
+    # usuário só porque o time de suporte ainda não configurou e-mail.
+    SUPPORT_EMAIL: str | None = None
+
     # --- Sentry (monitoramento de erros — opcional) ---
     # Sem SENTRY_DSN, nada é inicializado: zero overhead, zero mudança de
     # comportamento (mesmo padrão de ANTHROPIC_API_KEY/AWS_S3_CONTRACTS_BUCKET

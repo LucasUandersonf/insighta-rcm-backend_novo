@@ -555,6 +555,52 @@ assinatura HMAC (`X-Hub-Signature-256`) contra `tenants.meta_ads_webhook_secret`
 e grava em `core.marketing_webhook_events` com dedupe por `external_event_id`.
 Cada tenant configura seu próprio segredo na tela de Setup do produto.
 
+## Central de Notificações + Central de Ajuda
+
+Item de maturidade de produto ("nenhum SaaS B2B sobrevive sem onboarding/
+suporte contextualizado"): um sino de novidades no topo da aplicação e
+um jeito de tirar dúvida sem sair do sistema.
+
+### Central de Notificações (sino) — `core.platform_announcements`
+
+`GET /announcements` (qualquer papel autenticado) devolve o changelog da
+plataforma mais recente primeiro, com `is_read` calculado para o usuário
+atual e `unread_count` agregado. `POST /announcements/{id}/read` marca
+uma novidade como lida (idempotente — chamar duas vezes não é erro).
+
+> **DECISÃO — a ÚNICA tabela do schema `core` sem tenant_id/RLS.** Uma
+> novidade da plataforma é a MESMA para todo tenant — colocar tenant_id
+> aqui obrigaria duplicar a mesma linha por tenant só para satisfazer
+> uma convenção que não se aplica a este dado. `app_runtime` já tem
+> GRANT irrestrito nas tabelas do schema (`_ROLES_SQL`); sem RLS, esse
+> GRANT já garante leitura por qualquer sessão autenticada. O estado de
+> leitura (`core.announcement_reads`), por outro lado, É por usuário
+> dentro de um tenant — RLS normal ali.
+>
+> **Quem publica:** não existe um "super-admin" com sessão HTTP própria
+> neste produto — publicar é uma ação da equipe que opera a plataforma,
+> via `python -m app.scripts.publish_announcement --title "..." --body "..."`
+> (mesmo padrão de `create_admin.py` para o bootstrap do primeiro
+> usuário). Toda linha nasce publicada, sem estado de rascunho.
+
+### Central de Ajuda ("tirar dúvida sem sair do sistema") — `core.support_requests`
+
+Painel com duas abas: **Perguntas Frequentes** (conteúdo estático,
+curado a partir dos módulos já em produção — sem CMS de FAQ nesta
+versão) e **Enviar Pergunta** (`POST /support-requests` + histórico via
+`GET /support-requests`, escopado ao tenant inteiro — qualquer um da
+equipe vê o que os colegas já perguntaram, mesma lógica de "caixa
+compartilhada" de `core.report_recipients`).
+
+> **DECISÃO — sempre grava, e-mail é só um aviso best-effort.** O pedido
+> nunca pode se perder por causa de e-mail mal configurado: a pergunta é
+> persistida primeiro; o envio de aviso para `settings.SUPPORT_EMAIL`
+> (via `EmailClient`, mesma degradação graciosa de SMTP_HOST — ver seção
+> de cadastro público acima) acontece depois, dentro de um `try/except`
+> que NUNCA derruba a resposta 201 se o SMTP falhar. Sem `SUPPORT_EMAIL`
+> configurada, a pergunta continua sendo salva normalmente — só o aviso
+> por e-mail não sai.
+
 ## Observabilidade e erros amigáveis
 Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 - **Todo erro da API** (400 a 500) sai no mesmo formato:
