@@ -555,6 +555,263 @@ assinatura HMAC (`X-Hub-Signature-256`) contra `tenants.meta_ads_webhook_secret`
 e grava em `core.marketing_webhook_events` com dedupe por `external_event_id`.
 Cada tenant configura seu próprio segredo na tela de Setup do produto.
 
+## Central de Notificações + Central de Ajuda
+
+Item de maturidade de produto ("nenhum SaaS B2B sobrevive sem onboarding/
+suporte contextualizado"): um sino de novidades no topo da aplicação e
+um jeito de tirar dúvida sem sair do sistema.
+
+### Central de Notificações (sino) — `core.platform_announcements`
+
+`GET /announcements` (qualquer papel autenticado) devolve o changelog da
+plataforma mais recente primeiro, com `is_read` calculado para o usuário
+atual e `unread_count` agregado. `POST /announcements/{id}/read` marca
+uma novidade como lida (idempotente — chamar duas vezes não é erro).
+
+> **DECISÃO — a ÚNICA tabela do schema `core` sem tenant_id/RLS.** Uma
+> novidade da plataforma é a MESMA para todo tenant — colocar tenant_id
+> aqui obrigaria duplicar a mesma linha por tenant só para satisfazer
+> uma convenção que não se aplica a este dado. `app_runtime` já tem
+> GRANT irrestrito nas tabelas do schema (`_ROLES_SQL`); sem RLS, esse
+> GRANT já garante leitura por qualquer sessão autenticada. O estado de
+> leitura (`core.announcement_reads`), por outro lado, É por usuário
+> dentro de um tenant — RLS normal ali.
+>
+> **Quem publica:** não existe um "super-admin" com sessão HTTP própria
+> neste produto — publicar é uma ação da equipe que opera a plataforma,
+> via `python -m app.scripts.publish_announcement --title "..." --body "..."`
+> (mesmo padrão de `create_admin.py` para o bootstrap do primeiro
+> usuário). Toda linha nasce publicada, sem estado de rascunho.
+
+### Central de Ajuda ("tirar dúvida sem sair do sistema") — `core.support_requests`
+
+Painel com duas abas: **Perguntas Frequentes** (conteúdo estático,
+curado a partir dos módulos já em produção — sem CMS de FAQ nesta
+versão) e **Enviar Pergunta** (`POST /support-requests` + histórico via
+`GET /support-requests`, escopado ao tenant inteiro — qualquer um da
+equipe vê o que os colegas já perguntaram, mesma lógica de "caixa
+compartilhada" de `core.report_recipients`).
+
+> **DECISÃO — sempre grava, e-mail é só um aviso best-effort.** O pedido
+> nunca pode se perder por causa de e-mail mal configurado: a pergunta é
+> persistida primeiro; o envio de aviso para `settings.SUPPORT_EMAIL`
+> (via `EmailClient`, mesma degradação graciosa de SMTP_HOST — ver seção
+> de cadastro público acima) acontece depois, dentro de um `try/except`
+> que NUNCA derruba a resposta 201 se o SMTP falhar. Sem `SUPPORT_EMAIL`
+> configurada, a pergunta continua sendo salva normalmente — só o aviso
+> por e-mail não sai.
+
+## Integrações genéricas (webhooks/API)
+
+Até esta rodada, a única integração externa da plataforma era o webhook
+INBOUND da Meta Ads (seção acima). Isso deixava de fora exatamente o que
+todo cliente B2B pergunta: "dá para o meu ERP/CRM/planilha falar direto
+com vocês?" e "dá para o sistema me avisar no meu Slack/CRM quando algo
+importante acontecer?". Esta rodada resolve os dois sentidos.
+
+### Sentido INBOUND — API key para `POST /integrations/ingest`
+
+`POST /integrations/api-keys` (owner/admin) emite uma chave (`iarcm_...`,
+só exibida na criação — mesmo padrão de segredo de senha) que o ERP/CRM/
+script do próprio cliente usa para autenticar chamadas, sem sessão de
+usuário nem JWT (que expira em minutos — inviável para um script rodando
+sozinho de madrugada).
+
+> **BUG CORRIGIDO — chaves emitidas, nunca verificadas em lugar nenhum.**
+> `POST /integrations/api-keys` existe desde `006_platform_admin.sql`,
+> mas nenhum endpoint jamais autenticava uma chamada usando a chave
+> gerada — um cliente podia emitir uma chave na tela de Setup e ela não
+> servia para nada. `POST /integrations/ingest` é a peça que faltava.
+
+`POST /integrations/ingest` (header `X-API-Key`, sem JWT) roda o MESMO
+pipeline de `POST /ingestion/upload` (claim → parse → salvar → normalizar
+— ver `app/services/ingestion_processing_service.py`), reaproveitado por
+import cross-endpoint de propósito (não uma cópia — ver comentário em
+`app/api/v1/endpoints/integrations.py` sobre por que uma extração para
+service próprio foi avaliada e descartada nesta rodada: exigiria mexer no
+endpoint JWT já testado em produção só para acomodar este caminho novo).
+
+Resolver "de qual tenant é essa chave" ANTES de existir um tenant no
+contexto (mesmo problema de login e reset de senha) usa o mesmo padrão
+SECURITY DEFINER já estabelecido: `core.resolve_api_key_candidates`
+(`app/sql/024_api_key_resolver.sql`) devolve candidatas pelo PREFIXO
+(não sensível) da chave, dono `auth_resolver_owner` (BYPASSRLS) — o
+MESMO papel já usado por login/reset, nunca um papel novo por caso de
+uso. O hash de cada candidata é então verificado com `verify_password`,
+igual a uma senha.
+
+### Sentido OUTBOUND — `core.webhook_subscriptions`
+
+`POST /integrations/webhooks` (owner/admin) cadastra uma URL HTTPS
+(Slack incoming webhook, Zapier/Make, o próprio CRM) e opcionalmente uma
+lista de `event_types` (vazio = recebe todos — mesma convenção de
+`core.report_recipients.report_types`). A resposta da criação é a ÚNICA
+vez que o `secret` de assinatura aparece em texto puro — o cliente
+precisa dele para configurar a verificação do próprio lado.
+`GET/PATCH/DELETE /integrations/webhooks/{id}` completam o CRUD.
+
+`app/services/webhook_dispatch_service.py` (`dispatch_event`) entrega o
+evento a toda assinatura ativa elegível, assinando o corpo com
+HMAC-SHA256 no MESMO formato `sha256=<hex>` que `verify_meta_webhook_signature`
+já verifica no sentido inbound — só invertido (aqui a plataforma ASSINA,
+o cliente VERIFICA). O primeiro evento real ligado a este motor é
+`billing.held_for_review` (`BillingService.create_billing`): um
+faturamento que o motor de risco de glosa decidiu segurar para revisão
+manual é algo que o cliente quer saber imediatamente num canal que ele já
+usa, não só ao abrir o painel depois.
+
+> **DECISÃO — falha de entrega nunca quebra a operação que disparou o
+> evento.** Criar um faturamento não pode falhar porque o Slack do
+> cliente está fora do ar. `dispatch_event()` captura toda exceção POR
+> ASSINATURA individualmente (timeout curto de 5s na tentativa imediata)
+> e nunca propaga para o chamador; a tentativa imediata falhar não
+> perde o evento — ver fila de retentativa logo abaixo.
+>
+> **DECISÃO — nunca PII/dado clínico no corpo do evento.** O payload
+> carrega só identificadores e metadados operacionais (ids, status,
+> valores agregados) — nunca nome de paciente, CPF etc. O corpo trafega
+> para um servidor de TERCEIROS escolhido pelo cliente, fora do nosso
+> controle — mesmo espírito de `AuditLogRepository.record` (o `diff`
+> nunca carrega PII/financeiro), reforçado aqui pelo destino ser externo.
+
+### Fila de retentativa — `core.webhook_delivery_queue` + `webhook_retry_job.py`
+
+A tentativa imediata dentro de `dispatch_event()` continua existindo (a
+operação que disparou o evento não pode esperar retries dentro da mesma
+requisição) — o que mudou é o que acontece quando ela falha. Em vez de
+só logar e perder o evento, ele é **enfileirado** e o worker
+`app/worker/webhook_retry_job.py` (agendado externamente, sugestão a
+cada 1-5 min) tenta de novo depois, com **backoff exponencial**: 1m, 5m,
+30m, 2h, 6h — 6 tentativas no total contando a imediata. Depois de
+esgotar, a linha vira `status='failed'` (desiste) e um alerta vai para o
+Sentry, se configurado. `GET /integrations/webhooks/deliveries` dá
+visibilidade das últimas 50 entregas (tela "Entregas recentes" em
+Integrações) — o cliente consegue ver "por que meu Slack não recebeu
+aquele aviso" sem abrir um chamado de suporte.
+
+> **DECISÃO — fila em Postgres, não SQS.** O backlog original previa
+> "quando houver fila de mensageria disponível" — hoje não há SQS
+> provisionado (Tier 1 do `PRODUCAO_CHECKLIST.md`), e esperar essa
+> decisão de infraestrutura deixaria o problema real (perder o evento)
+> sem solução por tempo indeterminado. Uma tabela com `next_attempt_at`
+> + um job que varre "o que está vencido" é o padrão clássico de
+> fila-em-banco — resolve de verdade, e migrar para SQS depois (se o
+> volume justificar) troca só o worker/repositório, não o contrato de
+> dado. Diferente de `platform_risk_alerts`/`platform_announcements`,
+> esta tabela tem RLS normal — é dado da CLÍNICA, não bookkeeping da
+> Insighta.
+>
+> **DECISÃO — desiste (não reagenda para sempre) quando a assinatura é
+> desativada no meio do caminho.** Se o cliente desativa o webhook entre
+> a falha original e a retentativa, `process_due_retries` marca a linha
+> como `failed` sem gastar mais uma tentativa numa URL que ninguém mais
+> quer — só volta a disparar se ele reativar e um evento NOVO acontecer.
+
+## Customer Success orientado a dados (painel interno da plataforma)
+
+Item de maturidade de produto que fecha a última frente de base sugerida
+("nenhum SaaS B2B sobrevive sem monitorar se o cliente está de fato
+usando a ferramenta"): um painel que mostra, por clínica, quem está
+engajado e quem está em risco de cancelar — **exclusivo da equipe que
+opera a Insighta**, nunca de um usuário de clínica.
+
+> **DECISÃO — por que isto não é "mais uma tela dentro do papel de
+> owner".** Todo papel que existe hoje (`owner`, `admin`, `financeiro`,
+> `atendimento`, `auditor`) é um papel DENTRO de um tenant — o RLS
+> garante que mesmo o `owner` mais poderoso nunca vê nada fora do
+> próprio tenant. Este painel é o oposto por definição: uma visão que
+> atravessa TODOS os tenants ao mesmo tempo, de propósito. Se esse dado
+> fosse acessível por qualquer papel de clínica, cada cliente enxergaria
+> o quanto os OUTROS clientes usam o produto — vazamento de informação
+> comercial grave. Por isso ele tem autenticação PRÓPRIA, totalmente
+> separada do login de clínica.
+
+### Autenticação — senha única da equipe, não login de usuário
+
+`POST /platform/login` aceita só `{"password": "..."}`, comparado (tempo
+constante, `hmac.compare_digest`) contra `settings.PLATFORM_ADMIN_PASSWORD`
+— sem `PLATFORM_ADMIN_PASSWORD` configurada, responde 503 em vez de
+aceitar (ou pior, nunca autenticar) qualquer senha. O JWT emitido
+(`create_platform_admin_token`, `app/core/security.py`) carrega só a
+claim `scope: "platform_admin"` — nunca `sub`/`tenant_id`/`role` — e dura
+4h (mais que o token de clínica: é uma ferramenta interna sem fluxo de
+refresh construído). `app/api/platform_admin_auth.py::get_platform_admin`
+é a dependency que todo endpoint de `/platform` (exceto o login) exige;
+rejeita explicitamente um JWT de usuário de clínica que por acaso chegue
+ali (mesma chave de assinatura, mas sem a claim `scope`).
+
+Senha única compartilhada é uma escolha deliberada de escopo para a v1 —
+suficiente para uma equipe pequena; criar uma tabela própria de "usuários
+da plataforma" com login individual é a evolução natural se esse uso
+crescer.
+
+### Relatório — `core.platform_tenant_usage_summary()`
+
+`GET /platform/tenants-usage` devolve, para cada tenant: usuários ativos,
+data da última atividade, eventos de auditoria nos últimos 30 dias,
+total de pacientes, consultas e faturamentos recentes — e um
+`engagement_status` calculado (`engajado`/`atencao`/`risco`/`novo`/`inativo`).
+
+> **DECISÃO — role NOVA (`platform_reporting_owner`), não reaproveita
+> `auth_resolver_owner`.** `auth_resolver_owner` existe para resolver
+> QUEM É O TENANT antes do login (sempre devolvendo candidatas estreitas:
+> um usuário, uma chave). Esta função é outra categoria de problema: uma
+> vez que já sabemos quem está pedindo (o operador da plataforma), ela
+> devolve dado agregado de TODOS os tenants de uma vez, de propósito.
+> Misturar as duas responsabilidades na mesma role aumentaria o raio de
+> estrago de qualquer bug/vazamento futuro em qualquer uma das duas.
+>
+> **DECISÃO — reaproveita `core.audit_log` como sinal de "uso".** Em vez
+> de instrumentar um evento novo, `MAX(created_at)`/`COUNT(*)` sobre
+> `core.audit_log` (já escrito de verdade em toda mutação sensível desde
+> a rodada de LGPD) já é um proxy real de "quando essa clínica foi vista
+> fazendo alguma coisa pela última vez" — reuso de infraestrutura
+> existente, sem duplicar instrumentação.
+>
+> **DECISÃO — régua de engajamento vive em Python, não em SQL.**
+> `PlatformReportingService._classify_engagement` decide os limiares
+> (tenant com menos de 7 dias = "novo"; 0 eventos em 30 dias = "risco";
+> 1-4 eventos = "atenção"; 5+ = "engajado"; tenant desativado = "inativo"
+> sempre, mesmo com atividade recente). É uma heurística de v1,
+> deliberadamente simples e fácil de recalibrar sem nova migration.
+
+### Frontend — rota separada, fora do produto
+
+`/plataforma/login` + `/plataforma` (`src/routes/PlatformProtectedRoute.tsx`)
+são rotas completamente fora do `AuthContext`/RBAC de clínica — usam um
+token guardado sob uma chave de `localStorage` própria
+(`insighta_platform_admin_token`) e um cliente HTTP dedicado
+(`src/lib/platform-api-client.ts`), nunca o `apiClient` principal. Nenhum
+link dentro do produto aponta para essas rotas.
+
+### Alertas proativos — `core.platform_risk_alerts` + `platform_risk_alert_job.py`
+
+O painel acima só ajuda quem lembra de abrir a tela. `POST /platform/alerts/run`
+(também disparável sob demanda, protegido pelo mesmo login do painel) e
+`app/worker/platform_risk_alert_job.py` (agendado externamente, 1x/dia
+sugerido — ver DECISÃO no próprio arquivo) avisam a **equipe Insighta**
+por e-mail assim que uma clínica entra em `risco`.
+
+> **DECISÃO — alerta só na TRANSIÇÃO para "risco", com lembrete
+> periódico.** Reenviar o mesmo aviso a cada execução do job inundaria a
+> caixa de entrada e ensinaria a equipe a ignorá-lo — o clássico "alarme
+> que sempre toca". `core.platform_risk_alerts` guarda, por clínica, o
+> episódio de risco EM ABERTO (mesma exceção sem tenant_id/RLS de
+> `platform_announcements` — ver DECISÃO no próprio `.sql`): alerta NOVO
+> quando não havia episódio; LEMBRETE só depois de 7 dias sem novo aviso
+> se a clínica continuar em risco; episódio fechado (linha apagada,
+> nenhum e-mail de "recuperada") assim que ela sai do risco — uma
+> entrada FUTURA conta como alerta novo, não reenvio do mesmo episódio.
+>
+> **DECISÃO — e-mail, não WhatsApp.** O backlog original citava as duas
+> opções; WhatsApp exigiria um template pré-aprovado pela Meta só para
+> um aviso interno da própria equipe — desproporcional ao problema.
+> `settings.PLATFORM_ALERT_EMAIL` reaproveita o mesmo `EmailClient` já
+> usado por `SUPPORT_EMAIL`. Sem essa variável configurada, o job
+> continua rodando e o episódio continua sendo registrado normalmente —
+> só o e-mail não sai, com um log de nível ERROR (não silencioso, já que
+> aqui o aviso É o produto).
+
 ## Observabilidade e erros amigáveis
 Duas audiências diferentes, resolvidas com o mesmo mecanismo (`app/main.py`):
 - **Todo erro da API** (400 a 500) sai no mesmo formato:
@@ -633,6 +890,72 @@ esperar ninguém ler o log.
   nenhum código deste projeto anexa manualmente corpo de request, e-mail
   de usuário ou dado clínico como contexto extra do Sentry — só tags
   técnicas de correlação (`request_id`, `tenant_id`, `role`).
+
+## Trilha de auditoria de acesso (LGPD/HealthTech)
+
+> **BUG CORRIGIDO (rodada de conformidade/LGPD):** `core.audit_log`
+> existia desde o primeiro DDL (`001_init_schema.sql`), com a
+> justificativa explícita "auditoria é obrigatória em HealthTech" — mas
+> nenhuma linha de código de fato escrevia nela. A leitura (endpoint
+> `GET /audit-log`, tela "Log de Auditoria") já existia de uma rodada
+> anterior, mas sempre mostrava vazio, porque não havia nada para
+> mostrar. `AuditLogRepository.record()` (novo) é chamado a partir de:
+>
+> | Serviço | Eventos auditados |
+> |---|---|
+> | `patient_service.py` | criação de paciente; **eliminação a pedido do titular** (`anonymize`, ver seção própria abaixo) |
+> | `billing_service.py` | criação de faturamento; liquidação (`settle`) |
+> | `user_service.py` | criação de usuário; mudança de papel/status ativo; reset administrado de senha |
+> | `denial_appeal_service.py` | abertura, protocolo (`file`) e resolução (`resolve`) de recurso de glosa |
+> | `contract_service.py` / `contract_intake_service.py` | criação (cadastro manual ou upload de PDF); **homologação** (`homologated`) — o momento em que a tabela de preços passa a valer para o motor de glosa |
+>
+> **DECISÃO — o `diff` nunca carrega dado sensível.** O objetivo do
+> trilho é responder "quem mudou o quê, quando" — não ser uma SEGUNDA
+> cópia do dado clínico/financeiro (isso aumentaria a superfície de
+> exposição, o oposto do que LGPD pede). Eventos de criação (`created`)
+> nunca levam `diff` — a própria linha, já protegida por RLS, é a fonte
+> de verdade do que foi criado. Eventos de mudança de estado (`updated`,
+> `settled`, `resolved`) levam um `diff` raso só com o campo OPERACIONAL
+> que mudou (status, papel de acesso, flag ativo/inativo) — nunca CPF,
+> nome de paciente, CID, valor de guia/faturamento ou senha (nem hash).
+> `UserService.update_user` só grava uma linha quando papel OU status
+> ativo de fato mudam — editar só o nome não é um evento de controle de
+> acesso, não polui o trilho.
+>
+> **Fora do escopo, de propósito:** a ingestão em massa (upload de
+> planilha) não grava audit_log por linha — centenas de registros por
+> arquivo tornariam o trilho ruidoso, e `core.ingestion_files` já cobre
+> "quem subiu qual arquivo, quando" para esse caminho. O audit_log cobre
+> a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
+
+### Direito de eliminação do titular (LGPD art. 18, VI)
+
+`POST /patients/{id}/anonymize` (restrito a `admin`/`owner` — mais
+restrito que o `_CAN_WRITE` de criar/ver paciente, porque é uma decisão
+de conformidade IRREVERSÍVEL, não rotina de recepção) atende ao pedido
+de um paciente para ter seu dado pessoal removido.
+
+**DECISÃO — anonimização, nunca `DELETE` físico.** Excluir a linha de
+`core.patients` quebraria a integridade referencial com
+`appointments`/`billing` — histórico que a clínica é OBRIGADA a reter
+por obrigação legal (retenção fiscal/contábil de faturamento). A própria
+LGPD (art. 16) permite manter o dado nesse cenário; o mecanismo aqui é
+sempre substituir `full_name` por um placeholder e zerar
+`cpf`/`birth_date`/`acquisition_source`/`acquisition_campaign_id`,
+preservando o `id` e o vínculo com o histórico agregado. Marca
+`patients.anonymized_at` (novo, `app/sql/022_patient_lgpd_erasure.sql`)
+— um paciente já anonimizado não pode ser anonimizado de novo (`409`).
+Não existe endpoint de "desfazer": é deliberadamente uma via de mão
+única. Gera uma linha em `core.audit_log` (`action=anonymized`) sem
+`diff` — o próprio "antes" é o dado que está sendo eliminado, gravá-lo
+ali derrotaria o propósito do pedido.
+
+**O que isto NÃO resolve ainda (ver PRODUCAO_CHECKLIST.md):** uma
+política de retenção formal no nível do TENANT (o que acontece quando a
+clínica inteira cancela a assinatura) é uma decisão de negócio/jurídica
+que ainda precisa ser escrita, além de código; criptografia em repouso
+no banco é configuração de infraestrutura na hora de provisionar o
+banco gerenciado, fora do alcance deste repositório.
 
 ## Performance — o que já foi corrigido e o que ainda falta
 Dois achados reais de uma auditoria (não suposição):
@@ -727,7 +1050,14 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `webhooks` (Meta Ads) | ✅ `test_webhooks.py` (assinatura HMAC, handshake, dedupe) |
 | `reports` (relatório semanal) | ✅ `test_reports.py` (com mock do WhatsApp) |
 | `report-recipients` (Gestão de Contatos para Relatórios) | ✅ `test_report_recipients.py` (CRUD, RBAC, validação "pelo menos um contato") |
-| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC) |
+| `audit-log` (Logs de Auditoria) | ✅ `test_audit_log.py` (listagem paginada, filtros, RBAC + escrita de verdade a partir de `patients`/`billing`/`users`/`denial-appeals`/`contracts`, ver "Trilha de auditoria de acesso" acima) |
+| `announcements` (Central de Notificações) | ✅ `test_announcements.py` (listagem, `is_read`/`unread_count`, marcar como lida, idempotência) |
+| `support-requests` (Central de Ajuda) | ✅ `test_support_requests.py` (criação, histórico por tenant, RBAC, e-mail best-effort não derruba a resposta) |
+| `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
+| `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
+| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
+| `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
+| `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

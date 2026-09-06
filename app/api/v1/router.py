@@ -9,6 +9,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     analytics,
+    announcements,
     appointments,
     audit_log,
     auth,
@@ -25,9 +26,11 @@ from app.api.v1.endpoints import (
     locais,
     lotes,
     patients,
+    platform,
     professionals,
     report_recipients,
     reports,
+    support_requests,
     tenant,
     users,
     webhooks,
@@ -57,3 +60,6 @@ api_router.include_router(ingestion.router)
 api_router.include_router(reports.router)
 api_router.include_router(report_recipients.router)
 api_router.include_router(audit_log.router)
+api_router.include_router(announcements.router)
+api_router.include_router(support_requests.router)
+api_router.include_router(platform.router)

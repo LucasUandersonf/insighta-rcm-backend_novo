@@ -34,5 +34,9 @@ class PatientResponse(BaseModel):
     birth_date: date | None
     acquisition_source: str | None
     created_at: datetime
+    # Ver DECISÃO em app/sql/022_patient_lgpd_erasure.sql — None = dado
+    # pessoal intacto; preenchido = paciente já anonimizado a pedido do
+    # titular (LGPD art. 18, VI).
+    anonymized_at: datetime | None = None
 
     model_config = {"from_attributes": True}

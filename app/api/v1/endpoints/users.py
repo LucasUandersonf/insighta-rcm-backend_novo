@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUser, DbSession, require_role
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
     PasswordChangeRequest,
@@ -27,6 +28,10 @@ _CAN_MANAGE = ("owner", "admin")
 _CAN_VIEW_SELF = ("owner", "admin", "financeiro", "atendimento", "auditor")
 
 
+def _build_service(db: DbSession) -> UserService:
+    return UserService(UserRepository(db), AuditLogRepository(db))
+
+
 @router.get("/me", response_model=UserResponse)
 async def get_own_profile(
     db: DbSession,
@@ -37,8 +42,7 @@ async def get_own_profile(
     antes de GET "" na definição de rota só por organização; não há
     conflito de path (GET "" não tem parâmetro, GET "/{user_id}" não
     existe — só PATCH)."""
-    service = UserService(UserRepository(db))
-    return await service.get_own_profile(UUID(current_user.id))
+    return await _build_service(db).get_own_profile(UUID(current_user.id))
 
 
 @router.get("", response_model=list[UserResponse])
@@ -46,8 +50,7 @@ async def list_users(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
 ) -> list[UserResponse]:
-    service = UserService(UserRepository(db))
-    return await service.list_users()
+    return await _build_service(db).list_users()
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -56,8 +59,7 @@ async def create_user(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
 ) -> UserResponse:
-    service = UserService(UserRepository(db))
-    user, temp_password = await service.create_user(current_user.tenant_id, payload)
+    user, temp_password = await _build_service(db).create_user(current_user.tenant_id, UUID(current_user.id), payload)
     # Devolvemos a senha temporária embutida no header de resposta em vez
     # do corpo (que segue o contrato de UserResponse) — ver o endpoint
     # dedicado /users/{id}/reset-password para o formato "de verdade"
@@ -73,8 +75,7 @@ async def update_user(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
 ) -> UserResponse:
-    service = UserService(UserRepository(db))
-    return await service.update_user(current_user.id, user_id, payload)
+    return await _build_service(db).update_user(current_user.tenant_id, current_user.id, user_id, payload)
 
 
 @router.post("/{user_id}/reset-password", response_model=PasswordResetResponse)
@@ -87,8 +88,7 @@ async def admin_reset_password(
     para um colaborador (ex: esqueceu a senha e não há e-mail transacional
     integrado ainda — ver DECISÃO em app/sql/006_platform_admin.sql).
     A senha só aparece nesta resposta, uma única vez."""
-    service = UserService(UserRepository(db))
-    return await service.admin_reset_password(user_id)
+    return await _build_service(db).admin_reset_password(current_user.tenant_id, UUID(current_user.id), user_id)
 
 
 @router.post("/me/change-password", status_code=204)
@@ -100,5 +100,4 @@ async def change_own_password(
     """Recuperação e alteração segura de senha (self-service) — qualquer
     papel autenticado pode trocar a PRÓPRIA senha, desde que prove
     conhecer a atual."""
-    service = UserService(UserRepository(db))
-    await service.change_own_password(current_user.id, payload)
+    await _build_service(db).change_own_password(current_user.id, payload)

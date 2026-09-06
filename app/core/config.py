@@ -204,6 +204,15 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Insighta RCM"
     SMTP_USE_TLS: bool = True
 
+    # Central de Ajuda (Setup > "Tirar dúvida") — endereço que recebe uma
+    # cópia de cada pergunta enviada pelo cliente via POST /support-requests.
+    # Mesma degradação graciosa de SMTP_HOST acima: sem SUPPORT_EMAIL (ou
+    # sem SMTP configurado), a pergunta continua sendo salva em
+    # core.support_requests normalmente — só o e-mail de aviso não sai,
+    # e vira log estruturado (ver EmailClient.send). Nunca bloqueia o
+    # usuário só porque o time de suporte ainda não configurou e-mail.
+    SUPPORT_EMAIL: str | None = None
+
     # --- Sentry (monitoramento de erros — opcional) ---
     # Sem SENTRY_DSN, nada é inicializado: zero overhead, zero mudança de
     # comportamento (mesmo padrão de ANTHROPIC_API_KEY/AWS_S3_CONTRACTS_BUCKET
@@ -218,6 +227,26 @@ class Settings(BaseSettings):
     # explícita do operador ligar, não um padrão "grátis" que pode
     # estourar o free tier sem ninguém perceber.
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0
+
+    # --- Customer Success orientado a dados (painel interno da plataforma) ---
+    # Senha ÚNICA e compartilhada da EQUIPE que opera a Insighta — nunca
+    # ligada a nenhum tenant/usuário de clínica (ver DECISÃO completa em
+    # app/api/platform_admin_auth.py). Mesma degradação graciosa das
+    # demais credenciais opcionais acima: sem PLATFORM_ADMIN_PASSWORD
+    # configurada, POST /platform/login responde 503 em vez de aceitar
+    # (ou pior, silenciosamente nunca autenticar) qualquer senha.
+    PLATFORM_ADMIN_PASSWORD: str | None = None
+
+    # Caixa da EQUIPE (não de cliente) que recebe o aviso quando uma
+    # clínica entra em "risco" no painel acima — ver
+    # app/services/platform_alert_service.py. Mesma degradação graciosa
+    # de SUPPORT_EMAIL: sem PLATFORM_ALERT_EMAIL configurado, o job
+    # continua rodando e o estado (core.platform_risk_alerts) continua
+    # sendo mantido normalmente — só o e-mail não sai (e um log de nível
+    # ERROR, não silencioso, avisa que a configuração está faltando,
+    # já que aqui o "aviso" É o produto: diferente de SUPPORT_EMAIL,
+    # não tem tela nenhuma cobrindo a mesma informação de outro jeito).
+    PLATFORM_ALERT_EMAIL: str | None = None
     # Amostragem de profiling — mesma lógica do tracing acima, desligada
     # por padrão.
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0

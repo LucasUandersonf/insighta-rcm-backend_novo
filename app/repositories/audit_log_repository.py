@@ -6,6 +6,19 @@ ver DECISÃO padrão em billing_repository.py). `core.audit_log` já existe
 como model (app/models/audit_log.py) desde antes desta mudança, mas
 nunca tinha repositório/service/endpoint — só era escrito, nunca lido
 pela API.
+
+BUG CORRIGIDO — a tabela era só LIDA, nunca ESCRITA
+-------------------------------------------------------------------------
+A leitura (`list_paginated`/`get_actor_names`, e o endpoint
+GET /audit-log) existia desde a rodada anterior, mas nenhum lugar do
+código de fato inseria uma linha aqui — `core.audit_log` ficava vazia
+para sempre, sem nenhum erro visível (nenhum teste falhava, a tela
+"Log de Auditoria" simplesmente sempre mostrava "nenhum registro"). Esta
+rodada adiciona `record()` e passa a chamá-lo dos pontos de mutação que
+mais importam para conformidade em HealthTech: pacientes, faturamento,
+usuários (RBAC) e recurso de glosa — ver DECISÃO completa em
+app/services/patient_service.py, billing_service.py, user_service.py e
+denial_appeal_service.py sobre CADA chamada específica.
 """
 import uuid
 from datetime import date
@@ -20,6 +33,44 @@ from app.models.user import User
 class AuditLogRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def record(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        actor_user_id: uuid.UUID | None,
+        action: str,
+        entity_type: str,
+        entity_id: uuid.UUID,
+        diff: dict | None = None,
+    ) -> AuditLog:
+        """
+        DECISÃO — o diff nunca carrega dado sensível (PII/saúde/valor
+        financeiro), só metadado da MUDANÇA
+        -------------------------------------------------------------------
+        O objetivo do trilho de auditoria é responder "quem mudou o quê,
+        quando" — não ser uma SEGUNDA cópia do dado clínico/financeiro em
+        si (isso aumentaria a superfície de exposição de dado sensível, o
+        oposto do que LGPD pede). Por isso: eventos de CRIAÇÃO
+        (`*.created`) nunca levam `diff` — a linha em si, já protegida por
+        RLS, é a fonte de verdade do que foi criado, e o audit log só
+        prova QUE aconteceu, por QUEM, QUANDO. Eventos de MUDANÇA DE
+        ESTADO (`*.updated`, `*.settled`, `*.resolved`) levam um `diff`
+        raso só com o campo OPERACIONAL que mudou (status, papel de
+        acesso, flag ativo/inativo) — nunca CPF, nome de paciente, CID,
+        valor de guia ou justificativa de recurso.
+        """
+        entry = AuditLog(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            diff=diff,
+        )
+        self.session.add(entry)
+        await self.session.flush()
+        return entry
 
     async def list_paginated(
         self,

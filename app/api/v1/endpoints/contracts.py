@@ -18,6 +18,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.api.deps import CurrentUser, DbSession, require_role
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.contract_repository import ContractRepository
 from app.schemas.contract import (
@@ -44,11 +45,11 @@ _MAX_PDF_BYTES = 20 * 1024 * 1024
 
 
 def _build_service(db: DbSession) -> ContractService:
-    return ContractService(ContractRepository(db), ContractItemRepository(db))
+    return ContractService(ContractRepository(db), ContractItemRepository(db), AuditLogRepository(db))
 
 
 def _build_intake_service(db: DbSession) -> ContractIntakeService:
-    return ContractIntakeService(ContractRepository(db), ContractItemRepository(db))
+    return ContractIntakeService(ContractRepository(db), ContractItemRepository(db), AuditLogRepository(db))
 
 
 @router.post("", response_model=ContractResponse, status_code=201)
@@ -57,7 +58,7 @@ async def create_contract(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
 ) -> ContractResponse:
-    return await _build_service(db).create_contract(current_user.tenant_id, payload)
+    return await _build_service(db).create_contract(current_user.tenant_id, uuid.UUID(current_user.id), payload)
 
 
 @router.get("/active", response_model=PaginatedResponse[ContractResponse])
@@ -105,6 +106,7 @@ async def upload_contract_pdf(
 
     return await _build_intake_service(db).create_draft(
         tenant_id=current_user.tenant_id,
+        actor_user_id=uuid.UUID(current_user.id),
         insurance_plan_id=insurance_plan_id,
         valid_from=valid_from,
         valid_until=valid_until,

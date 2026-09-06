@@ -41,14 +41,18 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 
 ## Tier 2 — Obrigatório antes de dado real de paciente (LGPD/HealthTech)
 
-### A auditoria que foi desenhada mas nunca implementada
-- [ ] **`core.audit_log` existe desde o primeiro DDL, com a justificativa "auditoria é obrigatória em HealthTech" — mas nada no código escreve nela.** Isso precisa ser resolvido antes de qualquer dado real de paciente entrar no sistema: quem acessou o quê, quando, e o quê mudou em `billing`/`patients` precisa ficar registrado de verdade, não só ter uma tabela pronta esperando.
+### A auditoria que foi desenhada mas nunca implementada — RESOLVIDO NESTA RODADA
+- [x] **BUG CORRIGIDO**: `core.audit_log` existia desde o primeiro DDL, com a justificativa "auditoria é obrigatória em HealthTech", mas nada no código escrevia nela — a tela "Log de Auditoria" sempre mostrava vazio. `AuditLogRepository.record()` agora é chamado a cada mutação sensível: criação de paciente, criação/liquidação de faturamento, criação/mudança de papel/desativação/reset de senha de usuário, e todo o ciclo de vida do recurso de glosa (criado/protocolado/resolvido). Ver DECISÃO completa em `app/repositories/audit_log_repository.py` e em cada service (`patient_service.py`, `billing_service.py`, `user_service.py`, `denial_appeal_service.py`).
+- [x] **Diff nunca carrega dado sensível** — eventos de criação não gravam `diff` nenhum (a própria linha, protegida por RLS, é a fonte de verdade); eventos de mudança de estado gravam só o campo operacional que mudou (status, papel, ativo/inativo), nunca CPF, nome, CID ou valor financeiro. Reset de senha nunca grava a senha (nem hash).
+- [ ] Ingestão em massa (upload de planilha) continua de propósito FORA do audit_log — centenas de linhas por arquivo tornariam o trilho ruidoso e a própria tela de histórico de upload (`core.ingestion_files`) já cobre "quem subiu qual arquivo, quando". Auditoria de mutação individual cobre a ação humana pontual (criar 1 paciente, editar 1 usuário), não o lote.
 
 ### LGPD especificamente
-- [ ] Política de retenção e exclusão de dado de paciente (CPF, CID, nome) — o que acontece quando uma clínica cancela a assinatura, ou um paciente pede exclusão?
-- [ ] Criptografia em repouso no banco (RDS oferece nativamente — precisa ser ligado explicitamente).
-- [ ] Revisão de quem, dentro da equipe, tem acesso de produção ao banco (mesmo você, como desenvolvedor, acessando diretamente é um evento que devia ficar registrado).
-- [ ] Termo de uso / política de privacidade alinhados com o que de fato é armazenado (CID é dado de saúde sensível).
+- [x] **Direito de eliminação do titular (art. 18, VI) — IMPLEMENTADO**: `POST /patients/{id}/anonymize` (admin/owner) substitui nome/CPF/data de nascimento por um placeholder — nunca `DELETE` físico, porque isso quebraria a integridade com `appointments`/`billing` (histórico que a clínica é OBRIGADA a reter por obrigação legal de retenção fiscal/contábil, o que a própria LGPD art. 16 permite). Ver `app/sql/022_patient_lgpd_erasure.sql` e `app/services/patient_service.py`.
+- [x] **Auditoria de contratos — IMPLEMENTADO** (fecha o item de auditoria da rodada anterior): criação e homologação de contrato agora também gravam em `core.audit_log` (mesmo mecanismo de patients/billing/users/denial-appeals).
+- [ ] **Política de retenção formal, por escrito** (o que acontece quando uma clínica cancela a assinatura: prazo de retenção do tenant inteiro, quando o dado é de fato purgado) — o mecanismo de anonimização POR PACIENTE existe; falta a política de retenção NO NÍVEL DO TENANT (cancelamento de assinatura), que é uma decisão de negócio/jurídica, não só código.
+- [ ] Criptografia em repouso no banco — **infraestrutura, não código**: RDS/Cloud SQL oferecem nativamente, mas precisa ser ligado explicitamente na hora de provisionar o banco gerenciado (fora do alcance de uma sessão de desenvolvimento sem acesso a esse provisionamento).
+- [ ] Revisão de quem, dentro da equipe, tem acesso de produção ao banco (mesmo o desenvolvedor acessando diretamente é um evento que devia ficar registrado) — processo operacional, não código.
+- [ ] Termo de uso / política de privacidade alinhados com o que de fato é armazenado (CID é dado de saúde sensível) — texto jurídico, não código.
 
 ### Segurança além do RLS
 - [ ] Scan de dependências vulneráveis (`pip-audit`, Dependabot) — nenhuma das ~30 dependências do `requirements.txt` foi auditada quanto a CVEs.
@@ -72,6 +76,24 @@ Organizado em 3 camadas: **Tier 1** (bloqueadores para qualquer ambiente com usu
 - [x] **BUG CORRIGIDO**: `weekly_report_job.py` e `daily_alert_job.py` (os dois crons de WhatsApp) nunca chamavam `sentry_sdk.init()` — uma quebra do job inteiro (ex: credencial expirada) morria em silêncio no log do container, sem NENHUM alerta. Corrigido nos dois, mesmo padrão do worker de ingestão.
 - [x] `report_send_service._alert_if_total_send_failure`: falha em 100% dos destinatários de um tenant (sinal de token expirado/template desaprovado na Meta, não de "um número ruim") agora gera log `ERROR` + alerta ativo no Sentry, em vez de só uma linha `INFO`.
 - [ ] Ainda falta (depende de infraestrutura real, fora do escopo desta rodada): agregação de métricas/alertas de infraestrutura (latência, fila, CPU/memória) via Prometheus/CloudWatch — hoje o alerta é por EXCEÇÃO capturada pelo Sentry, não por métrica de sistema.
+
+### Integrações genéricas (webhooks/API) — IMPLEMENTADO NESTA RODADA
+- [x] **BUG CORRIGIDO (sentido INBOUND)**: chaves de API (`POST /integrations/api-keys`) existiam desde `006_platform_admin.sql`, mas nenhum endpoint jamais as verificava — um cliente podia emitir uma chave e ela não servia para nada. `POST /integrations/ingest` resolve isso: o ERP/CRM/planilha do próprio cliente agora consegue empurrar arquivo de faturamento/agenda autenticando só com `X-API-Key`, sem sessão de usuário.
+- [x] Resolução de tenant a partir do prefixo da chave via `core.resolve_api_key_candidates` (SECURITY DEFINER, mesmo `auth_resolver_owner` já usado por login/reset de senha — nenhum papel novo criado).
+- [x] **Sentido OUTBOUND**: `core.webhook_subscriptions` — cliente cadastra URL (Slack/Zapier/CRM próprio) + `event_types`; `webhook_dispatch_service.dispatch_event` entrega assinado por HMAC-SHA256 (mesma convenção `sha256=<hex>` do webhook Meta, invertida: aqui a plataforma assina). Primeiro evento ligado: `billing.held_for_review`.
+- [x] Falha de entrega (timeout, DNS, 4xx/5xx do destino) nunca derruba a operação que disparou o evento — captada por assinatura individual, logada e reportada ao Sentry quando configurado.
+- [x] **Fila de retry de verdade — IMPLEMENTADO EM RODADA POSTERIOR**: `core.webhook_delivery_queue` + `app/worker/webhook_retry_job.py`. Falha na tentativa imediata enfileira com backoff exponencial (1m/5m/30m/2h/6h, 6 tentativas no total); depois de esgotar, desiste (`status='failed'`) e reporta ao Sentry. `GET /integrations/webhooks/deliveries` dá visibilidade (tela "Entregas recentes" em Integrações). Fila em Postgres, não SQS — ver DECISÃO em `app/sql/028_webhook_delivery_queue.sql` sobre por que isso não esperou a infraestrutura de mensageria ficar pronta.
+- [ ] Catálogo de eventos ainda é só `billing.held_for_review` — `denial_appeal.resolved` foi cogitado e ficou para a próxima leva de eventos, junto com qualquer evento de agenda/no-show.
+- [x] UI de gestão de webhooks no frontend — **IMPLEMENTADO EM RODADA POSTERIOR** (`IntegrationsPage.tsx`: CRUD completo + tela de entregas recentes).
+
+### Customer Success orientado a dados — IMPLEMENTADO NESTA RODADA
+- [x] Painel interno (`/plataforma`, autenticação por senha única da equipe, separada de qualquer login de clínica) mostrando uso agregado por tenant: usuários ativos, última atividade, eventos de auditoria (30d), pacientes/consultas/faturamentos.
+- [x] Régua de engajamento (novo/risco/atenção/engajado/inativo) calculada em Python a partir de `core.audit_log` — nenhuma instrumentação nova precisou ser criada.
+- [x] Role de banco própria (`platform_reporting_owner`), separada de `auth_resolver_owner` — nunca aumenta o raio de estrago de um bug/vazamento na função de login.
+- [ ] Senha única compartilhada é aceitável para uma equipe pequena; se a equipe/uso crescer, evoluir para login individual por usuário da plataforma (tabela própria, fora de `core.users`).
+- [x] **Alertas proativos — IMPLEMENTADO NESTA RODADA**: `POST /platform/alerts/run` + `app/worker/platform_risk_alert_job.py` avisam a equipe por e-mail assim que uma clínica entra em "risco" (`core.platform_risk_alerts` guarda o episódio em aberto, evitando reenviar o mesmo aviso a cada execução — só um lembrete após 7 dias se continuar em risco).
+- [ ] Só e-mail por enquanto — WhatsApp para a equipe interna foi avaliado e descartado nesta rodada (exigiria template pré-aprovado pela Meta só para uso interno, desproporcional).
+- [ ] Agendamento externo (cron/EventBridge) do `platform_risk_alert_job.py` ainda não provisionado — mesma pendência de infraestrutura dos outros dois jobs (`weekly_report_job.py`/`daily_alert_job.py`).
 
 ### Performance — IMPLEMENTADO NESTA SESSÃO
 - [x] Índices em `tenant_id` para `patients`, `contracts`, `insurance_plans`, `professionals`, `users` — faltavam desde o início, cresceriam como lentidão silenciosa com volume de dado acumulado.

@@ -176,6 +176,39 @@ _POST_UPGRADE_SQL_FILES = [
     # CREATE TABLE sem IF NOT EXISTS — precisa do marcador (ver
     # _POST_UPGRADE_MARKER_TABLE). Ver DECISÃO completa no próprio .sql.
     "021_ingestion_column_aliases.sql",
+    # Direito de eliminação do titular (LGPD art. 18, VI) —
+    # patients.anonymized_at. Auto-idempotente (ADD COLUMN IF NOT
+    # EXISTS) — roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE. Ver DECISÃO completa no próprio .sql.
+    "022_patient_lgpd_erasure.sql",
+    # Central de Notificações + Central de Ajuda — platform_announcements
+    # (sem RLS, ver DECISÃO no próprio .sql) + announcement_reads +
+    # support_requests. CREATE TABLE sem IF NOT EXISTS — precisa do
+    # marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "023_announcements_and_support.sql",
+    # Resolver de API key cross-tenant (SECURITY DEFINER, mesma família de
+    # 002_auth_resolver.sql). DROP + CREATE — auto-idempotente, roda em
+    # todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "024_api_key_resolver.sql",
+    # Webhooks OUTBOUND (Slack/CRM/Zapier por conta própria do cliente) —
+    # core.webhook_subscriptions. CREATE TABLE sem IF NOT EXISTS — precisa
+    # do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "025_webhook_subscriptions.sql",
+    # Customer Success orientado a dados — função agregadora cross-tenant
+    # (SECURITY DEFINER, role própria platform_reporting_owner, NÃO
+    # reaproveita auth_resolver_owner — ver DECISÃO no próprio .sql).
+    # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
+    # em _POST_UPGRADE_MARKER_TABLE.
+    "026_platform_customer_success.sql",
+    # Alertas proativos de Customer Success — core.platform_risk_alerts
+    # (mesma exceção sem tenant_id/RLS de platform_announcements, ver
+    # DECISÃO no próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa
+    # do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "027_platform_risk_alerts.sql",
+    # Fila de retentativa para webhooks — core.webhook_delivery_queue
+    # (RLS normal, dado da clínica — ver DECISÃO no próprio .sql). CREATE
+    # TABLE sem IF NOT EXISTS — precisa do marcador.
+    "028_webhook_delivery_queue.sql",
 ]
 
 _ROLES_SQL = """
@@ -199,6 +232,24 @@ GRANT EXECUTE ON FUNCTION core.resolve_login(CITEXT) TO app_runtime;
 ALTER FUNCTION core.resolve_user_by_email(CITEXT) OWNER TO auth_resolver_owner;
 REVOKE ALL ON FUNCTION core.resolve_user_by_email(CITEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_user_by_email(CITEXT) TO app_runtime;
+
+-- Autenticação por API key (ver 024_api_key_resolver.sql) — mesmo
+-- padrão acima, reaproveitando a MESMA role auth_resolver_owner (não
+-- cria uma role nova só para isto).
+GRANT SELECT ON core.api_keys TO auth_resolver_owner;
+ALTER FUNCTION core.resolve_api_key_candidates(VARCHAR) OWNER TO auth_resolver_owner;
+REVOKE ALL ON FUNCTION core.resolve_api_key_candidates(VARCHAR) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.resolve_api_key_candidates(VARCHAR) TO app_runtime;
+
+-- Customer Success orientado a dados (ver 026_platform_customer_success.sql)
+-- — role PRÓPRIA, de propósito diferente de auth_resolver_owner (ver
+-- DECISÃO no próprio .sql): esta agrega dado cross-tenant para o painel
+-- interno da plataforma, não resolve "qual tenant é este" antes do login.
+GRANT USAGE ON SCHEMA core TO platform_reporting_owner;
+GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.appointments, core.billing TO platform_reporting_owner;
+ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner;
+REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_runtime;
 """
 
 
@@ -290,6 +341,10 @@ _POST_UPGRADE_MARKER_TABLE = {
     "017_glosas.sql": "glosas",
     "018_locais_tipo_paciente.sql": "locais",
     "021_ingestion_column_aliases.sql": "ingestion_column_aliases",
+    "023_announcements_and_support.sql": "platform_announcements",
+    "025_webhook_subscriptions.sql": "webhook_subscriptions",
+    "027_platform_risk_alerts.sql": "platform_risk_alerts",
+    "028_webhook_delivery_queue.sql": "webhook_delivery_queue",
 }
 
 
@@ -339,7 +394,14 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             # nesta jornada: ver comentário em _ROLES_SQL).
             await conn.execute("CREATE ROLE auth_resolver_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
-        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner)...")
+        platform_reporting_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_reporting_owner')"
+        )
+        if not platform_reporting_owner_exists:
+            logger.info("Criando role platform_reporting_owner...")
+            await conn.execute("CREATE ROLE platform_reporting_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
+        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner)...")
         await conn.execute(_ROLES_SQL)
     finally:
         await conn.close()

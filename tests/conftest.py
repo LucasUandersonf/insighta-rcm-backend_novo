@@ -112,6 +112,13 @@ _SCHEMA_FILES = [
     "019_agenda_ingestion.sql",
     "020_no_show_thresholds.sql",
     "021_ingestion_column_aliases.sql",
+    "022_patient_lgpd_erasure.sql",
+    "023_announcements_and_support.sql",
+    "024_api_key_resolver.sql",
+    "025_webhook_subscriptions.sql",
+    "026_platform_customer_success.sql",
+    "027_platform_risk_alerts.sql",
+    "028_webhook_delivery_queue.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -156,6 +163,26 @@ GRANT EXECUTE ON FUNCTION core.resolve_login(CITEXT) TO app_test_runtime;
 ALTER FUNCTION core.resolve_user_by_email(CITEXT) OWNER TO auth_resolver_owner_test;
 REVOKE ALL ON FUNCTION core.resolve_user_by_email(CITEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.resolve_user_by_email(CITEXT) TO app_test_runtime;
+
+-- Autenticação por API key (ver 024_api_key_resolver.sql) — mesmo padrão
+-- acima, reaproveitando a MESMA role auth_resolver_owner_test.
+GRANT SELECT ON core.api_keys TO auth_resolver_owner_test;
+ALTER FUNCTION core.resolve_api_key_candidates(VARCHAR) OWNER TO auth_resolver_owner_test;
+REVOKE ALL ON FUNCTION core.resolve_api_key_candidates(VARCHAR) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.resolve_api_key_candidates(VARCHAR) TO app_test_runtime;
+
+-- Customer Success orientado a dados (ver 026_platform_customer_success.sql)
+-- — role PRÓPRIA (não reaproveita auth_resolver_owner_test, ver DECISÃO
+-- no próprio .sql): agrega dado cross-tenant para o painel interno da
+-- plataforma, categoria de problema diferente de "resolver o tenant".
+DROP ROLE IF EXISTS platform_reporting_owner_test;
+CREATE ROLE platform_reporting_owner_test NOLOGIN NOSUPERUSER;
+ALTER ROLE platform_reporting_owner_test BYPASSRLS;
+GRANT USAGE ON SCHEMA core TO platform_reporting_owner_test;
+GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.appointments, core.billing TO platform_reporting_owner_test;
+ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner_test;
+REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_test_runtime;
 """
 
 
@@ -291,7 +318,15 @@ async def clean_tables(_test_database, admin_engine):
                     core.denial_appeal_attachments, core.denial_appeals, core.billing, core.appointments,
                     core.contract_items, core.contracts, core.insurance_plan_aliases, core.insurance_plans,
                     core.insurance_companies, core.patients,
-                    core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants
+                    core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants,
+                    core.announcement_reads, core.support_requests, core.webhook_subscriptions,
+                    core.platform_risk_alerts, core.webhook_delivery_queue,
+                    -- platform_announcements é a ÚNICA tabela sem tenant_id (ver
+                    -- DECISÃO em app/sql/023_announcements_and_support.sql) — nunca
+                    -- seria alcançada pelo CASCADE de truncar core.tenants acima
+                    -- (nada nela referencia tenants), então precisa entrar na lista
+                    -- explicitamente ou vazaria entre testes.
+                    core.platform_announcements
                 RESTART IDENTITY CASCADE
                 """
             )

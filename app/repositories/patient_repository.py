@@ -35,3 +35,7 @@ class PatientRepository:
         self.session.add(patient)
         await self.session.flush()
         return patient
+
+    async def save(self, patient: Patient) -> Patient:
+        await self.session.flush()
+        return patient

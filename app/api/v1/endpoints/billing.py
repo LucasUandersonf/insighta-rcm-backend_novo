@@ -17,9 +17,11 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.billing_service import BillingService
@@ -28,7 +30,14 @@ router = APIRouter(prefix="/billing", tags=["billing"])
 
 
 def _build_service(db: DbSession) -> BillingService:
-    return BillingService(BillingRepository(db), AppointmentRepository(db), ContractItemRepository(db), GuiaRepository(db))
+    return BillingService(
+        BillingRepository(db),
+        AppointmentRepository(db),
+        ContractItemRepository(db),
+        GuiaRepository(db),
+        audit_repo=AuditLogRepository(db),
+        webhook_repo=WebhookSubscriptionRepository(db),
+    )
 
 
 @router.post("", response_model=BillingResponse, status_code=201)
@@ -37,7 +46,7 @@ async def create_billing(
     db: DbSession,
     current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
 ) -> BillingResponse:
-    return await _build_service(db).create_billing(current_user.tenant_id, payload)
+    return await _build_service(db).create_billing(current_user.tenant_id, UUID(current_user.id), payload)
 
 
 @router.get("/high-risk", response_model=PaginatedResponse[BillingResponse])
@@ -72,4 +81,4 @@ async def settle_billing(
 ) -> BillingResponse:
     """Módulo de Taxas, Custos e Repasses: registra o valor que a
     operadora efetivamente repassou na liquidação do lote."""
-    return await _build_service(db).settle_billing(billing_id, payload)
+    return await _build_service(db).settle_billing(current_user.tenant_id, UUID(current_user.id), billing_id, payload)
