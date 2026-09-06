@@ -155,6 +155,20 @@ class UserService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessão inválida.")
         return UserResponse.model_validate(user)
 
+    async def complete_onboarding(self, user_id: str) -> None:
+        """Self-service, mesmo critério de change_own_password: qualquer
+        papel autenticado marca o PRÓPRIO tour como visto/pulado — não é
+        gestão de usuários (nem RBAC nem controle de acesso), então não
+        gera audit_log (ver DECISÃO na classe: audit_log aqui existe para
+        "quem pode acessar o quê", não para preferência de UX). Idempotente
+        de propósito — reenviar depois de já concluído só atualiza o
+        timestamp, nunca é erro."""
+        user = await self.repo.get_by_id(uuid.UUID(user_id))
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessão inválida.")
+        user.onboarding_completed_at = datetime.now(timezone.utc)
+        await self.repo.save(user)
+
     async def change_own_password(self, user_id: str, data: PasswordChangeRequest) -> None:
         user = await self.repo.get_by_id(uuid.UUID(user_id))
         if user is None:

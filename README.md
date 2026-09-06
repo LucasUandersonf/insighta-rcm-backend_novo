@@ -654,11 +654,34 @@ precisa dele para configurar a verificação do próprio lado.
 evento a toda assinatura ativa elegível, assinando o corpo com
 HMAC-SHA256 no MESMO formato `sha256=<hex>` que `verify_meta_webhook_signature`
 já verifica no sentido inbound — só invertido (aqui a plataforma ASSINA,
-o cliente VERIFICA). O primeiro evento real ligado a este motor é
-`billing.held_for_review` (`BillingService.create_billing`): um
-faturamento que o motor de risco de glosa decidiu segurar para revisão
-manual é algo que o cliente quer saber imediatamente num canal que ele já
-usa, não só ao abrir o painel depois.
+o cliente VERIFICA). Três eventos ligados até agora, todos disparados a
+partir de um ÚNICO registro criado/alterado via endpoint normal (nunca
+de um path de ingestão em lote — ver DECISÃO logo abaixo):
+
+- `billing.held_for_review` (`BillingService.create_billing`) — um
+  faturamento que o motor de risco de glosa decidiu segurar para revisão
+  manual é algo que o cliente quer saber imediatamente num canal que ele
+  já usa, não só ao abrir o painel depois.
+- `denial_appeal.resolved` (`DenialAppealService.resolve_appeal`) —
+  dispara nas três transições possíveis (deferido/indeferido/nip_aberta),
+  não só nas terminais: mesmo uma escalada para NIP é uma mudança de
+  estado que o CRM/planilha do cliente quer refletir.
+- `no_show_risk.high` (`AppointmentService.create_appointment`) — só no
+  nível "alto", não em todo agendamento criado; o cliente quer ser
+  avisado do que precisa de ação (ligar para confirmar presença), não
+  de cada consulta marcada.
+
+> **DECISÃO — nenhum evento é disparado a partir de ingestão em lote.**
+> A maior parte dos agendamentos/faturamentos entra pelo upload de
+> planilha (`app/services/normalization_service.py`), não pelos
+> endpoints `POST /appointments`/`POST /billing`. Ligar `dispatch_event`
+> também ali faria um arquivo com centenas de linhas gerar dezenas de
+> chamadas HTTP síncronas durante o próprio upload — arriscando travar
+> um caminho crítico já bem testado, só para ganhar avisos em tempo real
+> de um cenário (importação em massa) que já é, por natureza, um
+> processo em lote, não "em tempo real". Os três eventos acima nascem
+> todos de uma ação humana pontual (criar 1 registro), onde o disparo
+> síncrono é imperceptível.
 
 > **DECISÃO — falha de entrega nunca quebra a operação que disparou o
 > evento.** Criar um faturamento não pode falhar porque o Slack do
@@ -707,6 +730,49 @@ aquele aviso" sem abrir um chamado de suporte.
 > como `failed` sem gastar mais uma tentativa numa URL que ninguém mais
 > quer — só volta a disparar se ele reativar e um evento NOVO acontecer.
 
+## Tour de boas-vindas guiado
+
+Item de maturidade de produto: até esta rodada não existia nenhum
+onboarding dentro do produto — um cliente novo abria o sistema pela
+primeira vez e precisava descobrir sozinho onde cada coisa está.
+`core.users.onboarding_completed_at` (NULL = ainda não viu) guarda, por
+PESSOA (não por clínica), se aquele colaborador específico já passou
+pelo tour — um financeiro contratado meses depois do owner que criou a
+conta também nunca viu a ferramenta antes e vê o tour na própria
+primeira entrada.
+
+`POST /users/me/onboarding-complete` (self-service, qualquer papel,
+idempotente) marca o tour como visto/pulado — "pular" e "concluir"
+gravam do mesmo jeito, a intenção é só "não mostrar de novo sozinho",
+não medir quem prestou atenção em cada passo. `GET /users/me` devolve o
+campo para o frontend decidir se mostra o tour nesta sessão.
+
+> **DECISÃO — TIMESTAMPTZ, não BOOLEAN.** Mesmo raciocínio de
+> `patients.anonymized_at`/`tenants.annual_revenue_goal`: guardar QUANDO,
+> não só SE, não custa nada a mais e já responde de graça "quantos dos
+> usuários que entraram nesta semana já passaram pelo tour?" sem coluna
+> nova depois.
+
+### Frontend — `OnboardingTour.tsx` aponta para a navegação REAL
+
+`OnboardingTourProvider` (`src/context/OnboardingTourContext.tsx`) monta
+os passos a partir da MESMA lista `NAV_ITEMS`/`ADMIN_NAV_ITEMS` que a
+barra lateral usa (`Sidebar.tsx`, exportadas de propósito) e do MESMO
+filtro de papel — um item escondido pelo RBAC do usuário nunca vira um
+passo do tour apontando para algo que ele não pode acessar. Cada passo
+destaca o item de verdade da barra lateral (via `data-tour-id`), não uma
+screenshot ou ilustração à parte — nunca desatualiza se a navegação
+mudar. Abre sozinho na primeira sessão de cada usuário
+(`onboarding_completed_at === null`) e pode ser revisto quando quiser
+pela Central de Ajuda ("Rever tour de boas-vindas").
+
+> **DECISÃO — sem overlay escuro cobrindo a tela inteira.** Só o item
+> apontado ganha um anel de destaque (o "buraco" de luz vem de um
+> `box-shadow` gigante no próprio anel — técnica de spotlight sem
+> precisar de `clip-path`/máscara SVG); o resto da tela continua legível
+> e clicável por trás. A intenção é orientar, não travar o uso normal do
+> sistema enquanto o tour está aberto.
+
 ## Customer Success orientado a dados (painel interno da plataforma)
 
 Item de maturidade de produto que fecha a última frente de base sugerida
@@ -726,24 +792,34 @@ opera a Insighta**, nunca de um usuário de clínica.
 > comercial grave. Por isso ele tem autenticação PRÓPRIA, totalmente
 > separada do login de clínica.
 
-### Autenticação — senha única da equipe, não login de usuário
+### Autenticação — login individual, `core.platform_users`
 
-`POST /platform/login` aceita só `{"password": "..."}`, comparado (tempo
-constante, `hmac.compare_digest`) contra `settings.PLATFORM_ADMIN_PASSWORD`
-— sem `PLATFORM_ADMIN_PASSWORD` configurada, responde 503 em vez de
-aceitar (ou pior, nunca autenticar) qualquer senha. O JWT emitido
-(`create_platform_admin_token`, `app/core/security.py`) carrega só a
-claim `scope: "platform_admin"` — nunca `sub`/`tenant_id`/`role` — e dura
-4h (mais que o token de clínica: é uma ferramenta interna sem fluxo de
-refresh construído). `app/api/platform_admin_auth.py::get_platform_admin`
-é a dependency que todo endpoint de `/platform` (exceto o login) exige;
-rejeita explicitamente um JWT de usuário de clínica que por acaso chegue
-ali (mesma chave de assinatura, mas sem a claim `scope`).
+`POST /platform/login` aceita `{"email": "...", "password": "..."}`,
+verificado contra `core.platform_users` (`verify_password`, mesmo
+mecanismo de senha de usuário de clínica). O JWT emitido
+(`create_platform_admin_token`, `app/core/security.py`) carrega `sub`
+(id do platform_user) + a claim `scope: "platform_admin"` — nunca
+`tenant_id`/`role` — e dura 4h (mais que o token de clínica: é uma
+ferramenta interna sem fluxo de refresh construído).
+`app/api/platform_admin_auth.py::get_platform_admin` é a dependency que
+todo endpoint de `/platform` (exceto o login) exige; devolve uma
+`PlatformAdminIdentity` (com o id extraído de `sub`) e rejeita
+explicitamente um JWT de usuário de clínica que por acaso chegue ali
+(mesma chave de assinatura, mas sem a claim `scope`).
 
-Senha única compartilhada é uma escolha deliberada de escopo para a v1 —
-suficiente para uma equipe pequena; criar uma tabela própria de "usuários
-da plataforma" com login individual é a evolução natural se esse uso
-crescer.
+> **DECISÃO — substituiu a senha única compartilhada da v1 deste
+> painel.** Era uma escolha deliberada de escopo para uma equipe
+> pequena; com mais de uma ação real acontecendo no painel (ver
+> `POST /platform/alerts/run` abaixo), passou a fazer sentido saber QUEM
+> fez o quê — `core.platform_audit_log` guarda isso (`GET /platform/audit-log`).
+> Sem RBAC próprio ainda nesta v1 (todo `platform_user` pode tudo) —
+> evolução natural se o time crescer.
+>
+> **Sem self-signup, de propósito.** Contas são criadas/resetadas via
+> `python -m app.scripts.create_platform_user --email ... --full-name ...`
+> (mesmo raciocínio de `publish_announcement.py`: quem opera a
+> plataforma não é um cliente). Sem `--password`, o script gera uma
+> senha temporária e a imprime uma única vez no terminal.
 
 ### Relatório — `core.platform_tenant_usage_summary()`
 
@@ -774,6 +850,28 @@ total de pacientes, consultas e faturamentos recentes — e um
 > 1-4 eventos = "atenção"; 5+ = "engajado"; tenant desativado = "inativo"
 > sempre, mesmo com atividade recente). É uma heurística de v1,
 > deliberadamente simples e fácil de recalibrar sem nova migration.
+
+### Uso por recurso — `feature_usage_last_30d`
+
+`GET /platform/tenants-usage` também devolve, por tenant, uma
+decomposição de `events_last_30d` em 6 recursos (`pacientes`, `agenda`,
+`faturamento`, `recurso_de_glosa`, `contratos`, `usuarios`) — não só
+"está engajado?", mas "usando O QUÊ, especificamente?". O frontend soma
+esta mesma estrutura entre todas as clínicas para montar o ranking
+"Recursos mais usados na plataforma" (`PlatformDashboardPage.tsx`), o
+sinal mais direto para priorização de backlog: até esta rodada a
+priorização era conduzida por decisão direta do PO, sem dado de uso real
+por trás (normal antes do primeiro cliente — deixa de ser depois).
+
+> **DECISÃO — mede MUTAÇÃO, não NAVEGAÇÃO/LEITURA.** Reaproveita
+> `core.audit_log.entity_type` (billing/denial_appeal/contract/user) +
+> contagem direta em `core.patients`/`core.appointments` — nenhuma tabela
+> nova, nenhum evento de "cliquei nesta tela" instrumentado no frontend.
+> Uma clínica que abre a Sala de Comando todo dia mas nunca edita nada
+> ali aparece com contagem zero — suficiente para decidir em qual FRENTE
+> DE ENGENHARIA investir mais (dirigido por AÇÃO real no dado), mas não
+> é telemetria completa de uso de produto. Ver DECISÃO completa em
+> `app/sql/030_platform_feature_usage.sql`.
 
 ### Frontend — rota separada, fora do produto
 
@@ -1055,9 +1153,12 @@ rodam. Isso evita quebrar quem só quer rodar a suíte rápida sem subir banco.
 | `support-requests` (Central de Ajuda) | ✅ `test_support_requests.py` (criação, histórico por tenant, RBAC, e-mail best-effort não derruba a resposta) |
 | `integrations` (API keys + `ingest` INBOUND) | ✅ `test_integrations.py` (emissão/revogação, RBAC, RLS entre tenants, chave de fato autenticando um upload real) |
 | `integrations/webhooks` (webhooks OUTBOUND) | ✅ `test_webhook_subscriptions.py` (CRUD, RBAC, RLS, disparo assinado por HMAC em `billing.held_for_review`, falha de entrega nunca quebra a operação) |
-| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login por senha, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo) |
+| `platform` (Customer Success interno) | ✅ `test_platform_customer_success.py` (login individual por e-mail/senha, conta desativada não loga, `last_login_at`/`platform_audit_log` gravados, 401 em token de clínica, relatório cross-tenant, régua de engajamento novo/risco/atenção/engajado/inativo, `GET /platform/audit-log`) |
 | `platform/alerts` (alertas proativos de Customer Success) | ✅ `test_platform_risk_alerts.py` (alerta na transição para risco, sem reenvio antes do intervalo, lembrete após o intervalo, episódio fechado ao recuperar sem e-mail, reentrada em risco conta como novo, falha de e-mail não quebra o job) |
 | `integrations/webhooks/deliveries` (fila de retentativa) | ✅ `test_webhook_delivery_retry.py` (falha imediata enfileira, worker entrega com sucesso após recuperação, reagenda com backoff se continuar falhando, desiste após esgotar tentativas, desiste sem tentar se a assinatura foi desativada, isolamento entre tenants) |
+| Catálogo de eventos de webhook (`denial_appeal.resolved`, `no_show_risk.high`) | ✅ `test_webhook_more_events.py` (dispara nas três transições de resolução do recurso de glosa, dispara só no risco "alto" de falta — nunca em risco baixo/indeterminado, nunca PII no corpo em nenhum dos dois) |
+| `users/me/onboarding-complete` (tour de boas-vindas guiado) | ✅ `test_users.py` (perfil recém-criado começa com `onboarding_completed_at` nulo, conclusão grava o timestamp, idempotente — pedir de novo não é erro) |
+| `platform/tenants-usage` — `feature_usage_last_30d` (uso por recurso) | ✅ `test_platform_customer_success.py` (decompõe corretamente em pacientes/agenda/faturamento/recurso de glosa/contratos/usuários a partir de `audit_log`+`patients`+`appointments`, todas as 6 chaves sempre presentes mesmo zeradas) |
 
 ## Próximos passos sugeridos
 - Criar as roles de banco `app_runtime` (RLS forçado) e o dono da função

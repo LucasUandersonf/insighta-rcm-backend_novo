@@ -1,34 +1,47 @@
 """
 tests/integration/test_platform_customer_success.py — painel interno de
 Customer Success orientado a dados (ver DECISÃO completa em
-app/sql/026_platform_customer_success.sql).
+app/sql/026_platform_customer_success.sql e app/sql/029_platform_users.sql).
 
 Diferente de todo o resto do sistema: aqui NÃO há tenant_id no fluxo de
 autenticação — é a equipe da Insighta, não um usuário de clínica. Por
-isso os testes usam `platform_module.settings` (mesma técnica de
-test_support_requests.py para SUPPORT_EMAIL) em vez de qualquer fixture
-de tenant/usuário para o LOGIN em si; tenant_a/tenant_b só entram para
-provar que o relatório de fato atravessa os dois ao mesmo tempo.
+isso a fixture `_platform_admin_user` insere direto em
+core.platform_users (mesmo caminho de app/scripts/create_platform_user.py)
+em vez de usar qualquer fixture de tenant/usuário para o LOGIN em si;
+tenant_a/tenant_b só entram para provar que o relatório de fato
+atravessa os dois ao mesmo tempo.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
+import pytest_asyncio
 from sqlalchemy import text
 
-from app.api.v1.endpoints import platform as platform_module
+from app.core.security import hash_password
 
+_EMAIL = "equipe@insighta-rcm.com"
 _PASSWORD = "senha-super-secreta-da-equipe"
 
 
-@pytest.fixture(autouse=True)
-def _configure_platform_password(monkeypatch):
-    monkeypatch.setattr(platform_module.settings, "PLATFORM_ADMIN_PASSWORD", _PASSWORD)
+@pytest_asyncio.fixture(autouse=True)
+async def _platform_admin_user(admin_engine, clean_tables):
+    # Depende de `clean_tables` (explícito no parâmetro) para garantir
+    # que esta inserção acontece DEPOIS da limpeza entre testes — as
+    # duas fixtures são autouse no mesmo escopo, e só uma dependência
+    # explícita garante a ordem certa entre elas.
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.platform_users (id, email, hashed_password, full_name) "
+                "VALUES (:id, :email, :hashed, 'Equipe de Teste')"
+            ),
+            {"id": str(uuid.uuid4()), "email": _EMAIL, "hashed": hash_password(_PASSWORD)},
+        )
     yield
 
 
-async def _platform_login(client, password: str = _PASSWORD) -> str:
-    resp = await client.post("/api/v1/platform/login", json={"password": password})
+async def _platform_login(client, email: str = _EMAIL, password: str = _PASSWORD) -> str:
+    resp = await client.post("/api/v1/platform/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
@@ -56,27 +69,45 @@ async def _insert_audit_events(admin_engine, tenant_id: str, count: int) -> None
 
 
 # =====================================================================
-# Login — senha única da equipe, nada a ver com tenant/usuário de clínica.
+# Login — conta individual da equipe, nada a ver com tenant/usuário de
+# clínica (ver DECISÃO em app/sql/029_platform_users.sql).
 # =====================================================================
 
 
-async def test_login_without_password_configured_returns_503(client, monkeypatch):
-    monkeypatch.setattr(platform_module.settings, "PLATFORM_ADMIN_PASSWORD", None)
-    resp = await client.post("/api/v1/platform/login", json={"password": "qualquer-coisa"})
-    assert resp.status_code == 503
+async def test_login_with_unknown_email_returns_401(client):
+    resp = await client.post("/api/v1/platform/login", json={"email": "ninguem@insighta-rcm.com", "password": "qualquer-coisa"})
+    assert resp.status_code == 401
 
 
 async def test_login_with_wrong_password_returns_401(client):
-    resp = await client.post("/api/v1/platform/login", json={"password": "senha-errada"})
+    resp = await client.post("/api/v1/platform/login", json={"email": _EMAIL, "password": "senha-errada"})
     assert resp.status_code == 401
 
 
 async def test_login_with_correct_password_returns_token(client):
-    resp = await client.post("/api/v1/platform/login", json={"password": _PASSWORD})
+    resp = await client.post("/api/v1/platform/login", json={"email": _EMAIL, "password": _PASSWORD})
     assert resp.status_code == 200
     body = resp.json()
     assert body["access_token"]
     assert body["token_type"] == "bearer"
+
+
+async def test_login_updates_last_login_at_and_records_audit_log(client, admin_engine):
+    await _platform_login(client)
+
+    async with admin_engine.begin() as conn:
+        row = (await conn.execute(text("SELECT last_login_at FROM core.platform_users WHERE email = :e"), {"e": _EMAIL})).first()
+        assert row.last_login_at is not None
+        log_row = (await conn.execute(text("SELECT action FROM core.platform_audit_log"))).first()
+        assert log_row.action == "login"
+
+
+async def test_deactivated_platform_user_cannot_login(client, admin_engine):
+    async with admin_engine.begin() as conn:
+        await conn.execute(text("UPDATE core.platform_users SET is_active = false WHERE email = :e"), {"e": _EMAIL})
+
+    resp = await client.post("/api/v1/platform/login", json={"email": _EMAIL, "password": _PASSWORD})
+    assert resp.status_code == 401
 
 
 # =====================================================================
@@ -169,6 +200,66 @@ async def test_deactivated_tenant_is_classified_as_inativo_even_with_activity(cl
     assert item["engagement_status"] == "inativo"
 
 
+# =====================================================================
+# feature_usage_last_30d — decomposição por RECURSO (não só engajamento
+# agregado), ver DECISÃO em app/sql/030_platform_feature_usage.sql.
+# =====================================================================
+
+
+async def test_feature_usage_breaks_down_by_resource(client, admin_engine, tenant_a):
+    patient_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.patients (id, tenant_id, full_name) VALUES (:id, :t, 'Paciente Uso')"),
+            {"id": patient_id, "t": tenant_a},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) "
+                "VALUES (:t, :p, now(), 'scheduled')"
+            ),
+            {"t": tenant_a, "p": patient_id},
+        )
+        for entity_type in ("billing", "billing", "denial_appeal", "contract", "user"):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.audit_log (tenant_id, action, entity_type, entity_id) "
+                    "VALUES (:tenant_id, 'created', :entity_type, :entity_id)"
+                ),
+                {"tenant_id": tenant_a, "entity_type": entity_type, "entity_id": str(uuid.uuid4())},
+            )
+
+    token = await _platform_login(client)
+    resp = await client.get("/api/v1/platform/tenants-usage", headers={"Authorization": f"Bearer {token}"})
+    item = next(i for i in resp.json() if i["tenant_id"] == tenant_a)
+    usage = item["feature_usage_last_30d"]
+    assert usage == {
+        "pacientes": 1,
+        "agenda": 1,
+        "faturamento": 2,
+        "recurso_de_glosa": 1,
+        "contratos": 1,
+        "usuarios": 1,
+    }
+
+
+async def test_feature_usage_defaults_to_zero_for_every_key_with_no_activity(client, tenant_a):
+    token = await _platform_login(client)
+    resp = await client.get("/api/v1/platform/tenants-usage", headers={"Authorization": f"Bearer {token}"})
+    item = next(i for i in resp.json() if i["tenant_id"] == tenant_a)
+    # Todas as 6 chaves sempre presentes, mesmo zeradas — o frontend soma
+    # esta mesma estrutura entre tenants para o ranking da plataforma, uma
+    # chave ausente quebraria essa soma agregada.
+    assert item["feature_usage_last_30d"] == {
+        "pacientes": 0,
+        "agenda": 0,
+        "faturamento": 0,
+        "recurso_de_glosa": 0,
+        "contratos": 0,
+        "usuarios": 0,
+    }
+
+
 async def test_active_users_count_reflects_only_active_users(client, admin_engine, tenant_a, owner_a):
     from tests.conftest import _insert_user
 
@@ -185,3 +276,36 @@ async def test_active_users_count_reflects_only_active_users(client, admin_engin
     item = next(i for i in resp.json() if i["tenant_id"] == tenant_a)
     # owner_a + segundo (ambos ativos) = 2; o desativado não conta.
     assert item["active_users"] == 2
+
+
+# =====================================================================
+# GET /platform/audit-log — "histórico de quem fez o quê"
+# (ver DECISÃO em app/sql/029_platform_users.sql).
+# =====================================================================
+
+
+async def test_audit_log_requires_token(client):
+    resp = await client.get("/api/v1/platform/audit-log")
+    assert resp.status_code == 401
+
+
+async def test_audit_log_records_login_with_actor_email(client):
+    token = await _platform_login(client)
+
+    resp = await client.get("/api/v1/platform/audit-log", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    entries = resp.json()
+    assert len(entries) == 1
+    assert entries[0]["action"] == "login"
+    assert entries[0]["actor_email"] == _EMAIL
+
+
+async def test_audit_log_records_alerts_run_action(client):
+    token = await _platform_login(client)
+    await client.post("/api/v1/platform/alerts/run", headers={"Authorization": f"Bearer {token}"})
+
+    resp = await client.get("/api/v1/platform/audit-log", headers={"Authorization": f"Bearer {token}"})
+    actions = [e["action"] for e in resp.json()]
+    # "login" (deste teste) + "alerts_run" — mais recente primeiro.
+    assert actions[0] == "alerts_run"
+    assert "login" in actions

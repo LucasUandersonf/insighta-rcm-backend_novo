@@ -119,6 +119,9 @@ _SCHEMA_FILES = [
     "026_platform_customer_success.sql",
     "027_platform_risk_alerts.sql",
     "028_webhook_delivery_queue.sql",
+    "029_platform_users.sql",
+    "030_platform_feature_usage.sql",
+    "031_user_onboarding.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -321,6 +324,12 @@ async def clean_tables(_test_database, admin_engine):
                     core.professional_availability, core.professionals, core.api_keys, core.users, core.tenants,
                     core.announcement_reads, core.support_requests, core.webhook_subscriptions,
                     core.platform_risk_alerts, core.webhook_delivery_queue,
+                    -- platform_users/platform_audit_log são as OUTRAS
+                    -- tabelas sem tenant_id (mesma exceção de
+                    -- platform_announcements) — platform_audit_log tem
+                    -- FK para platform_users, então esta ordem importa
+                    -- (CASCADE cobre isso, mas listar os dois explicita).
+                    core.platform_audit_log, core.platform_users,
                     -- platform_announcements é a ÚNICA tabela sem tenant_id (ver
                     -- DECISÃO em app/sql/023_announcements_and_support.sql) — nunca
                     -- seria alcançada pelo CASCADE de truncar core.tenants acima

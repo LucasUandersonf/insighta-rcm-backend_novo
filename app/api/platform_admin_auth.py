@@ -18,16 +18,21 @@ fosse acessível por qualquer papel de clínica, cada cliente enxergaria o
 quanto os OUTROS clientes usam o produto — vazamento de informação
 comercial grave. Por isso este módulo não estende `get_current_user`;
 é um credencial e um fluxo à parte, com seu próprio JWT (ver
-`create_platform_admin_token` em app/core/security.py) que carrega só a
-claim `scope`, nunca `tenant_id`/`role`.
+`create_platform_admin_token` em app/core/security.py) que carrega
+`sub` (id de core.platform_users) + a claim `scope`, nunca `tenant_id`/
+`role`.
 
-Autenticação por SENHA ÚNICA compartilhada (não por usuário/senha
-individual) é uma escolha deliberada de escopo para a v1: hoje a equipe
-Insighta é pequena, e criar uma tabela de "usuários da plataforma" com
-CRUD, RBAC próprio etc. seria a obra da opção "login próprio da equipe"
-que foi avaliada e adiada nesta rodada (ver conversa que motivou esta
-frente) — evolução natural se a equipe/uso interno crescer.
+DECISÃO — login individual (core.platform_users), não mais senha única
+compartilhada
+-------------------------------------------------------------------------
+A v1 deste painel usava uma senha única compartilhada — escolha
+deliberada de escopo para uma equipe pequena. Com mais de uma ação real
+acontecendo aqui (ver POST /platform/alerts/run), passou a fazer sentido
+saber QUEM fez o quê — core.platform_audit_log guarda isso. Sem RBAC
+próprio ainda (todo platform_user pode tudo — ver DECISÃO em
+app/sql/029_platform_users.sql): evolução natural se o time crescer.
 """
+import uuid
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, status
@@ -47,13 +52,24 @@ _INVALID_TOKEN_ERROR = HTTPException(
 )
 
 
-def get_platform_admin(token: Annotated[str, Depends(oauth2_scheme_platform)]) -> None:
+class PlatformAdminIdentity:
+    """Equivalente a CurrentUser (app/api/deps.py) para o painel interno
+    — carrega só o id de core.platform_users, extraído de `sub`. Não tem
+    tenant_id/role porque não existe tenant nem papel nesta sessão."""
+
+    def __init__(self, platform_user_id: uuid.UUID):
+        self.platform_user_id = platform_user_id
+
+
+def get_platform_admin(token: Annotated[str, Depends(oauth2_scheme_platform)]) -> PlatformAdminIdentity:
     """
     Dependency de rota para todo endpoint de /platform (exceto o próprio
-    /platform/login). Não devolve um "usuário" — não existe um; só valida
-    que o token é um JWT genuíno, não expirado, com `scope == "platform_admin"`.
-    Rejeita explicitamente um JWT de usuário de clínica que por acaso
-    chegue aqui (teria `scope` ausente, nunca "platform_admin").
+    /platform/login). Valida que o token é um JWT genuíno, não expirado,
+    com `scope == "platform_admin"` — rejeita explicitamente um JWT de
+    usuário de clínica que por acaso chegue aqui (teria `scope` ausente,
+    nunca "platform_admin") — e devolve a identidade de quem está
+    chamando, para os endpoints que precisam registrar QUEM fez uma ação
+    (ver POST /platform/alerts/run).
     """
     try:
         payload: dict[str, Any] = decode_access_token(token)
@@ -63,5 +79,12 @@ def get_platform_admin(token: Annotated[str, Depends(oauth2_scheme_platform)]) -
     if payload.get("scope") != "platform_admin":
         raise _INVALID_TOKEN_ERROR
 
+    try:
+        platform_user_id = uuid.UUID(payload["sub"])
+    except (KeyError, ValueError) as exc:
+        raise _INVALID_TOKEN_ERROR from exc
 
-PlatformAdminDep = Depends(get_platform_admin)
+    return PlatformAdminIdentity(platform_user_id=platform_user_id)
+
+
+PlatformAdminDep = Annotated[PlatformAdminIdentity, Depends(get_platform_admin)]

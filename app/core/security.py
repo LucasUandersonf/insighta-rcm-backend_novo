@@ -103,20 +103,22 @@ def create_access_token(*, user_id: str, tenant_id: str, role: str) -> str:
 _PLATFORM_ADMIN_TOKEN_EXPIRE_MINUTES = 240
 
 
-def create_platform_admin_token() -> str:
+def create_platform_admin_token(platform_user_id: str) -> str:
     """
     JWT do painel interno de Customer Success — MESMA chave/algoritmo do
-    JWT de usuário (settings.JWT_SECRET_KEY), mas SEM `sub`/`tenant_id`/
-    `role`: não existe usuário nem tenant nesta sessão, só a claim
-    `scope`, que app/api/platform_admin_auth.py exige bater com
-    "platform_admin" antes de aceitar o token em qualquer endpoint de
-    /platform. Isso também impede, por construção, que este token seja
-    aceito por engano em qualquer endpoint de negócio normal — CurrentUser
+    JWT de usuário (settings.JWT_SECRET_KEY), mas SEM `tenant_id`/`role`:
+    não existe tenant nesta sessão. Carrega `sub` (id de core.platform_users
+    — ver app/sql/029_platform_users.sql) + a claim `scope`, que
+    app/api/platform_admin_auth.py exige bater com "platform_admin" antes
+    de aceitar o token em qualquer endpoint de /platform. A ausência de
+    `tenant_id` também impede, por construção, que este token seja aceito
+    por engano em qualquer endpoint de negócio normal — CurrentUser
     (app/api/deps.py) exige `payload["tenant_id"]`, que este token nunca
     carrega.
     """
     expire = datetime.now(timezone.utc) + timedelta(minutes=_PLATFORM_ADMIN_TOKEN_EXPIRE_MINUTES)
     payload: dict[str, Any] = {
+        "sub": platform_user_id,
         "scope": "platform_admin",
         "exp": expire,
         "iat": datetime.now(timezone.utc),

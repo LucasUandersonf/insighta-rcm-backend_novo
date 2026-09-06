@@ -8,9 +8,11 @@ from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 from app.services.no_show_risk_engine import resolve_thresholds
+from app.services.webhook_dispatch_service import dispatch_event
 
 
 class AppointmentService:
@@ -21,12 +23,22 @@ class AppointmentService:
         professional_repo: ProfessionalRepository,
         local_repo: LocalRepository,
         tenant_repo: TenantRepository,
+        webhook_repo: WebhookSubscriptionRepository | None = None,
     ):
         self.appointment_repo = appointment_repo
         self.patient_repo = patient_repo
         self.professional_repo = professional_repo
         self.local_repo = local_repo
         self.tenant_repo = tenant_repo
+        # Opcional (default None) — mesmo critério de BillingService.webhook_repo:
+        # recurso opt-in do tenant, não obrigatório como audit_repo em
+        # outros services. Só usado aqui via POST /appointments (criação
+        # manual, um registro por vez) — DE PROPÓSITO não ligado ao path
+        # de ingestão em lote da Agenda (normalization_service.py): um
+        # arquivo com centenas de linhas geraria dezenas de chamadas HTTP
+        # síncronas durante o upload, arriscando travar um caminho crítico
+        # já bem testado. Ver DECISÃO completa em webhook_dispatch_service.py.
+        self.webhook_repo = webhook_repo
 
     async def create_appointment(self, tenant_id: str, created_by: str, data: AppointmentCreateRequest) -> AppointmentResponse:
         # Validação de integridade de negócio (além do FK do banco): o
@@ -87,6 +99,25 @@ class AppointmentService:
         appointment.no_show_risk_score = risk.score
 
         saved = await self.appointment_repo.add(appointment)
+
+        # Terceiro evento ligado ao motor de webhooks (ver DECISÃO em
+        # webhook_dispatch_service.py) — só dispara no nível "alto", não
+        # em todo agendamento criado: o cliente quer ser avisado do que
+        # precisa de ação (ligar para confirmar), não de cada consulta
+        # marcada. Nunca carrega nome de paciente/CID — só ids e o
+        # próprio nível/score de risco, já calculados acima.
+        if risk.risk_level == "alto" and self.webhook_repo is not None:
+            await dispatch_event(
+                self.webhook_repo,
+                event_type="no_show_risk.high",
+                payload={
+                    "appointment_id": saved.id,
+                    "patient_id": saved.patient_id,
+                    "scheduled_at": saved.scheduled_at,
+                    "no_show_risk_score": risk.score,
+                },
+            )
+
         return AppointmentResponse.model_validate(saved)
 
     async def list_by_patient(self, patient_id: uuid.UUID) -> list[AppointmentResponse]:

@@ -5,6 +5,7 @@ chama uma função SQL SECURITY DEFINER via `text()` a partir de uma sessão
 SEM tenant (`get_db_no_tenant()`), porque este relatório é, de propósito,
 cross-tenant (ver DECISÃO completa em app/sql/026_platform_customer_success.sql).
 """
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,7 @@ class TenantUsageRow:
     patients_total: int
     appointments_last_30d: int
     billings_last_30d: int
+    feature_usage_last_30d: dict[str, int]
 
 
 class PlatformReportingRepository:
@@ -33,10 +35,15 @@ class PlatformReportingRepository:
         self.session = session
 
     async def list_tenant_usage(self) -> list[TenantUsageRow]:
+        # feature_usage_last_30d::text + json.loads em Python, em vez de
+        # confiar no decode automático de JSONB do driver — explícito e
+        # sem depender de comportamento implícito do dialect com text()
+        # bruto (diferente de uma coluna ORM tipada, onde o SQLAlchemy já
+        # sabe o tipo de antemão).
         stmt = text(
             "SELECT tenant_id, trade_name, plan_tier, tenant_is_active, tenant_created_at, "
             "active_users, last_activity_at, events_last_30d, patients_total, "
-            "appointments_last_30d, billings_last_30d "
+            "appointments_last_30d, billings_last_30d, feature_usage_last_30d::text AS feature_usage_last_30d "
             "FROM core.platform_tenant_usage_summary()"
         )
         result = await self.session.execute(stmt)
@@ -53,6 +60,7 @@ class PlatformReportingRepository:
                 patients_total=row.patients_total,
                 appointments_last_30d=row.appointments_last_30d,
                 billings_last_30d=row.billings_last_30d,
+                feature_usage_last_30d=json.loads(row.feature_usage_last_30d),
             )
             for row in result.all()
         ]
