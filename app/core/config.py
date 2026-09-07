@@ -60,7 +60,23 @@ class Settings(BaseSettings):
     # todas as chamadas HTTP compartilham o mesmo "IP" simulado (cliente
     # ASGI em processo), então um valor fixo baixo estourava o limite já
     # nos primeiros testes. Em produção, o padrão continua restritivo.
-    LOGIN_RATE_LIMIT: str = "5/minute"
+    #
+    # DECISÃO — 5/minuto -> 20/minuto (achado do teste de carga, item 9
+    # do "Caminho para produção")
+    # -------------------------------------------------------------------
+    # O limite é POR IP (`key_func=get_remote_address`, ver
+    # app/core/rate_limit.py) — e uma clínica inteira normalmente sai
+    # para a internet pelo mesmo IP público (NAT do roteador). Com
+    # 5/minuto, um teste de carga simulando 8 funcionários entrando no
+    # sistema perto do mesmo horário (cenário real: início de turno)
+    # bloqueou 3 deles com 429 por até 1 minuto. 20/minuto absorve esse
+    # uso legítimo concentrado sem abrir a porta pra força bruta de
+    # verdade: ainda é ~96x mais lento que sem limite nenhum, e continua
+    # empilhado sobre o hash argon2 (caro por tentativa) e a mensagem de
+    # erro idêntica pra e-mail inexistente/senha errada (nunca revela
+    # qual dos dois) — a defesa contra força bruta nunca dependeu só
+    # deste número.
+    LOGIN_RATE_LIMIT: str = "20/minute"
     # Mesma proteção contra abuso, aplicada aos dois novos endpoints
     # públicos (self-signup e recuperação de senha) — sem isso, os dois
     # seriam um vetor óbvio de spam (criar tenants em massa) ou de
