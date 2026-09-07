@@ -1075,6 +1075,65 @@ Dois achados reais de uma auditoria (não suposição):
   — em produção com tráfego concorrente real, considerar PgBouncer ou
   RDS Proxy antes de simplesmente aumentar o pool da aplicação.
 
+## Teste de carga (`scripts/load_test.py`)
+Item 9 do "Caminho para produção" (Fase 3) — os testes de integração
+provam CORREÇÃO (uma requisição de cada vez); isto mede DESEMPENHO sob
+tráfego CONCORRENTE real, contra uma instância de verdade da aplicação
+com dado semeado por `scripts/seed_demo_data.py`. Não roda no CI (é uma
+medição, não um gate de correção) — é para rodar manualmente antes de
+uma decisão de capacidade (aumentar o número de clínicas, dimensionar o
+plano do Postgres, etc.).
+
+```bash
+# 1. Suba a aplicação localmente (mesmo entrypoint de produção)
+export DATABASE_ADMIN_URL="postgresql://postgres:postgres@localhost:5432/algum_banco_vazio"
+export APP_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export JWT_SECRET_KEY="qualquer-valor-para-este-teste"
+export PORT=8010
+python -m app.scripts.entrypoint &
+
+# 2. Semeie um tenant com dado realista (anote o e-mail/senha impressos)
+python -m scripts.seed_demo_data --base-url http://127.0.0.1:8010 \
+    --admin-dsn postgresql://postgres:postgres@127.0.0.1:5432/algum_banco_vazio \
+    --patients 150 --history-days 120
+
+# 3. Rode a carga
+python -m scripts.load_test --base-url http://127.0.0.1:8010 \
+    --email <impresso no passo 2> --password <impresso no passo 2> \
+    --concurrency 8 --duration 60 --pace human
+```
+
+### Resultado da rodada de referência (07/09/2026)
+Três cenários, mesma instância local (`pool_size=10`, `DB_MAX_OVERFLOW=5`
+— os valores padrão de produção documentados acima em "Performance"):
+
+| Cenário | Config | Resultado |
+|---|---|---|
+| **Uso normal de clínica** — 8 usuários virtuais, ritmo humano (1.5-4s entre ações), 60s, limites de taxa PADRÃO de produção | `RATE_LIMIT_DEFAULT`/`LOGIN_RATE_LIMIT` de produção | Todos os endpoints de leitura: **0 erro**, p99 abaixo de 150ms. `/auth/login` especificamente: **3 de 8 logins bloqueados com 429** — ver achado abaixo. |
+| **Estresse 2x** — 30 usuários virtuais, sem pausa entre ações, 30s | Rate limit elevado (isola o teste do banco/pool, não do rate limit) | **0 erro**, mas latência sobe bastante: p50 ~500-1000ms, p99 até ~1.6s. O pool (15 conexões no total com overflow) já está no limite aqui. |
+| **Estresse extremo** — 80 usuários virtuais, sem pausa, 20s (~5x a capacidade do pool) | Rate limit elevado | Ainda **0 erro, 0 erro 5xx, 0 falha de conexão** — a aplicação enfileira e degrada em latência (p99 de alguns segundos, até ~11s em login) em vez de cair ou devolver erro. |
+
+**Leitura dos resultados:**
+1. **Boa notícia, verificada de verdade:** o pool de conexões dimensionado
+   para desenvolvimento (`pool_size=10`) não quebra sob concorrência alta
+   — o SQLAlchemy enfileira a requisição esperando uma conexão livre em
+   vez de derrubar a aplicação. Uma clínica sozinha, mesmo com uso
+   concorrente pesado, não corre risco de erro 500 por esgotamento do
+   pool — só de ficar mais lenta. Vale reavaliar o tamanho do pool (ou
+   PgBouncer, como já cogitado acima) quando o número de CLÍNICAS
+   simultâneas crescer, não antes disso ser um problema real.
+2. **Achado real, não cogitado antes:** `LOGIN_RATE_LIMIT` (5/minuto,
+   por IP — `key_func=get_remote_address`) é POR IP, e uma clínica
+   inteira normalmente sai para a internet pelo mesmo IP público (NAT do
+   roteador). No cenário de ritmo humano (o mais realista dos três),
+   3 de 8 tentativas de login dentro do mesmo minuto foram bloqueadas
+   com 429 — um cenário plausível (equipe toda chegando pro turno e
+   entrando no sistema perto do mesmo horário) bloquearia parte da
+   equipe por até 1 minuto. Isso é uma decisão de produto/segurança
+   (relaxar o limite reduz a proteção contra força bruta de senha), não
+   só técnica — registrado aqui para decisão explícita, não corrigido
+   nesta rodada.
+
 ## Rodando os testes de integração
 A pasta `tests/integration/` cobre a aplicação de ponta a ponta via HTTP
 (login, RLS entre tenants, RBAC, motor de glosa, capacidade, risco de
