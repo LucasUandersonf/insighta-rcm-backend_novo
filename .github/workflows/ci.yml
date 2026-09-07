@@ -101,3 +101,57 @@ jobs:
             --ignore-vuln PYSEC-2026-3610 --ignore-vuln PYSEC-2026-3611 --ignore-vuln PYSEC-2026-3612 --ignore-vuln PYSEC-2026-3613 \
             --ignore-vuln PYSEC-2026-3655 --ignore-vuln PYSEC-2026-3656 --ignore-vuln GHSA-jm82-fx9c-mx94 \
             --ignore-vuln CVE-2026-84309 --ignore-vuln CVE-2026-84310 --ignore-vuln CVE-2026-84311 --ignore-vuln CVE-2026-82398
+
+  # Achado do Laudo de Vistoria Técnica / item 3 do "Caminho para produção":
+  # "o cenário de banco de produção criado do ZERO nunca foi testado" — os
+  # testes de integração acima usam de propósito um atalho síncrono
+  # (tests/conftest.py aplica SQL bruto direto, sem passar pelo Alembic de
+  # verdade) para ficarem rápidos. Isso deixa cego exatamente o caminho que
+  # roda sozinho no primeiro deploy de um ambiente novo:
+  # app/scripts/bootstrap_db.py::bootstrap() (chamado por entrypoint.py).
+  # Job SEPARADO, com um Postgres NOVO e vazio só dele (nunca o mesmo
+  # container do job "test" acima) — garante que não sobra nenhum estado de
+  # uma execução anterior disfarçando um bootstrap que na verdade não
+  # funciona do zero.
+  bootstrap-from-zero:
+    name: Bootstrap de produção contra banco vazio
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # Roda EXATAMENTE o mesmo bootstrap que o Railway roda no primeiro
+      # deploy de um serviço novo (mesma função, mesmas duas variáveis de
+      # ambiente) e, no final, confirma que a aplicação consegue de fato
+      # logar como app_runtime e ler dado — não só que o script "não deu
+      # erro". Ver app/scripts/verify_bootstrap_from_zero.py.
+      - name: Rodar bootstrap real contra banco recém-criado
+        env:
+          DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          APP_RUNTIME_PASSWORD: ci-bootstrap-from-zero-check-only
+          JWT_SECRET_KEY: chave-de-teste-nao-usar-em-producao
+        run: python -m app.scripts.verify_bootstrap_from_zero

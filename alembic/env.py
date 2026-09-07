@@ -43,8 +43,20 @@ import app.models  # noqa: F401  (import necessário só pelo efeito colateral d
 
 config = context.config
 
+# disable_existing_loggers=False é OBRIGATÓRIO aqui — o comportamento
+# PADRÃO do fileConfig (True) desativa qualquer logger Python já criado
+# antes desta chamada que não esteja listado em alembic.ini. Como o
+# script de bootstrap (app/scripts/bootstrap_db.py) cria seu logger no
+# import, ANTES de chamar `alembic.command.upgrade(...)` (que é quem
+# importa este arquivo), o comportamento padrão SILENCIAVA para sempre
+# todo `logger.info(...)` chamado depois do upgrade — inclusive a
+# criação das roles de produção e a mensagem final de sucesso. Bug real,
+# achado rodando o bootstrap de verdade contra um banco vazio (item 3 do
+# "Caminho para produção"): o processo funcionava, mas ficava mudo nos
+# logs do Railway a partir daqui em diante — só um traceback bruto
+# apareceria se algo quebrasse.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Injeta a URL vinda do .env da aplicação na config do Alembic em
 # tempo de execução, em vez de deixar alembic.ini com a URL fixa.
