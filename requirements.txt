@@ -9,6 +9,13 @@ python-jose[cryptography]==3.5.0
 passlib[argon2]==1.7.4
 alembic==1.13.2
 slowapi==0.1.9
+# Cliente Redis — necessário para RATE_LIMIT_STORAGE_URI=redis://... (ver
+# DECISÃO em app/core/rate_limit.py). Sem isto, a variável de ambiente já
+# existia e era aceita pela configuração, mas setá-la quebraria a aplicação
+# na hora de montar o Limiter (ImportError) — nunca tinha sido testado de
+# verdade com mais de uma instância em mente. Achado durante a vistoria de
+# arquitetura (item de redundância/Fase 3).
+redis==5.2.1
 python-multipart==0.0.32
 
 psycopg2-binary

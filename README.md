@@ -1068,9 +1068,21 @@ Dois achados reais de uma auditoria (não suposição):
   em lote, agrupada em Python).
 - **Rate limiting em memória não escala para múltiplas instâncias** —
   cada instância teria seu próprio contador. `RATE_LIMIT_STORAGE_URI`
-  (ex: Redis) resolve isso quando houver mais de uma instância atrás de
-  um load balancer — hoje é `None` (memória), suficiente para instância
-  única.
+  (ex: `redis://...`) resolve isso quando houver mais de uma instância
+  atrás de um load balancer — hoje é `None` (memória), suficiente para
+  instância única. **Achado da vistoria de arquitetura (item de
+  redundância/Fase 3):** a variável já existia e já era aceita pela
+  configuração, mas o cliente Redis (`redis`, biblioteca Python) nunca
+  tinha sido instalado — setar essa variável em produção quebraria a
+  aplicação na hora de montar o limitador (`ImportError`), sem nenhum
+  aviso prévio disso no código. Corrigido: dependência adicionada e
+  testada de verdade contra um Redis real, inclusive simulando DUAS
+  instâncias da aplicação (dois objetos de conexão separados, mesmo
+  Redis) para confirmar que o limite é respeitado corretamente MESMO
+  alternando qual "instância" atende cada requisição — a garantia real
+  que múltiplas réplicas vão precisar, não só "o import não quebra mais".
+  Ligar isso ainda depende de provisionar um Redis de verdade no Railway
+  (decisão de infraestrutura/custo) — o código não é mais o que falta.
 - **Connection pool dimensionado para desenvolvimento** (`pool_size=10`)
   — em produção com tráfego concorrente real, considerar PgBouncer ou
   RDS Proxy antes de simplesmente aumentar o pool da aplicação.
