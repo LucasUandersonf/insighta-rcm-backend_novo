@@ -55,3 +55,88 @@ jobs:
         env:
           TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/ -v
+
+      # Achado do Laudo de Vistoria Técnica (parecer Backend, ressalva):
+      # "Nenhuma das ~39 bibliotecas de terceiro foi verificada contra
+      # falhas de segurança conhecidas." pip-audit roda contra o
+      # requirements.txt real a cada push/PR a partir de agora.
+      #
+      # DECISÃO — suprime por ID de vulnerabilidade específico, nunca por
+      # nome de pacote inteiro
+      # -------------------------------------------------------------------
+      # pypdf (39 IDs, usada no Parser de Contratos) saiu desta lista nesta
+      # rodada: bump 5.0.1 -> 6.17.0 testado contra o teste de
+      # reconciliação fim a fim (PDF real gerado com reportlab, extraído
+      # de verdade via pypdf) — 0 vulnerabilidades conhecidas na versão
+      # nova. python-jose e python-multipart já tinham sido atualizados na
+      # rodada anterior. O que sobra abaixo é só o que genuinamente não
+      # tem correção disponível ainda:
+      #
+      #   pytest (1 ID) — só roda em teste, nunca em produção.
+      #   starlette (7 IDs) — versão travada pelo range de dependência do
+      #     FastAPI 0.115.0; precisa checar compatibilidade antes de
+      #     forçar um bump manual.
+      #   ecdsa (1 ID) — o próprio mantenedor do pacote declara que não
+      #     vai corrigir (ataque de timing na implementação pura-Python)
+      #     — não existe versão corrigida para apontar.
+      - name: Verificar vulnerabilidades conhecidas nas dependências
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt \
+            --ignore-vuln PYSEC-2026-1845 --ignore-vuln PYSEC-2026-1325 \
+            --ignore-vuln PYSEC-2026-161 --ignore-vuln PYSEC-2026-248 --ignore-vuln PYSEC-2026-249 \
+            --ignore-vuln PYSEC-2026-1941 --ignore-vuln PYSEC-2026-1943 --ignore-vuln PYSEC-2026-2280 --ignore-vuln PYSEC-2026-2281
+
+  # Achado do Laudo de Vistoria Técnica / item 3 do "Caminho para produção":
+  # "o cenário de banco de produção criado do ZERO nunca foi testado" — os
+  # testes de integração acima usam de propósito um atalho síncrono
+  # (tests/conftest.py aplica SQL bruto direto, sem passar pelo Alembic de
+  # verdade) para ficarem rápidos. Isso deixa cego exatamente o caminho que
+  # roda sozinho no primeiro deploy de um ambiente novo:
+  # app/scripts/bootstrap_db.py::bootstrap() (chamado por entrypoint.py).
+  # Job SEPARADO, com um Postgres NOVO e vazio só dele (nunca o mesmo
+  # container do job "test" acima) — garante que não sobra nenhum estado de
+  # uma execução anterior disfarçando um bootstrap que na verdade não
+  # funciona do zero.
+  bootstrap-from-zero:
+    name: Bootstrap de produção contra banco vazio
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # Roda EXATAMENTE o mesmo bootstrap que o Railway roda no primeiro
+      # deploy de um serviço novo (mesma função, mesmas duas variáveis de
+      # ambiente) e, no final, confirma que a aplicação consegue de fato
+      # logar como app_runtime e ler dado — não só que o script "não deu
+      # erro". Ver app/scripts/verify_bootstrap_from_zero.py.
+      - name: Rodar bootstrap real contra banco recém-criado
+        env:
+          DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          APP_RUNTIME_PASSWORD: ci-bootstrap-from-zero-check-only
+          JWT_SECRET_KEY: chave-de-teste-nao-usar-em-producao
+        run: python -m app.scripts.verify_bootstrap_from_zero
