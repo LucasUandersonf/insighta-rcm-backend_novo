@@ -1,0 +1,57 @@
+name: CI
+
+# Achado do Laudo de Vistoria Técnica (parecer DevOps/SRE, bloqueador):
+# "não existe nenhuma automação rodando os 411 testes a cada mudança de
+# código — nada IMPEDE um código quebrado de ir para produção." Este
+# workflow fecha esse ponto — e o gatilho `push` em `main` abaixo é
+# EXIGÊNCIA do próprio Railway para o toggle "Wait for CI" (ver
+# https://docs.railway.com/deployments/github-autodeploys#wait-for-ci):
+# sem essa combinação exata de evento/branch, a opção nem aparece nas
+# configurações do serviço.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Testes de integração (Postgres real)
+    runs-on: ubuntu-latest
+
+    # Postgres de verdade, não simulado — mesma exigência de
+    # tests/conftest.py (RLS só é uma garantia real se testado contra o
+    # motor de banco de verdade, não um mock).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Rodar suíte completa (unitários + integração)
+        env:
+          TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/ -v
