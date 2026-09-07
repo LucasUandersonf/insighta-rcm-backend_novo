@@ -55,3 +55,49 @@ jobs:
         env:
           TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/ -v
+
+      # Achado do Laudo de Vistoria Técnica (parecer Backend, ressalva):
+      # "Nenhuma das ~39 bibliotecas de terceiro foi verificada contra
+      # falhas de segurança conhecidas." pip-audit roda contra o
+      # requirements.txt real a cada push/PR a partir de agora.
+      #
+      # DECISÃO — suprime por ID de vulnerabilidade específico, nunca por
+      # nome de pacote inteiro
+      # -------------------------------------------------------------------
+      # As duas bibliotecas de PRODUÇÃO mais expostas (python-jose,
+      # python-multipart) já foram atualizadas nesta mesma rodada — os
+      # IDs abaixo são o que sobrou, cada um com um motivo concreto para
+      # não subir de versão JÁ (não "ignorado para sempre"). Como a
+      # supressão é por ID exato, um CVE NOVO contra qualquer um destes
+      # mesmos pacotes ainda quebra o CI normalmente.
+      #
+      #   pytest (1 ID) — só roda em teste, nunca em produção.
+      #   pypdf (39 IDs) — usada no Parser de Contratos (IA), que lê PDF
+      #     enviado pelo usuário; PRIORIDADE real, não esquecida — mas o
+      #     conserto é um bump de versão MAIOR (5.x -> 6.x) que exige
+      #     testar a extração de PDF de verdade antes de subir, não algo
+      #     pra rodar às pressas junto de um scan automático.
+      #   starlette (7 IDs) — versão travada pelo range de dependência do
+      #     FastAPI 0.115.0; precisa checar compatibilidade antes de
+      #     forçar um bump manual.
+      #   ecdsa (1 ID) — o próprio mantenedor do pacote declara que não
+      #     vai corrigir (ataque de timing na implementação pura-Python)
+      #     — não existe versão corrigida para apontar.
+      - name: Verificar vulnerabilidades conhecidas nas dependências
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt \
+            --ignore-vuln PYSEC-2026-1845 --ignore-vuln PYSEC-2026-1325 \
+            --ignore-vuln PYSEC-2026-161 --ignore-vuln PYSEC-2026-248 --ignore-vuln PYSEC-2026-249 \
+            --ignore-vuln PYSEC-2026-1941 --ignore-vuln PYSEC-2026-1943 --ignore-vuln PYSEC-2026-2280 --ignore-vuln PYSEC-2026-2281 \
+            --ignore-vuln PYSEC-2026-1827 --ignore-vuln PYSEC-2026-1828 --ignore-vuln PYSEC-2026-1829 --ignore-vuln PYSEC-2026-1830 \
+            --ignore-vuln PYSEC-2026-1831 --ignore-vuln PYSEC-2026-1832 --ignore-vuln PYSEC-2026-1833 \
+            --ignore-vuln PYSEC-2026-3004 --ignore-vuln PYSEC-2026-3005 --ignore-vuln PYSEC-2026-3006 --ignore-vuln PYSEC-2026-3007 \
+            --ignore-vuln PYSEC-2026-3009 --ignore-vuln PYSEC-2026-3010 --ignore-vuln PYSEC-2026-3011 --ignore-vuln PYSEC-2026-3012 \
+            --ignore-vuln PYSEC-2026-3013 --ignore-vuln PYSEC-2026-3014 --ignore-vuln PYSEC-2026-3015 --ignore-vuln PYSEC-2026-3016 \
+            --ignore-vuln PYSEC-2026-3017 --ignore-vuln PYSEC-2026-3018 --ignore-vuln PYSEC-2026-3019 --ignore-vuln PYSEC-2026-3020 \
+            --ignore-vuln PYSEC-2026-3021 --ignore-vuln PYSEC-2026-3022 --ignore-vuln PYSEC-2026-3023 --ignore-vuln PYSEC-2026-3024 \
+            --ignore-vuln PYSEC-2026-3025 --ignore-vuln PYSEC-2026-3026 --ignore-vuln PYSEC-2026-3027 \
+            --ignore-vuln PYSEC-2026-3610 --ignore-vuln PYSEC-2026-3611 --ignore-vuln PYSEC-2026-3612 --ignore-vuln PYSEC-2026-3613 \
+            --ignore-vuln PYSEC-2026-3655 --ignore-vuln PYSEC-2026-3656 --ignore-vuln GHSA-jm82-fx9c-mx94 \
+            --ignore-vuln CVE-2026-84309 --ignore-vuln CVE-2026-84310 --ignore-vuln CVE-2026-84311 --ignore-vuln CVE-2026-82398
