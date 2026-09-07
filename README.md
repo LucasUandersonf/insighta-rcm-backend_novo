@@ -1068,9 +1068,21 @@ Dois achados reais de uma auditoria (não suposição):
   em lote, agrupada em Python).
 - **Rate limiting em memória não escala para múltiplas instâncias** —
   cada instância teria seu próprio contador. `RATE_LIMIT_STORAGE_URI`
-  (ex: Redis) resolve isso quando houver mais de uma instância atrás de
-  um load balancer — hoje é `None` (memória), suficiente para instância
-  única.
+  (ex: `redis://...`) resolve isso quando houver mais de uma instância
+  atrás de um load balancer — hoje é `None` (memória), suficiente para
+  instância única. **Achado da vistoria de arquitetura (item de
+  redundância/Fase 3):** a variável já existia e já era aceita pela
+  configuração, mas o cliente Redis (`redis`, biblioteca Python) nunca
+  tinha sido instalado — setar essa variável em produção quebraria a
+  aplicação na hora de montar o limitador (`ImportError`), sem nenhum
+  aviso prévio disso no código. Corrigido: dependência adicionada e
+  testada de verdade contra um Redis real, inclusive simulando DUAS
+  instâncias da aplicação (dois objetos de conexão separados, mesmo
+  Redis) para confirmar que o limite é respeitado corretamente MESMO
+  alternando qual "instância" atende cada requisição — a garantia real
+  que múltiplas réplicas vão precisar, não só "o import não quebra mais".
+  Ligar isso ainda depende de provisionar um Redis de verdade no Railway
+  (decisão de infraestrutura/custo) — o código não é mais o que falta.
 - **Connection pool dimensionado para desenvolvimento** (`pool_size=10`)
   — em produção com tráfego concorrente real, considerar PgBouncer ou
   RDS Proxy antes de simplesmente aumentar o pool da aplicação.
@@ -1109,7 +1121,7 @@ Três cenários, mesma instância local (`pool_size=10`, `DB_MAX_OVERFLOW=5`
 
 | Cenário | Config | Resultado |
 |---|---|---|
-| **Uso normal de clínica** — 8 usuários virtuais, ritmo humano (1.5-4s entre ações), 60s, limites de taxa PADRÃO de produção | `RATE_LIMIT_DEFAULT`/`LOGIN_RATE_LIMIT` de produção | Todos os endpoints de leitura: **0 erro**, p99 abaixo de 150ms. `/auth/login` especificamente: **3 de 8 logins bloqueados com 429** — ver achado abaixo. |
+| **Uso normal de clínica** — 8 usuários virtuais, ritmo humano (1.5-4s entre ações), 60s, limites de taxa PADRÃO de produção | `RATE_LIMIT_DEFAULT`/`LOGIN_RATE_LIMIT` de produção (na época, `LOGIN_RATE_LIMIT` ainda era 5/minuto) | Todos os endpoints de leitura: **0 erro**, p99 abaixo de 150ms. `/auth/login` especificamente: **3 de 8 logins bloqueados com 429** — ver achado abaixo (já corrigido). |
 | **Estresse 2x** — 30 usuários virtuais, sem pausa entre ações, 30s | Rate limit elevado (isola o teste do banco/pool, não do rate limit) | **0 erro**, mas latência sobe bastante: p50 ~500-1000ms, p99 até ~1.6s. O pool (15 conexões no total com overflow) já está no limite aqui. |
 | **Estresse extremo** — 80 usuários virtuais, sem pausa, 20s (~5x a capacidade do pool) | Rate limit elevado | Ainda **0 erro, 0 erro 5xx, 0 falha de conexão** — a aplicação enfileira e degrada em latência (p99 de alguns segundos, até ~11s em login) em vez de cair ou devolver erro. |
 
@@ -1122,17 +1134,19 @@ Três cenários, mesma instância local (`pool_size=10`, `DB_MAX_OVERFLOW=5`
    pool — só de ficar mais lenta. Vale reavaliar o tamanho do pool (ou
    PgBouncer, como já cogitado acima) quando o número de CLÍNICAS
    simultâneas crescer, não antes disso ser um problema real.
-2. **Achado real, não cogitado antes:** `LOGIN_RATE_LIMIT` (5/minuto,
-   por IP — `key_func=get_remote_address`) é POR IP, e uma clínica
-   inteira normalmente sai para a internet pelo mesmo IP público (NAT do
-   roteador). No cenário de ritmo humano (o mais realista dos três),
-   3 de 8 tentativas de login dentro do mesmo minuto foram bloqueadas
-   com 429 — um cenário plausível (equipe toda chegando pro turno e
-   entrando no sistema perto do mesmo horário) bloquearia parte da
-   equipe por até 1 minuto. Isso é uma decisão de produto/segurança
-   (relaxar o limite reduz a proteção contra força bruta de senha), não
-   só técnica — registrado aqui para decisão explícita, não corrigido
-   nesta rodada.
+2. **Achado real, corrigido e reconfirmado:** `LOGIN_RATE_LIMIT` (era
+   5/minuto, por IP — `key_func=get_remote_address`) é aplicado POR IP,
+   e uma clínica inteira normalmente sai para a internet pelo mesmo IP
+   público (NAT do roteador). No cenário de ritmo humano (o mais
+   realista dos três), 3 de 8 tentativas de login dentro do mesmo minuto
+   foram bloqueadas com 429 — um cenário plausível (equipe toda chegando
+   pro turno e entrando no sistema perto do mesmo horário) bloquearia
+   parte da equipe por até 1 minuto. Subido para **20/minuto**
+   (`app/core/config.py`) — ainda ~96x mais lento que sem limite nenhum,
+   e empilhado sobre o hash argon2 (caro por tentativa) e a mensagem de
+   erro idêntica pra e-mail inexistente/senha errada, então a defesa
+   contra força bruta nunca dependeu só deste número. Reconfirmado com o
+   MESMO cenário de carga após a mudança: **0 de 8 logins bloqueados**.
 
 ## Rodando os testes de integração
 A pasta `tests/integration/` cobre a aplicação de ponta a ponta via HTTP
