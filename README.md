@@ -375,6 +375,7 @@ o app sobe normalmente, e `POST /contracts/upload`/`/extract` devolvem
 | `CONTRACT_EXTRACTION_MODEL` | Modelo usado na extração — default `claude-sonnet-4-5`. |
 | `AWS_S3_APPEALS_BUCKET` | Bucket S3 para anexos de Recurso de Glosa (separado dos outros dois — ver DECISÃO em `app/sql/008_denial_appeals.sql`). Sem ele, `POST /denial-appeals/{id}/attachments` devolve 503; abrir/protocolar/resolver um recurso funciona normalmente sem anexo nenhum. |
 | `DEFAULT_APPEAL_DEADLINE_DAYS` | Fallback genérico (dias corridos) para o prazo de recurso quando a operadora ainda não tem `default_appeal_deadline_days` configurado — default `30`. **Não é uma norma da ANS**, é só para o campo nunca ficar em branco. |
+| `DATABASE_REQUIRE_SSL` | `true` para exigir canal criptografado (TLS) na conexão com o Postgres — ver seção "Canal criptografado até o banco" abaixo antes de ligar em produção. Default `false` (aceita o que a DSN já pedir, sem exigir). |
 
 E o `railway.toml` (já commitado) configura o comando de start:
 ```toml
@@ -406,6 +407,50 @@ Evoluções futuras de schema:
 alembic revision --autogenerate -m "adiciona coluna X em patients"
 alembic upgrade head
 ```
+
+### Cabeçalhos de segurança HTTP
+Achado da vistoria de Segurança: nenhum cabeçalho de segurança básico do
+navegador era enviado — não por decisão, nunca tinha sido olhado.
+Aplicados em toda resposta (ver `_apply_security_headers` em
+`app/main.py`), sem precisar de configuração nenhuma:
+
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Strict-Transport-Security` — só quando `ENVIRONMENT=production` **e**
+  a requisição realmente chegou por HTTPS (via `X-Forwarded-Proto`, o
+  cabeçalho que o proxy da Railway escreve — nunca a URL da própria
+  aplicação, que sempre vê `http` internamente).
+
+`Content-Security-Policy` foi deixado de fora de propósito: exige testar
+contra o bundle real do frontend (scripts inline, fontes, CDN) para não
+quebrar a aplicação — trabalho de uma rodada dedicada, não um ajuste às
+cegas junto dos outros quatro. Validado rodando a aplicação de verdade e
+conferindo os cabeçalhos da resposta com `curl -D -`.
+
+### Canal criptografado (TLS) até o banco de dados
+Achado da vistoria de Segurança: a aplicação nunca EXIGIA canal
+criptografado na conexão com o Postgres — só aceitava o que a `DATABASE_URL`
+já pedisse por baixo dos panos (o asyncpg negocia sozinho). Configurável
+via `DATABASE_REQUIRE_SSL=true` (default `false`, para nunca mudar
+comportamento de quem já está rodando sem confirmar antes).
+
+**Antes de ligar em produção:** confirme que o Postgres de destino aceita
+TLS (o Postgres gerenciado pela Railway usa a imagem `postgres-ssl` —
+já aceita). Testado localmente, de ponta a ponta, contra um Postgres com
+TLS de verdade (TLSv1.3, certificado autoassinado — o mesmo cenário de
+um Postgres gerenciado): bootstrap completo (schema + migrations +
+criação de roles) e a conexão de runtime como `app_runtime`, ambos
+confirmados usando TLS de verdade via
+`SELECT ssl, version FROM pg_stat_ssl` no próprio Postgres — não só "não
+deu erro".
+
+Usa `ssl=True` (equivalente a `sslmode=require` do libpq), nunca
+`ssl="verify-full"`: a maioria dos Postgres gerenciados usa certificado
+autoassinado ou emitido internamente, que falharia a verificação de
+cadeia contra uma CA pública — `ssl=True` ainda garante que o tráfego vai
+criptografado (ninguém no meio do caminho lê o conteúdo), só não valida
+quem assinou o certificado.
 
 ## Worker de ingestão (Etapa 1 do pipeline)
 Roda como processo/container separado da API, mesmo codebase:

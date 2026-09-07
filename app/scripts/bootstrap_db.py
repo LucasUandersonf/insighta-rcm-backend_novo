@@ -293,6 +293,20 @@ def _to_asyncpg_dsn(url: str) -> str:
     return url.replace("postgresql+asyncpg://", "postgresql://")
 
 
+# Mesma variável DATABASE_REQUIRE_SSL que app/db/session.py usa para a
+# conexão de runtime (ver DECISÃO lá sobre `ssl=True` vs `ssl="verify-full"`)
+# — lida direto do ambiente aqui, não via Settings, pelo mesmo motivo do
+# resto deste arquivo (Settings exige DATABASE_URL, que ainda não existe
+# neste ponto do bootstrap). Aplicada às conexões administrativas deste
+# script para que o bootstrap (que roda ANTES da aplicação, com privilégio
+# de superusuário) siga a mesma exigência de canal criptografado que a
+# aplicação passa a ter em runtime — sem isso, ligar só um dos dois lados
+# deixaria a outra metade do tráfego com o mesmo banco sem TLS.
+def _connect_kwargs() -> dict:
+    require_ssl = os.environ.get("DATABASE_REQUIRE_SSL", "").strip().lower() in ("1", "true", "yes")
+    return {"ssl": True} if require_ssl else {}
+
+
 def _build_runtime_dsn(admin_dsn: str, *, role: str, password: str) -> str:
     """Reaproveita host/porta/nome do banco da DSN admin, trocando só usuário/senha."""
     parts = urlsplit(_to_asyncpg_dsn(admin_dsn))
@@ -303,7 +317,7 @@ def _build_runtime_dsn(admin_dsn: str, *, role: str, password: str) -> str:
 
 
 async def _schema_core_exists(dsn: str) -> bool:
-    conn = await asyncpg.connect(dsn=dsn)
+    conn = await asyncpg.connect(dsn=dsn, **_connect_kwargs())
     try:
         row = await conn.fetchrow(
             "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'core')"
@@ -314,7 +328,7 @@ async def _schema_core_exists(dsn: str) -> bool:
 
 
 async def _table_exists(dsn: str, table_name: str) -> bool:
-    conn = await asyncpg.connect(dsn=dsn)
+    conn = await asyncpg.connect(dsn=dsn, **_connect_kwargs())
     try:
         row = await conn.fetchrow(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'core' AND table_name = $1)",
@@ -326,7 +340,7 @@ async def _table_exists(dsn: str, table_name: str) -> bool:
 
 
 async def _run_sql_files(dsn: str, filenames: list[str]) -> None:
-    conn = await asyncpg.connect(dsn=dsn)
+    conn = await asyncpg.connect(dsn=dsn, **_connect_kwargs())
     try:
         for filename in filenames:
             logger.info("Aplicando %s...", filename)
@@ -364,7 +378,7 @@ _POST_UPGRADE_MARKER_TABLE = {
 
 
 async def _run_post_upgrade_sql_files_idempotent(dsn: str, filenames: list[str]) -> None:
-    conn = await asyncpg.connect(dsn=dsn)
+    conn = await asyncpg.connect(dsn=dsn, **_connect_kwargs())
     try:
         for filename in filenames:
             marker = _POST_UPGRADE_MARKER_TABLE.get(filename)
@@ -383,7 +397,7 @@ async def _run_post_upgrade_sql_files_idempotent(dsn: str, filenames: list[str])
 
 
 async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
-    conn = await asyncpg.connect(dsn=admin_dsn)
+    conn = await asyncpg.connect(dsn=admin_dsn, **_connect_kwargs())
     try:
         app_runtime_exists = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime')")
         if not app_runtime_exists:
