@@ -5,7 +5,14 @@ Mesmo princípio de test_denial_risk_engine.py: o motor é puro (sem
 banco), então testamos passando dataclasses já montados na mão, em
 milissegundos, sem subir Postgres.
 """
-from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriodInput, generate_insights
+import pytest
+
+from app.services.smart_insights_engine import (
+    DenialReasonCount,
+    InsightsPeriodInput,
+    build_network_comparativo_insight,
+    generate_insights,
+)
 
 _EMPTY_PERIOD = InsightsPeriodInput(
     denial_reason_counts=[],
@@ -454,3 +461,46 @@ def test_professional_outlier_only_flags_the_worst_case():
 def test_professional_outlier_absent_without_denial_risk_pct():
     current = _minimal(denial_risk_pct=None, professional_denial_rates=[("Dr. X", 0.25, 8)])
     assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+# --- Comparativo entre clínicas (build_network_comparativo_insight) ---
+
+
+def test_network_comparativo_flagged_when_gap_above_threshold():
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de glosa", your_rate=0.092, network_median=0.051, total_billed=70_000.0
+    )
+    assert insight is not None
+    assert insight.severity == "comparativo"
+    assert insight.is_new is True
+    assert "está acima da rede" in insight.title
+    # impacto projetado = (0.092 - 0.051) * 70000 = 2870.0
+    assert insight.financial_impact == pytest.approx(2870.0)
+
+
+def test_network_comparativo_absent_when_gap_is_trivial():
+    # 5.1% vs 5.0% -> 0.1pp, bem abaixo do piso de 3pp — variação normal
+    # entre clínicas parecidas, não é "notícia".
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de glosa", your_rate=0.051, network_median=0.050, total_billed=70_000.0
+    )
+    assert insight is None
+
+
+def test_network_comparativo_absent_without_billing_in_period():
+    # Sem faturamento no período, a projeção em R$ não tem base — None,
+    # nunca um card com impacto R$ 0,00 inventado.
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de glosa", your_rate=0.092, network_median=0.051, total_billed=0.0
+    )
+    assert insight is None
+
+
+def test_network_comparativo_enters_generate_insights_via_extra_insights():
+    comparativo = build_network_comparativo_insight(
+        metric_label="Taxa de glosa", your_rate=0.30, network_median=0.05, total_billed=100_000.0
+    )
+    assert comparativo is not None
+    insights = generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD, extra_insights=[comparativo])
+    assert len(insights) == 1
+    assert insights[0].severity == "comparativo"

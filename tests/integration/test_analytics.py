@@ -677,3 +677,53 @@ async def test_smart_insights_flags_professional_outlier(client, auth_headers_a,
     titles = [i["title"] for i in response.json()["insights"]]
     assert any("Dr. Radar" in t and "fora do padrão" in t for t in titles)
     assert not any("Dra. Normal" in t for t in titles)
+
+
+async def test_smart_insights_flags_network_comparativo_when_gap_is_large(client, auth_headers_a, admin_engine, tenant_a):
+    """Comparativo entre clínicas como manchete do feed — ponta a ponta
+    (Sala de Comando 2.0, Nível 1): tenant A com taxa de risco alto muito
+    acima da mediana de outras 5 clínicas ativas deveria virar insight
+    "comparativo", com impacto em R$ projetado sobre o faturamento do
+    próprio período (nunca 0, nunca inventado — ver
+    build_network_comparativo_insight)."""
+    from tests.integration.test_network_benchmark import _insert_tenant, _seed_billing_rows
+
+    await _seed_billing_rows(admin_engine, tenant_a, n=6, risk_level="high")
+    # 5 outras clínicas ativas com amostra suficiente, todas com risco
+    # baixo -> mediana da rede bem abaixo da taxa de A (mesmo cenário de
+    # test_network_benchmark_computes_median_across_other_tenants).
+    for i in range(5):
+        other = await _insert_tenant(admin_engine, trade_name=f"Clínica Rede Comparativo {i}")
+        await _seed_billing_rows(admin_engine, other, n=6, risk_level="low")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    comparativo = next((i for i in insights if i["severity"] == "comparativo"), None)
+    assert comparativo is not None
+    assert comparativo["is_new"] is True
+    assert comparativo["financial_impact"] is not None and comparativo["financial_impact"] > 0
+    assert "acima da rede" in comparativo["title"]
+
+
+async def test_smart_insights_has_no_comparativo_when_cohort_is_insufficient(client, auth_headers_a, admin_engine, tenant_a):
+    """Sem clínicas suficientes na rede (só 1 outra), o Comparativo nunca
+    deveria virar insight — mesma garantia de amostra mínima da aba
+    Comparativo (ver test_network_benchmark_insufficient_cohort_returns_null),
+    agora provada também no feed de insights."""
+    from tests.integration.test_network_benchmark import _insert_tenant, _seed_billing_rows
+
+    await _seed_billing_rows(admin_engine, tenant_a, n=6, risk_level="high")
+    other = await _insert_tenant(admin_engine, trade_name="Outra Clínica Isolada Comparativo")
+    await _seed_billing_rows(admin_engine, other, n=6, risk_level="low")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    assert not any(i["severity"] == "comparativo" for i in insights)

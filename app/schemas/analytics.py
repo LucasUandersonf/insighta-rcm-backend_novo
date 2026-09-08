@@ -226,10 +226,15 @@ class DenialRiskDistributionResponse(BaseModel):
 
 
 class SmartInsightResponse(BaseModel):
-    severity: str  # "critical" | "warning" | "positive"
+    severity: str  # "critical" | "warning" | "positive" | "comparativo"
     title: str
     message: str
     financial_impact: float | None
+    # Marca insights de recursos lançados na Sala de Comando 2.0 (Radar de
+    # Profissional, Comparativo) — ver DECISÃO em
+    # smart_insights_engine.Insight.is_new. Default False para não quebrar
+    # nenhuma leitura antiga desta resposta.
+    is_new: bool = False
 
 
 class SmartInsightsResponse(BaseModel):
