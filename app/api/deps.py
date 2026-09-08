@@ -34,7 +34,7 @@ from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
-from app.db.session import get_db_with_tenant
+from app.db.session import get_db_no_tenant, get_db_with_tenant
 
 # tokenUrl aponta para o endpoint de login (usado só para gerar a doc /docs)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -105,6 +105,32 @@ async def get_db(current_user: CurrentUserDep) -> AsyncGenerator[AsyncSession, N
 
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def get_db_no_tenant_authenticated(current_user: CurrentUserDep) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Sessão SEM contexto de tenant, mas atrás de autenticação normal
+    (exige CurrentUser válido, mesmo critério de get_db acima) — uso
+    ÚNICO hoje: o Comparativo entre clínicas (ver
+    app/repositories/network_benchmark_repository.py), que PRECISA
+    escapar do RLS de propósito para chamar uma função SECURITY DEFINER
+    que agrega dado de VÁRIAS clínicas (nunca linha por linha — ver
+    DECISÃO completa em app/sql/032_network_benchmark.sql).
+
+    Diferente de get_db_no_tenant() cru (extremamente restrito, hoje só
+    login/administração de plataforma — ver docstring em
+    app/db/session.py), esta variante É esperada em endpoint de negócio
+    normal: a autenticação de clínica continua exigida, só a sessão de
+    banco em si não carrega SET LOCAL app.current_tenant. current_user
+    nunca é passado direto para a função SQL sem validação adicional —
+    é responsabilidade do endpoint/service decidir o que fazer com o
+    tenant_id do usuário autenticado.
+    """
+    async for session in get_db_no_tenant():
+        yield session
+
+
+DbSessionNoTenant = Annotated[AsyncSession, Depends(get_db_no_tenant_authenticated)]
 
 
 def require_role(*allowed_roles: str):

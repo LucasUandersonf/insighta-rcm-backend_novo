@@ -567,6 +567,62 @@ segue o fluxo NORMAL do Alembic (não um stamp de baseline) — as colunas
 novas não envolvem RLS, então passam por `alembic upgrade head` como
 qualquer migration comum.
 
+## Sala de Comando 2.0 — Nota de Saúde, Radar de Profissional, Comparativo
+
+Três indicadores novos na Sala de Comando, todos determinísticos e
+explicáveis (mesma filosofia de `denial_risk_engine.py`/
+`no_show_risk_engine.py`: nunca um modelo de caixa-preta).
+
+### Nota de Saúde Financeira — `GET /analytics/health-score`
+`app/services/health_score_engine.py` combina taxa de glosa (peso 45%),
+taxa de falta (peso 30%) e sucesso em recurso de glosa (peso 25%) num
+score único 0-100. Componente sem amostra suficiente é EXCLUÍDO, nunca
+vira zero — o peso é redistribuído entre os presentes (mesmo princípio
+de "None sobre zero" do resto do produto). Janela sempre fixa em 90 dias
+(`_HEALTH_SCORE_WINDOW_DAYS`), independente do seletor de período da
+tela — é um indicador de tendência, não um retrato de um dia só.
+
+### Radar de Profissional Fora do Padrão
+Novo tipo de insight em `smart_insights_engine.py`
+(`_professional_outlier_insight`): compara a taxa de risco de glosa de
+cada profissional (amostra mínima de 5 faturamentos —
+`AnalyticsRepository.professional_denial_rates`) contra a média da
+PRÓPRIA clínica. Só dispara quando a taxa é pelo menos o dobro da média
+E pelo menos 5 pontos percentuais acima em termos absolutos — evita
+marcar diferenças estatisticamente irrelevantes. Só o pior caso vira
+insight, para não empilhar um card por profissional.
+
+### Comparativo entre clínicas — `GET /analytics/network-benchmark`
+O único indicador desta lista que é cross-tenant de propósito — o fosso
+competitivo real do produto (dado agregado de várias clínicas ao mesmo
+tempo, algo que nenhum ERP de clínica individual consegue oferecer).
+
+- `app/sql/032_network_benchmark.sql` define
+  `core.network_glosa_no_show_benchmark(requesting_tenant_id, window_days, min_cohort)`,
+  uma função `SECURITY DEFINER` com role PRÓPRIA
+  (`network_benchmark_owner`, não reaproveita `platform_reporting_owner`
+  — mesmo raciocínio de separação de responsabilidade documentado em
+  `026_platform_customer_success.sql`: categorias de problema diferentes
+  merecem raio de estrago separado).
+- **A função nunca devolve uma linha por clínica** — só "sua taxa" +
+  "mediana agregada de outras clínicas" + "quantas entraram na mediana".
+  O piso de amostra mínima (`min_cohort`, padrão 5) é aplicado DENTRO da
+  função SQL, não confiado ao código Python que chama — mesmo com um bug
+  futuro no service, a função não tem como devolver o dado de uma
+  clínica específica para outra.
+- Cada clínica só entra no cálculo da mediana com amostra própria
+  mínima (>= 5 faturamentos/agendamentos no período) — evita que uma
+  clínica com 1 faturamento (0% ou 100% de taxa) distorça a mediana da
+  rede.
+- Endpoint usa uma sessão SEM tenant (`DbSessionNoTenant` em
+  `app/api/deps.py`, autenticação normal continua exigida) — é o único
+  ponto da Sala de Comando que precisa escapar do RLS de propósito.
+- Testado de ponta a ponta com múltiplas clínicas reais via SQL direto
+  (`tests/integration/test_network_benchmark.py`): confirma que o piso
+  de amostra mínima devolve `None` (nunca um número inventado) quando
+  não há clínicas suficientes, que a mediana bate com o valor esperado
+  quando há, e que a resposta HTTP nunca carrega uma linha por clínica.
+
 ## Etapa 4 — relatório semanal via WhatsApp
 `app/worker/weekly_report_job.py` é um SCRIPT DE EXECUÇÃO ÚNICA (roda,
 processa todos os tenants ativos com `whatsapp_group_id` configurado, e

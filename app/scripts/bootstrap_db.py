@@ -223,6 +223,12 @@ _POST_UPGRADE_SQL_FILES = [
     # Auto-idempotente (ADD COLUMN IF NOT EXISTS) — roda em todo deploy,
     # sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "031_user_onboarding.sql",
+    # Comparativo entre clínicas (Sala de Comando 2.0) — função
+    # agregadora cross-tenant (SECURITY DEFINER, role própria
+    # network_benchmark_owner, NÃO reaproveita platform_reporting_owner
+    # — ver DECISÃO no próprio .sql). DROP + CREATE — auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "032_network_benchmark.sql",
 ]
 
 _ROLES_SQL = """
@@ -264,6 +270,16 @@ GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.ap
 ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner;
 REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_runtime;
+
+-- Comparativo entre clínicas (ver 032_network_benchmark.sql) — role
+-- PRÓPRIA, de propósito diferente de platform_reporting_owner (que é só
+-- para o painel INTERNO da equipe Insighta, nunca chamado por usuário
+-- de clínica). Grants mínimos: só o que a função de fato lê.
+GRANT USAGE ON SCHEMA core TO network_benchmark_owner;
+GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchmark_owner;
+ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner;
+REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_runtime;
 """
 
 
@@ -430,7 +446,14 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             logger.info("Criando role platform_reporting_owner...")
             await conn.execute("CREATE ROLE platform_reporting_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
-        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner)...")
+        network_benchmark_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'network_benchmark_owner')"
+        )
+        if not network_benchmark_owner_exists:
+            logger.info("Criando role network_benchmark_owner...")
+            await conn.execute("CREATE ROLE network_benchmark_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
+        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner, network_benchmark_owner)...")
         await conn.execute(_ROLES_SQL)
     finally:
         await conn.close()

@@ -238,3 +238,48 @@ class SmartInsightsResponse(BaseModel):
     period_start: date
     period_end: date
     insights: list[SmartInsightResponse]
+
+
+class HealthScoreComponentResponse(BaseModel):
+    key: str  # "denial" | "no_show" | "appeal"
+    label: str
+    rate: float  # 0.0-1.0
+    sub_score: float  # 0-100
+    weight: float  # peso efetivo (após redistribuição), soma 1.0 entre os presentes
+
+
+class NetworkBenchmarkMetric(BaseModel):
+    """Uma métrica do Comparativo entre clínicas — sua taxa vs. a
+    MEDIANA agregada de outras clínicas (nunca uma clínica específica).
+    `network_median`/`cohort_size` vêm None/0 quando a base ainda não
+    tem clínicas suficientes para comparar com segurança (ver
+    min_cohort em app/sql/032_network_benchmark.sql) — "sem dado
+    suficiente" nunca vira "0%" ou é escondido silenciosamente."""
+
+    key: str  # "denial" | "no_show"
+    label: str
+    your_rate: float | None
+    your_sample: int
+    network_median: float | None
+    cohort_size: int
+
+
+class NetworkBenchmarkResponse(BaseModel):
+    """GET /api/v1/analytics/network-benchmark — Comparativo entre
+    clínicas (Sala de Comando 2.0, aba Comparativo). Janela fixa, mesmo
+    critério da Nota de Saúde Financeira (ver HealthScoreResponse)."""
+
+    metrics: list[NetworkBenchmarkMetric]
+    window_days: int
+
+
+class HealthScoreResponse(BaseModel):
+    """GET /api/v1/analytics/health-score — Nota de Saúde Financeira
+    (Sala de Comando). Janela sempre fixa (ver DECISÃO em
+    AnalyticsService.get_health_score) — não segue o seletor de período
+    da tela, de propósito: é um indicador de tendência, não um retrato
+    de um dia só."""
+
+    score: float | None  # None = amostra insuficiente em TODOS os componentes ainda
+    components: list[HealthScoreComponentResponse]
+    window_days: int

@@ -35,6 +35,8 @@ from app.schemas.analytics import (
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
+    HealthScoreComponentResponse,
+    HealthScoreResponse,
     NoShowRiskBucket,
     PatientNoShowRankingItem,
     PeakHourBucket,
@@ -49,7 +51,16 @@ from app.schemas.analytics import (
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
+from app.services.health_score_engine import compute_health_score
 from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriodInput, generate_insights
+
+# Janela FIXA da Nota de Saúde Financeira — de propósito independente do
+# seletor de período da Sala de Comando (que pode ser 7 dias). Um score
+# de "tendência de saúde da clínica" que pula toda vez que o usuário
+# muda o filtro de 7 para 30 dias pareceria ruído, não sinal — e 90 dias
+# dá amostra mínima razoável para o componente de recurso de glosa
+# (resolução de recurso é lenta, poucos por semana).
+_HEALTH_SCORE_WINDOW_DAYS = 90
 
 # Janela de alerta de prazo de recurso: "vencendo em breve" — mesmo
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
@@ -455,6 +466,7 @@ class AnalyticsService:
         weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
+        professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
 
         reason_counts: dict[tuple[str, str], int] = {}
         for plan_name, reasons in denial_findings:
@@ -481,6 +493,7 @@ class AnalyticsService:
             elapsed_year_fraction=annual_goal_context.elapsed_year_fraction if annual_goal_context else None,
             ytd_billed_total=annual_goal_context.ytd_billed_total if annual_goal_context else 0.0,
             inactive_patients_count=annual_goal_context.inactive_patients_count if annual_goal_context else 0,
+            professional_denial_rates=professional_denial_rates,
         )
 
     async def get_smart_insights(self, date_from: date, date_to: date, *, tenant_id: str) -> SmartInsightsResponse:
@@ -532,4 +545,42 @@ class AnalyticsService:
                 )
                 for i in insights
             ],
+        )
+
+    async def get_health_score(self) -> HealthScoreResponse:
+        """
+        Nota de Saúde Financeira — ver DECISÃO completa em
+        health_score_engine.py (regras determinísticas, componente sem
+        amostra é excluído, nunca vira zero). Janela sempre fixa (ver
+        _HEALTH_SCORE_WINDOW_DAYS acima), nunca a do seletor de período.
+        """
+        today = date.today()
+        window_start_date = today - timedelta(days=_HEALTH_SCORE_WINDOW_DAYS)
+        window_start_dt = datetime.combine(window_start_date, datetime.min.time(), tzinfo=timezone.utc)
+
+        risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(window_start_date, today)
+        denial_risk_pct_0_100, _denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
+        # _denial_risk_pct devolve 0-100 (mesma escala do KPI "Faturamento
+        # retido" da Sala de Comando) — health_score_engine.py trabalha
+        # com fração 0.0-1.0 em TODOS os componentes (mesma escala de
+        # no_show_count/no_show_total), por isso a conversão aqui.
+        denial_risk_pct = denial_risk_pct_0_100 / 100 if denial_risk_pct_0_100 is not None else None
+        no_show_count, no_show_total = await self.analytics_repo.overall_no_show_rate(window_start_date, today)
+        appeal_counts = await self.appeal_repo.count_resolved_by_status(since=window_start_dt)
+
+        result = compute_health_score(
+            denial_risk_pct=denial_risk_pct,
+            no_show_count=no_show_count,
+            no_show_total=no_show_total,
+            appeal_deferred_count=appeal_counts["deferido"],
+            appeal_indeferido_count=appeal_counts["indeferido"],
+        )
+
+        return HealthScoreResponse(
+            score=result.score,
+            components=[
+                HealthScoreComponentResponse(key=c.key, label=c.label, rate=c.rate, sub_score=c.sub_score, weight=c.weight)
+                for c in result.components
+            ],
+            window_days=_HEALTH_SCORE_WINDOW_DAYS,
         )

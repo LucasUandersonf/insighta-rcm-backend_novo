@@ -5,7 +5,7 @@ Repositório recebe a `session` já tenant-aware (RLS garante isolamento —
 ver DECISÃO padrão em billing_repository.py).
 """
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +37,28 @@ class DenialAppealRepository:
             stmt = stmt.where(DenialAppeal.status == status_filter)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_resolved_by_status(self, *, since: datetime) -> dict[str, int]:
+        """
+        Quantos recursos foram RESOLVIDOS (deferido/indeferido — nunca
+        'aberto'/'protocolado'/'nip_aberta', que ainda não têm desfecho)
+        desde `since`, agrupado por status final. Alimenta o componente
+        "sucesso em recurso de glosa" da Nota de Saúde Financeira
+        (health_score_engine.py) — usa `resolved_at`, não `denied_at`
+        nem `created_at`, porque é o desfecho que importa aqui, não
+        quando a glosa aconteceu nem quando o recurso foi aberto.
+        """
+        stmt = (
+            select(DenialAppeal.status, func.count())
+            .where(
+                DenialAppeal.status.in_(("deferido", "indeferido")),
+                DenialAppeal.resolved_at >= since,
+            )
+            .group_by(DenialAppeal.status)
+        )
+        result = await self.session.execute(stmt)
+        counts = {status: count for status, count in result.all()}
+        return {"deferido": counts.get("deferido", 0), "indeferido": counts.get("indeferido", 0)}
 
     async def list_paginated(
         self, *, limit: int, offset: int, status_filter: str | None = None

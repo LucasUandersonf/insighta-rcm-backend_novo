@@ -606,3 +606,63 @@ class AnalyticsRepository:
         subq = select(Appointment.patient_id).group_by(Appointment.patient_id).having(last_appointment < cutoff)
         stmt = select(func.count()).select_from(subq.subquery())
         return int((await self.session.execute(stmt)).scalar_one())
+
+    async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
+        """
+        Taxa de falta agregada do período inteiro (não por dia da semana
+        — ver `weekday_no_show_rate_breakdown` para essa quebra). Mesmo
+        filtro de "resolvido" (status 'completed' ou 'no_show' — um
+        'scheduled' não tem desfecho conhecido, um 'cancelled' é outro
+        comportamento) — reaproveitado aqui, não duplicado por acidente,
+        alimenta a Nota de Saúde Financeira (health_score_engine.py).
+
+        Retorna (no_show_count, total_relevante) — divisão por zero e a
+        decisão "sem amostra != 0%" ficam para o service, mesmo
+        princípio do resto do arquivo.
+        """
+        start, end = _bounds(date_from, date_to)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = select(no_show_expr, total_expr).where(
+            Appointment.scheduled_at >= start,
+            Appointment.scheduled_at <= end,
+            Appointment.status.in_(("completed", "no_show")),
+        )
+        no_show, total = (await self.session.execute(stmt)).one()
+        return int(no_show or 0), int(total or 0)
+
+    async def professional_denial_rates(self, date_from: date, date_to: date, *, min_sample: int = 5) -> list[tuple[str, float, int]]:
+        """
+        Taxa de glosa (risco médio/alto) por profissional executante, só
+        para quem tem amostra mínima (`min_sample`) de faturamento no
+        período — mesmo raciocínio de MIN_SAMPLE_SIZE em
+        no_show_risk_engine.py: 1 faturamento com risco alto não é um
+        "profissional de risco", é ruído estatístico. Alimenta o Radar
+        de Profissional Fora do Padrão (ver
+        smart_insights_engine.py::_professional_outlier_insight).
+
+        JOIN Billing -> Appointment -> Professional porque
+        `professional_id` mora no agendamento, não no faturamento (ver
+        DECISÃO em app/models/billing.py) — professional_name já
+        resolvido aqui (não no service) para não vazar o UUID do
+        profissional para uma camada que só precisa exibir o nome.
+
+        Retorna [(nome_profissional, taxa_de_risco, total_faturamentos)],
+        só profissionais com amostra >= min_sample.
+        """
+        from app.models.professional import Professional
+
+        start, end = _bounds(date_from, date_to)
+        risk_expr = func.sum(case((Billing.denial_risk_level.in_(("medium", "high")), 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(Professional.full_name, risk_expr, total_expr)
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Professional, Professional.id == Appointment.professional_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Professional.id, Professional.full_name)
+            .having(func.count() >= min_sample)
+        )
+        result = await self.session.execute(stmt)
+        return [(name, (int(risk) / int(total)), int(total)) for name, risk, total in result.all()]

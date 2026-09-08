@@ -8,14 +8,16 @@ outros endpoints "de leitura pesada" do projeto (reports.py).
 RBAC: mesmo critério de contracts.py — dado financeiro/estratégico não é
 de "atendimento" (recepção). auditor entra porque é leitura pura.
 """
+import uuid
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import CurrentUser, DbSession, require_role
+from app.api.deps import CurrentUser, DbSession, DbSessionNoTenant, require_role
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -25,10 +27,13 @@ from app.schemas.analytics import (
     ContractUtilizationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
+    HealthScoreResponse,
+    NetworkBenchmarkResponse,
     PlanLossRankingResponse,
     SmartInsightsResponse,
 )
 from app.services.analytics_service import AnalyticsService
+from app.services.network_benchmark_service import NetworkBenchmarkService
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -90,6 +95,31 @@ async def get_smart_insights(
 ) -> SmartInsightsResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_smart_insights(start, end, tenant_id=current_user.tenant_id)
+
+
+@router.get("/health-score", response_model=HealthScoreResponse)
+async def get_health_score(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> HealthScoreResponse:
+    # Sem date_from/date_to de propósito — janela é fixa dentro do
+    # service (ver DECISÃO em AnalyticsService.get_health_score).
+    return await _build_service(db).get_health_score()
+
+
+@router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)
+async def get_network_benchmark(
+    db: DbSessionNoTenant,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> NetworkBenchmarkResponse:
+    # DbSessionNoTenant (não DbSession) de propósito — este é o único
+    # endpoint da Sala de Comando que precisa escapar do RLS para
+    # comparar com outras clínicas (ver DECISÃO em
+    # app/sql/032_network_benchmark.sql e app/api/deps.py). current_user
+    # continua exigindo autenticação normal — só a sessão de banco em si
+    # não carrega tenant.
+    service = NetworkBenchmarkService(NetworkBenchmarkRepository(db))
+    return await service.get_benchmark(uuid.UUID(current_user.tenant_id))
 
 
 @router.get("/plan-loss-ranking", response_model=PlanLossRankingResponse)

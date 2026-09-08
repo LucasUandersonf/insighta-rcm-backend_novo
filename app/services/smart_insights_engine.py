@@ -115,6 +115,12 @@ class InsightsPeriodInput:
     elapsed_year_fraction: float | None = None  # 0.0 a 1.0 — fração do ano calendário já decorrida (calculado pelo service, não pelo motor, para manter esta função pura/testável)
     ytd_billed_total: float = 0.0  # faturamento acumulado do ano até hoje
     inactive_patients_count: int = 0  # pacientes sem atendimento há mais de 1 ano — nutre a recomendação de CRM
+    # Radar de Profissional Fora do Padrão — [(nome, taxa_de_risco,
+    # total_faturamentos)], só profissionais com amostra mínima (ver
+    # AnalyticsRepository.professional_denial_rates). Default [] pelo
+    # mesmo motivo dos demais campos com default: não quebrar chamadas/
+    # testes existentes que ainda não passam esse dado.
+    professional_denial_rates: list[tuple[str, float, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -455,6 +461,47 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     )
 
 
+# Radar de Profissional Fora do Padrão — limiares de v1, mesmo espírito
+# de "chute razoável" documentado em no_show_risk_engine.py: exige a
+# taxa do profissional ser pelo menos o DOBRO da média da própria
+# clínica E pelo menos 5 pontos percentuais acima em termos absolutos
+# (evita marcar como "outlier" uma diferença de 2% vs 1%, que é 2x em
+# proporção mas irrelevante em prática).
+_PROFESSIONAL_OUTLIER_MIN_RATIO = 2.0
+_PROFESSIONAL_OUTLIER_MIN_ABS_GAP = 0.05
+
+
+def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | None:
+    """Compara a taxa de risco de glosa de cada profissional (só quem
+    tem amostra mínima — ver AnalyticsRepository.professional_denial_rates)
+    contra a média da PRÓPRIA clínica no mesmo período — nunca contra
+    outra clínica (isso é Nível 1/rede, não este motor, que é só dado
+    local). Só o pior caso vira insight — evita empilhar um card por
+    profissional numa clínica com vários acima da média."""
+    if current.denial_risk_pct is None or not current.professional_denial_rates:
+        return None
+    tenant_avg = current.denial_risk_pct / 100  # denial_risk_pct já vem 0-100 (ver _denial_risk_pct)
+    if tenant_avg <= 0:
+        return None
+
+    worst_name, worst_rate, worst_total = max(current.professional_denial_rates, key=lambda t: t[1])
+    if worst_rate < tenant_avg * _PROFESSIONAL_OUTLIER_MIN_RATIO:
+        return None
+    if worst_rate - tenant_avg < _PROFESSIONAL_OUTLIER_MIN_ABS_GAP:
+        return None
+
+    ratio = worst_rate / tenant_avg
+    return Insight(
+        severity="warning",
+        title=f"{worst_name} fora do padrão de glosa",
+        message=(
+            f"Taxa de risco de glosa de {worst_rate * 100:.1f}% nos faturamentos de {worst_name} nesta janela "
+            f"({worst_total} faturamentos) — {ratio:.1f}x a média da própria clínica ({tenant_avg * 100:.1f}%). "
+            "Vale revisar como esse profissional preenche CID e código de procedimento."
+        ),
+    )
+
+
 def generate_insights(
     current: InsightsPeriodInput,
     previous: InsightsPeriodInput,
@@ -475,6 +522,7 @@ def generate_insights(
         _value_saved_insight(current, previous),
         _capacity_drop_insight(current, previous, estimated_idle_capacity_revenue_lost),
         _no_show_risk_insight(current, estimated_no_show_revenue_at_risk),
+        _professional_outlier_insight(current),
     ):
         if maybe_insight is not None:
             insights.append(maybe_insight)
