@@ -410,3 +410,47 @@ def test_annual_goal_insight_omits_inactive_patients_note_when_zero():
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert "paciente(s) sem consulta" not in insights[0].message
+
+
+def test_professional_outlier_flagged_when_double_the_clinic_average():
+    # Média da clínica 10% (denial_risk_pct=10.0, escala 0-100) — Dr. X a
+    # 25% é 2.5x a média E 15 pontos percentuais acima -> passa os dois limiares.
+    current = _minimal(
+        denial_risk_pct=10.0,
+        professional_denial_rates=[("Dr. X", 0.25, 8), ("Dr. Y", 0.09, 12)],
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    outlier = next(i for i in insights if "fora do padrão" in i.title)
+    assert "Dr. X" in outlier.title
+    assert outlier.severity == "warning"
+
+
+def test_professional_outlier_absent_when_below_ratio_threshold():
+    # 15% vs média 10% -> só 1.5x, abaixo do limiar de 2x.
+    current = _minimal(denial_risk_pct=10.0, professional_denial_rates=[("Dr. X", 0.15, 8)])
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert not any("fora do padrão" in i.title for i in insights)
+
+
+def test_professional_outlier_absent_when_gap_is_trivial_in_absolute_terms():
+    # 2% vs média 1% -> 2x em proporção, mas só 1 ponto percentual de
+    # diferença absoluta — abaixo do piso de 5pp, não deveria disparar.
+    current = _minimal(denial_risk_pct=1.0, professional_denial_rates=[("Dr. X", 0.02, 8)])
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert not any("fora do padrão" in i.title for i in insights)
+
+
+def test_professional_outlier_only_flags_the_worst_case():
+    current = _minimal(
+        denial_risk_pct=10.0,
+        professional_denial_rates=[("Dr. X", 0.25, 8), ("Dr. Z", 0.40, 6), ("Dr. Y", 0.09, 12)],
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    outliers = [i for i in insights if "fora do padrão" in i.title]
+    assert len(outliers) == 1
+    assert "Dr. Z" in outliers[0].title
+
+
+def test_professional_outlier_absent_without_denial_risk_pct():
+    current = _minimal(denial_risk_pct=None, professional_denial_rates=[("Dr. X", 0.25, 8)])
+    assert generate_insights(current, _EMPTY_PERIOD) == []

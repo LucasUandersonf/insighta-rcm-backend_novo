@@ -629,3 +629,51 @@ async def test_agenda_metrics_counts_professionals_without_availability(client, 
     )
     assert response.status_code == 200
     assert response.json()["professionals_without_availability_count"] == 1
+
+
+async def test_smart_insights_flags_professional_outlier(client, auth_headers_a, admin_engine, tenant_a):
+    """Radar de Profissional Fora do Padrão — ponta a ponta: um
+    profissional concentrando faturamento de alto risco (CID ausente)
+    enquanto outro fatura normalmente deveria virar insight nomeado."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    outlier_resp = await client.post("/api/v1/professionals", json={"full_name": "Dr. Radar"}, headers=auth_headers_a)
+    outlier_id = outlier_resp.json()["id"]
+    normal_resp = await client.post("/api/v1/professionals", json={"full_name": "Dra. Normal"}, headers=auth_headers_a)
+    normal_id = normal_resp.json()["id"]
+
+    async def _bill(*, professional_id, with_cid, n):
+        for _ in range(n):
+            patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Radar"}, headers=auth_headers_a)
+            patient_id = patient_resp.json()["id"]
+            appt_payload = {
+                "patient_id": patient_id,
+                "professional_id": professional_id,
+                "insurance_plan_id": plan_id,
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "procedure_code": "10101012",
+            }
+            if with_cid:
+                appt_payload["cid_code"] = "J06"
+            appt_resp = await client.post("/api/v1/appointments", json=appt_payload, headers=auth_headers_a)
+            appointment_id = appt_resp.json()["id"]
+            await client.post(
+                "/api/v1/billing",
+                json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 150.0},
+                headers=auth_headers_a,
+            )
+
+    # Dr. Radar: 6 faturamentos, todos sem CID -> risco alto em 100%.
+    await _bill(professional_id=outlier_id, with_cid=False, n=6)
+    # Dra. Normal: 6 faturamentos, todos com CID -> risco baixo.
+    await _bill(professional_id=normal_id, with_cid=True, n=6)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert any("Dr. Radar" in t and "fora do padrão" in t for t in titles)
+    assert not any("Dra. Normal" in t for t in titles)

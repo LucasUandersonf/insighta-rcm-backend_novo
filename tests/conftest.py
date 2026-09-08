@@ -122,6 +122,7 @@ _SCHEMA_FILES = [
     "029_platform_users.sql",
     "030_platform_feature_usage.sql",
     "031_user_onboarding.sql",
+    "032_network_benchmark.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -186,6 +187,19 @@ GRANT SELECT ON core.tenants, core.users, core.audit_log, core.patients, core.ap
 ALTER FUNCTION core.platform_tenant_usage_summary() OWNER TO platform_reporting_owner_test;
 REVOKE ALL ON FUNCTION core.platform_tenant_usage_summary() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.platform_tenant_usage_summary() TO app_test_runtime;
+
+-- Comparativo entre clínicas (ver 032_network_benchmark.sql) — role
+-- PRÓPRIA, mesmo raciocínio de platform_reporting_owner_test acima:
+-- categoria de problema diferente (agrega para uma clínica COMUM
+-- comparar com outras, não para o painel interno da plataforma).
+DROP ROLE IF EXISTS network_benchmark_owner_test;
+CREATE ROLE network_benchmark_owner_test NOLOGIN NOSUPERUSER;
+ALTER ROLE network_benchmark_owner_test BYPASSRLS;
+GRANT USAGE ON SCHEMA core TO network_benchmark_owner_test;
+GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchmark_owner_test;
+ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner_test;
+REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_test_runtime;
 """
 
 
