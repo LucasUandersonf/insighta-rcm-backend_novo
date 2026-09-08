@@ -34,6 +34,19 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 5
+    # Achado da vistoria de Segurança: hoje, se o canal criptografado
+    # (TLS) até o banco é usado ou não depende inteiramente de o que a
+    # própria DSN pedir por baixo dos panos (asyncpg negocia sozinho) —
+    # a aplicação nunca EXIGE isso, só aceita o que vier. Desligado por
+    # padrão (False) de propósito: ligar sem confirmar que o Postgres de
+    # destino aceita TLS quebraria a conexão inteira na hora do deploy.
+    # Testado localmente contra um Postgres com TLS de verdade (TLSv1.3,
+    # certificado autoassinado) antes de expor esta opção — ver
+    # DECISÃO em app/db/session.py sobre por que `ssl=True` (não
+    # `ssl="verify-full"`): a maioria dos Postgres gerenciados (Railway
+    # incluso) usa certificado autoassinado ou emitido internamente, que
+    # falharia a verificação de cadeia contra uma CA pública.
+    DATABASE_REQUIRE_SSL: bool = False
 
     # --- Bootstrap automático (app/scripts/entrypoint.py) ---
     # DATABASE_ADMIN_URL: conexão de SUPERUSUÁRIO, usada SÓ no arranque do

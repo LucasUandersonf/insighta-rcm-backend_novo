@@ -37,12 +37,33 @@ settings = get_settings()
 # echo=False em produção (settings.ENVIRONMENT controla isso se desejado).
 # pool_size/max_overflow vêm de env porque o dimensionamento correto do
 # pool depende do plano de infra (nº de workers uvicorn x conexões do RDS).
+#
+# DECISÃO — DATABASE_REQUIRE_SSL: `ssl=True`, nunca `ssl="verify-full"`
+# -------------------------------------------------------------------------
+# Achado da vistoria de Segurança: a aplicação nunca exigia canal
+# criptografado até o banco, só aceitava o que a DSN já pedisse por baixo
+# dos panos. `DATABASE_REQUIRE_SSL=true` faz o asyncpg recusar a conexão
+# se o servidor não oferecer TLS — mas com `ssl=True` (equivalente a
+# sslmode=require do libpq), não `ssl="verify-full"`: a maioria dos
+# Postgres gerenciados (Railway incluso, imagem `postgres-ssl`) usa
+# certificado autoassinado ou emitido internamente, não uma cadeia
+# pública verificável — exigir verify-full quebraria a conexão contra
+# esse tipo de certificado. `ssl=True` ainda garante que o TRÁFEGO vai
+# criptografado (o objetivo real aqui: ninguém no meio do caminho lê o
+# conteúdo), só não valida QUEM assinou o certificado — a mesma proteção
+# que sslmode=require oferece no lado do driver.
+# Testado localmente contra um Postgres com TLS de verdade (TLSv1.3,
+# certificado autoassinado, mesmo cenário de um Postgres gerenciado)
+# antes de expor esta opção. Desligada por padrão — ligar sem antes
+# confirmar que o Postgres de destino aceita TLS derrubaria a conexão na
+# hora do deploy.
 engine = create_async_engine(
     settings.DATABASE_URL,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_pre_ping=True,  # detecta conexões mortas (ex: RDS failover) antes de usá-las
     echo=False,
+    connect_args={"ssl": True} if settings.DATABASE_REQUIRE_SSL else {},
 )
 
 AsyncSessionLocal = async_sessionmaker(

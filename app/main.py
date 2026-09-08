@@ -108,6 +108,51 @@ app.add_middleware(
 # resposta de erro — fechando o ciclo "usuário reporta -> eu busco pelo
 # ID -> vejo exatamente o que aconteceu", sem precisar de print de tela
 # nem estimar horário.
+#
+# =====================================================================
+# CABEÇALHOS DE SEGURANÇA HTTP
+# =====================================================================
+# Achado da vistoria de Segurança (AppSec): nenhum cabeçalho de segurança
+# básico era enviado — não por decisão, simplesmente nunca tinha sido
+# olhado. Aplicados em toda resposta, aqui no mesmo middleware que já
+# mexe em header de resposta (X-Request-ID), em vez de outro middleware
+# separado fazendo a mesma coisa duas vezes.
+#
+# DECISÃO — por que estes quatro, e por que não Content-Security-Policy
+# -------------------------------------------------------------------------
+# Os quatro abaixo são seguros de ligar às cegas: nenhum deles muda
+# comportamento de uma API JSON normal, e não exigem testar contra o
+# bundle real do frontend.
+#   Strict-Transport-Security — só em produção (nunca em dev, onde o
+#     acesso local costuma ser http://localhost; forçar HTTPS aí quebraria
+#     o fluxo local) e só quando a requisição já chegou via HTTPS (atrás
+#     do proxy da Railway, X-Forwarded-Proto carrega isso — nunca envia o
+#     cabeçalho dizendo "sempre HTTPS" numa resposta que nem veio por
+#     HTTPS, o que confundiria o navegador).
+#   X-Content-Type-Options: nosniff — nunca deixa o navegador "adivinhar"
+#     um tipo de conteúdo diferente do Content-Type declarado.
+#   X-Frame-Options: DENY — esta API nunca precisa ser carregada dentro
+#     de um <iframe> de outro site; bloquear isso combate clickjacking.
+#   Referrer-Policy — não vaza a URL completa (que pode conter querystring
+#     sensível) para o site de destino ao seguir um link a partir daqui.
+# Content-Security-Policy foi deixado de fora de propósito: exige testar
+# contra o bundle real do frontend (scripts inline, fontes, CDN) para não
+# quebrar a aplicação — trabalho de uma rodada dedicada, não um ajuste às
+# cegas junto dos outros quatro.
+def _apply_security_headers(request: Request, response) -> None:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # X-Forwarded-Proto: a Railway termina TLS no proxy dela e encaminha
+    # para a aplicação por HTTP puro internamente — request.url.scheme
+    # sempre seria "http" aqui, mesmo quando o usuário acessou por HTTPS.
+    # É esse cabeçalho, escrito pelo próprio proxy (não pelo cliente), que
+    # diz a verdade sobre o protocolo que o navegador realmente usou.
+    came_via_https = request.headers.get("X-Forwarded-Proto", request.url.scheme) == "https"
+    if settings.ENVIRONMENT == "production" and came_via_https:
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+
+
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     request_id = set_request_id(request.headers.get("X-Request-ID"))
@@ -125,6 +170,7 @@ async def request_context_middleware(request: Request, call_next):
     response = await call_next(request)
     duration_ms = round((time.monotonic() - start) * 1000, 1)
     response.headers["X-Request-ID"] = request_id
+    _apply_security_headers(request, response)
     logger.info(
         "request_completed",
         extra={

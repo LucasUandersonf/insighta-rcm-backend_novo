@@ -101,10 +101,16 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_migrations_online() -> None:
+    # Mesma exigência de canal criptografado que app/db/session.py aplica
+    # à conexão de runtime (DATABASE_REQUIRE_SSL, ver DECISÃO lá) — sem
+    # isto, migration (que roda com privilégio de superusuário) seguiria
+    # sem TLS mesmo com a aplicação exigindo, uma inconsistência real
+    # entre as duas metades do mesmo tráfego para o mesmo banco.
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,  # migration é uma execução pontual, não precisa de pool
+        connect_args={"ssl": True} if settings.DATABASE_REQUIRE_SSL else {},
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
