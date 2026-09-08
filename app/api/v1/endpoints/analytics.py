@@ -89,12 +89,31 @@ async def get_agenda_metrics(
 @router.get("/smart-insights", response_model=SmartInsightsResponse)
 async def get_smart_insights(
     db: DbSession,
+    db_no_tenant: DbSessionNoTenant,
     date_from: date | None = None,
     date_to: date | None = None,
     current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
 ) -> SmartInsightsResponse:
     start, end = _default_period(date_from, date_to)
-    return await _build_service(db).get_smart_insights(start, end, tenant_id=current_user.tenant_id)
+    # db_no_tenant além de db (mesma dupla do endpoint network-benchmark
+    # abaixo): o Comparativo entrou como manchete opcional do feed de
+    # insights (ver DECISÃO em AnalyticsService.get_smart_insights) e
+    # precisa da mesma fonte cross-tenant — duas sessões independentes na
+    # mesma rota, sem conflito (cada Depends abre a sua). Só entram pares
+    # com cohort suficiente (your_rate e network_median não-None); o
+    # resto do critério (desvio mínimo, só o pior caso) é decidido dentro
+    # do service/motor, não aqui.
+    benchmark = await NetworkBenchmarkService(NetworkBenchmarkRepository(db_no_tenant)).get_benchmark(
+        uuid.UUID(current_user.tenant_id)
+    )
+    network_benchmark = [
+        (m.label, m.your_rate, m.network_median)
+        for m in benchmark.metrics
+        if m.your_rate is not None and m.network_median is not None
+    ]
+    return await _build_service(db).get_smart_insights(
+        start, end, tenant_id=current_user.tenant_id, network_benchmark=network_benchmark
+    )
 
 
 @router.get("/health-score", response_model=HealthScoreResponse)

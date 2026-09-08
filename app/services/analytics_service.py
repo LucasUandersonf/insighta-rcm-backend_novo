@@ -52,7 +52,12 @@ from app.schemas.analytics import (
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 from app.services.health_score_engine import compute_health_score
-from app.services.smart_insights_engine import DenialReasonCount, InsightsPeriodInput, generate_insights
+from app.services.smart_insights_engine import (
+    DenialReasonCount,
+    InsightsPeriodInput,
+    build_network_comparativo_insight,
+    generate_insights,
+)
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -496,7 +501,14 @@ class AnalyticsService:
             professional_denial_rates=professional_denial_rates,
         )
 
-    async def get_smart_insights(self, date_from: date, date_to: date, *, tenant_id: str) -> SmartInsightsResponse:
+    async def get_smart_insights(
+        self,
+        date_from: date,
+        date_to: date,
+        *,
+        tenant_id: str,
+        network_benchmark: list[tuple[str, float, float]] | None = None,
+    ) -> SmartInsightsResponse:
         previous = _previous_period(date_from, date_to)
         appeals_due_soon = await self.appeal_repo.count_due_within(
             as_of=date.today(), horizon_days=APPEAL_DEADLINE_ALERT_HORIZON_DAYS
@@ -532,8 +544,36 @@ class AnalyticsService:
             avg_charged_value=avg_charged,
         )
 
+        # Comparativo entre clínicas como manchete do feed (Sala de Comando
+        # 2.0, Nível 1) — `network_benchmark` vem de fora (endpoint) porque
+        # é a única fonte de dado deste método que exige sessão SEM tenant
+        # (ver DECISÃO em app/api/v1/endpoints/analytics.py::get_smart_insights
+        # e app/sql/032_network_benchmark.sql). Cada item já vem com
+        # cohort suficiente (o SQL nunca devolve mediana sem amostra
+        # mínima) — só o pior desvio (maior impacto projetado) vira
+        # manchete, mesmo critério do Radar de Profissional.
+        extra_insights = []
+        if network_benchmark:
+            total_billed = (await self.reporting_repo.billing_summary(date_from, date_to))["total_billed"]
+            candidates = [
+                insight
+                for (label, your_rate, network_median) in network_benchmark
+                if (
+                    insight := build_network_comparativo_insight(
+                        metric_label=label, your_rate=your_rate, network_median=network_median, total_billed=total_billed
+                    )
+                )
+                is not None
+            ]
+            if candidates:
+                extra_insights.append(max(candidates, key=lambda i: (i.financial_impact or 0)))
+
         insights = generate_insights(
-            current_input, previous_input, estimated_revenue_at_risk, estimated_idle_capacity_revenue_lost
+            current_input,
+            previous_input,
+            estimated_revenue_at_risk,
+            estimated_idle_capacity_revenue_lost,
+            extra_insights=extra_insights,
         )
 
         return SmartInsightsResponse(
@@ -541,7 +581,11 @@ class AnalyticsService:
             period_end=date_to,
             insights=[
                 SmartInsightResponse(
-                    severity=i.severity, title=i.title, message=i.message, financial_impact=i.financial_impact
+                    severity=i.severity,
+                    title=i.title,
+                    message=i.message,
+                    financial_impact=i.financial_impact,
+                    is_new=i.is_new,
                 )
                 for i in insights
             ],

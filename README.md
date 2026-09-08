@@ -623,6 +623,27 @@ tempo, algo que nenhum ERP de clínica individual consegue oferecer).
   não há clínicas suficientes, que a mediana bate com o valor esperado
   quando há, e que a resposta HTTP nunca carrega uma linha por clínica.
 
+### Comparativo como manchete do feed de insights (`smart-insights`)
+Segunda rodada — o mesmo dado do Comparativo acima agora também pode
+virar a MANCHETE de `GET /analytics/smart-insights`, alinhando o feed
+real ao conceito de design aprovado ("Sala de Comando — Conceito").
+`build_network_comparativo_insight` (`smart_insights_engine.py`) é
+pura/testável: recebe `your_rate`/`network_median` já com cohort
+suficiente (o SQL nunca devolve mediana sem amostra mínima, ver acima) e
+só dispara quando o desvio é >= 3 pontos percentuais — abaixo disso é
+variação normal entre clínicas parecidas, não "notícia". O impacto em
+R$ é uma PROJEÇÃO (gap de taxa × faturamento do próprio período),
+mesma natureza de aproximação de `estimated_revenue_at_risk` — nunca
+0 quando não há faturamento no período (retorna `None`, sem card).
+`get_smart_insights` recebe esse dado de fora (o endpoint busca o
+Comparativo via `NetworkBenchmarkService` numa segunda sessão SEM
+tenant, `DbSessionNoTenant`, e repassa só os pares com cohort
+suficiente) — o motor puro nunca abre sessão de banco. Só o pior
+desvio vira manchete, mesmo critério do Radar de Profissional. Cada
+`Insight` também ganhou `is_new: bool` — marca de verdade (não
+decoração) os tipos de insight lançados nesta rodada (Radar de
+Profissional, Comparativo), que o frontend usa para a pílula "Novo".
+
 ## Etapa 4 — relatório semanal via WhatsApp
 `app/worker/weekly_report_job.py` é um SCRIPT DE EXECUÇÃO ÚNICA (roda,
 processa todos os tenants ativos com `whatsapp_group_id` configurado, e

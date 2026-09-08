@@ -125,10 +125,16 @@ class InsightsPeriodInput:
 
 @dataclass
 class Insight:
-    severity: str  # "critical" | "warning" | "positive"
+    severity: str  # "critical" | "warning" | "positive" | "comparativo" (ver build_network_comparativo_insight)
     title: str
     message: str
     financial_impact: float | None = None  # em R$; usado só para ordenar por relevância
+    # Marca insights de recursos lançados nesta rodada (Sala de Comando
+    # 2.0) — nunca uma afirmação de "dado novo apareceu hoje" sobre o
+    # ACHADO em si (isso já é o que o insight inteiro comunica), só do
+    # TIPO de insight ser recente na plataforma. True hoje só em
+    # _professional_outlier_insight e build_network_comparativo_insight.
+    is_new: bool = False
 
 
 def _reason_label(code: str) -> str:
@@ -499,6 +505,49 @@ def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | Non
             f"({worst_total} faturamentos) — {ratio:.1f}x a média da própria clínica ({tenant_avg * 100:.1f}%). "
             "Vale revisar como esse profissional preenche CID e código de procedimento."
         ),
+        is_new=True,
+    )
+
+
+# Comparativo entre clínicas como MANCHETE do feed — Sala de Comando 2.0,
+# Nível 1 do roadmap ("só existe em escala"). Mesmo dado da aba
+# Comparativo (rede/network_benchmark_service.py); aqui só decide quando
+# o desvio é grande o bastante para virar destaque em texto, não só uma
+# barra na aba dedicada. Abaixo de 3pp é a variação normal entre clínicas
+# parecidas — não é "notícia".
+_COMPARATIVO_MIN_GAP_PP = 3.0
+
+
+def build_network_comparativo_insight(
+    *, metric_label: str, your_rate: float, network_median: float, total_billed: float
+) -> Insight | None:
+    """Constrói o insight de Comparativo a partir do MESMO dado da aba
+    Comparativo (your_rate/network_median já vêm com cohort suficiente —
+    ver DECISÃO em app/sql/032_network_benchmark.sql: o SQL nunca devolve
+    mediana sem amostra mínima, então esta função não precisa checar isso
+    de novo). `financial_impact` é uma PROJEÇÃO (gap de taxa x faturamento
+    do próprio período) — mesma natureza de aproximação de
+    estimated_revenue_at_risk/estimated_idle_capacity_revenue_lost, nunca
+    um número contábil fechado. Retorna None (nunca 0 ou um card vazio)
+    quando total_billed é zero — sem faturamento no período, a projeção em
+    R$ não tem base para existir."""
+    gap_pp = (your_rate - network_median) * 100
+    if gap_pp < _COMPARATIVO_MIN_GAP_PP:
+        return None
+    if total_billed <= 0:
+        return None
+    financial_impact = (your_rate - network_median) * total_billed
+    metric_lower = metric_label[0].lower() + metric_label[1:] if metric_label else metric_label
+    return Insight(
+        severity="comparativo",
+        title=f"Sua {metric_lower} está acima da rede",
+        message=(
+            f"{your_rate * 100:.1f}% nesta janela — a mediana de clínicas de porte parecido na base Insighta é "
+            f"{network_median * 100:.1f}%, {gap_pp:.1f} pontos percentuais abaixo da sua. Projetado sobre o "
+            "faturamento do período, isso equivale ao valor estimado abaixo."
+        ),
+        financial_impact=financial_impact,
+        is_new=True,
     )
 
 
@@ -507,6 +556,7 @@ def generate_insights(
     previous: InsightsPeriodInput,
     estimated_no_show_revenue_at_risk: float = 0.0,
     estimated_idle_capacity_revenue_lost: float = 0.0,
+    extra_insights: list[Insight] | None = None,
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
@@ -527,9 +577,18 @@ def generate_insights(
         if maybe_insight is not None:
             insights.append(maybe_insight)
 
+    # Comparativo entre clínicas (ver build_network_comparativo_insight) —
+    # vem de fora (analytics_service.get_smart_insights) porque exige uma
+    # sessão de banco SEM tenant (Comparativo é cross-tenant), que este
+    # motor puro nunca vê. Só o pior desvio entra — mesmo critério do
+    # Radar de Profissional acima (só o pior caso vira manchete).
+    if extra_insights:
+        insights.extend(extra_insights)
+
     # Prioriza por impacto financeiro (maior primeiro); alertas sem valor
     # monetário associado (ex: queda de ocupação) ficam depois, ordenados
-    # por severidade — crítico antes de atenção antes de positivo.
-    severity_rank = {"critical": 0, "warning": 1, "positive": 2}
-    insights.sort(key=lambda i: (i.financial_impact is None, -(i.financial_impact or 0), severity_rank[i.severity]))
+    # por severidade — crítico antes de comparativo antes de atenção antes
+    # de positivo.
+    severity_rank = {"critical": 0, "comparativo": 1, "warning": 2, "positive": 3}
+    insights.sort(key=lambda i: (i.financial_impact is None, -(i.financial_impact or 0), severity_rank.get(i.severity, 99)))
     return insights
