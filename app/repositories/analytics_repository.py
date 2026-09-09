@@ -613,6 +613,50 @@ class AnalyticsRepository:
         stmt = select(func.count()).select_from(subq.subquery())
         return int((await self.session.execute(stmt)).scalar_one())
 
+    async def list_inactive_patients(
+        self, as_of: date, *, inactive_after_days: int = 365, limit: int = 15
+    ) -> list[tuple[str, str, datetime]]:
+        """
+        Mesmo critério de `inactive_patients_count` (pelo menos 1
+        atendimento histórico, o mais recente há mais de
+        `inactive_after_days` dias), mas devolvendo QUEM são — nome e
+        data do último atendimento — em vez de só a contagem. Alimenta o
+        painel "Carteira de pacientes inativos" da Sala de Comando (ver
+        DECISÃO em ExecutiveOverviewPage.tsx/InactivePatientsPanel.tsx,
+        frontend): o insight de meta anual recomenda "reativar quem não
+        volta há mais de um ano" — esta é a lista real por trás da
+        recomendação, não só o número.
+
+        DECISÃO — lista curta (limit=15), não paginada
+        -------------------------------------------------------------
+        Isto não é uma tela de gestão de carteira (o CRUD de Pacientes
+        foi removido por decisão de produto — ver App.tsx, frontend):
+        é uma lista de leitura rápida, "por onde começar a ligar hoje",
+        ordenada por quem está inativo há MAIS tempo primeiro — mesmo
+        espírito de "lista vermelha" de PatientNoShowRankingItem
+        (top 10, ver AnalyticsRepository mais abaixo).
+
+        Retorna [(patient_id, nome, data_do_último_atendimento)].
+        """
+        from app.models.patient import Patient
+
+        cutoff = datetime.combine(as_of - timedelta(days=inactive_after_days), time.min, tzinfo=timezone.utc)
+        last_appointment_col = func.max(Appointment.scheduled_at).label("last_appointment_at")
+        subq = (
+            select(Appointment.patient_id, last_appointment_col)
+            .group_by(Appointment.patient_id)
+            .having(last_appointment_col < cutoff)
+            .subquery()
+        )
+        stmt = (
+            select(Patient.id, Patient.full_name, subq.c.last_appointment_at)
+            .join(subq, subq.c.patient_id == Patient.id)
+            .order_by(subq.c.last_appointment_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
+
     async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
         """
         Taxa de falta agregada do período inteiro (não por dia da semana

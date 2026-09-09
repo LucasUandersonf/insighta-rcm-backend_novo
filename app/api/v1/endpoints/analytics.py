@@ -30,6 +30,7 @@ from app.schemas.analytics import (
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     HealthScoreResponse,
+    InactivePatientsResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     PlanLossRankingResponse,
@@ -129,6 +130,21 @@ async def get_health_score(
     # Sem date_from/date_to de propósito — janela é fixa dentro do
     # service (ver DECISÃO em AnalyticsService.get_health_score).
     return await _build_service(db).get_health_score()
+
+
+@router.get("/inactive-patients", response_model=InactivePatientsResponse)
+async def get_inactive_patients(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> InactivePatientsResponse:
+    """
+    Carteira de pacientes inativos (Sala de Comando) — a lista real por
+    trás da recomendação "reativar quem não voltou" do insight de meta
+    anual. Sem date_from/date_to (mesmo espírito de health-score): é
+    sempre "quem não volta há mais de 1 ano a partir de hoje", não uma
+    janela de período.
+    """
+    return await _build_service(db).get_inactive_patients()
 
 
 @router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)

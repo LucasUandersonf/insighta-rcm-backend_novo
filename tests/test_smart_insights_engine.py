@@ -11,6 +11,7 @@ from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    describe_worst_no_show_weekday,
     generate_insights,
 )
 
@@ -329,6 +330,43 @@ def test_weekday_no_show_rate_small_sample_is_ignored_as_noise():
     assert generate_insights(current, _EMPTY_PERIOD) == []
 
 
+def test_weekday_drop_only_the_worst_day_becomes_a_card_when_several_qualify():
+    """Achado real (mesmo espírito de test_denial_spike_consolidates_multiple_reasons_of_the_same_plan_into_one_card):
+    3 dias caindo ao mesmo tempo não deveria virar 3 cards quase iguais —
+    só o de MAIOR queda vira insight."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        weekday_appointment_counts={1: 10, 3: 10, 5: 10},  # segunda, quarta, sexta
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        # segunda -20%, quarta -50% (a pior), sexta -30% — todas acima do gatilho de 15%
+        weekday_appointment_counts={1: 8, 3: 5, 5: 7},
+    )
+    insights = generate_insights(current, previous)
+    weekday_titles = [i for i in insights if "está com menos consultas marcadas" in i.title]
+    assert len(weekday_titles) == 1
+    assert "quarta-feira" in weekday_titles[0].title.lower()
+
+
+def test_weekday_no_show_rate_only_the_worst_day_becomes_a_card_when_several_qualify():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        # segunda 60% (6/10), quarta 44% (4/9), sexta 5% (1/20) — média
+        # geral = 11/39 = 28.2%. Segunda fica +31.8pp acima (a pior,
+        # crítico), quarta fica +16.2pp acima (warning), sexta fica
+        # ABAIXO da média (não é candidata).
+        weekday_no_show_counts={1: (6, 10), 3: (4, 9), 5: (1, 20)},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    weekday_titles = [i for i in insights if "faltam mais" in i.title]
+    assert len(weekday_titles) == 1
+    assert "segunda-feira" in weekday_titles[0].title.lower()
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""
@@ -456,6 +494,31 @@ def test_annual_goal_insight_omits_inactive_patients_note_when_zero():
     assert "não voltam há mais de um ano" not in insights[0].message
 
 
+def test_annual_goal_insight_has_action_pointing_to_inactive_patients_when_present():
+    """Antes o insight recomendava em texto mas não tinha botão nenhum
+    — não existia lista de "quem são" os pacientes inativos ainda. Ver
+    DECISÃO em AnalyticsRepository.list_inactive_patients."""
+    current = _minimal(
+        annual_revenue_goal=1_000_000.0, elapsed_year_fraction=0.5, ytd_billed_total=350_000.0,
+        inactive_patients_count=42,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert insights[0].action_label == "Ver quem não voltou"
+    assert insights[0].action_href == "#carteira-inativa"
+
+
+def test_annual_goal_insight_has_no_action_when_no_inactive_patients():
+    """Sem ninguém pra chamar de volta, sem botão — nunca um link pra
+    uma seção que ia aparecer vazia."""
+    current = _minimal(
+        annual_revenue_goal=1_000_000.0, elapsed_year_fraction=0.5, ytd_billed_total=350_000.0,
+        inactive_patients_count=0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert insights[0].action_label is None
+    assert insights[0].action_href is None
+
+
 def test_professional_outlier_flagged_when_double_the_clinic_average():
     # Média da clínica 10% (denial_risk_pct=10.0, escala 0-100) — Dr. X a
     # 25% é 2.5x a média E 15 pontos percentuais acima -> passa os dois limiares.
@@ -555,6 +618,38 @@ def test_network_comparativo_omits_reason_note_when_not_provided():
     )
     assert insight is not None
     assert "bom lugar pra" not in insight.message
+
+
+def test_network_comparativo_mentions_worst_weekday_for_no_show_when_provided():
+    """Mesmo 'por onde começar' que a variante de glosa já tinha (via
+    top_reason_label), agora também pra taxa de falta — antes esta
+    variante só mostrava o gap em R$, sem nenhuma pista de causa."""
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de falta",
+        your_rate=0.092,
+        network_median=0.051,
+        total_billed=70_000.0,
+        top_weekday_label="terça-feira",
+    )
+    assert insight is not None
+    assert "terça-feira" in insight.message
+    assert "bom lugar pra começar a agir" in insight.message
+
+
+def test_describe_worst_no_show_weekday_picks_the_biggest_gap_above_average():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (6, 10), 3: (4, 9), 5: (1, 20)},
+    )
+    assert describe_worst_no_show_weekday(current) == "segunda-feira"
+
+
+def test_describe_worst_no_show_weekday_is_none_without_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={},
+    )
+    assert describe_worst_no_show_weekday(current) is None
 
 
 def test_network_comparativo_absent_when_gap_is_trivial():

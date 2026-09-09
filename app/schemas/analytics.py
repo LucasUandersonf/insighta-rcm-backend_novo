@@ -340,3 +340,28 @@ class HealthScoreResponse(BaseModel):
     components: list[HealthScoreComponentResponse]
     window_days: int
     trend: HealthScoreTrendResponse | None = None
+
+
+class InactivePatientItem(BaseModel):
+    """Uma linha da "Carteira de pacientes inativos" — ver DECISÃO em
+    AnalyticsRepository.list_inactive_patients. Só pacientes com pelo
+    menos 1 atendimento histórico cujo último atendimento passou do
+    piso de dias entram aqui — nunca um cadastro sem histórico."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    days_since_last_appointment: int
+
+
+class InactivePatientsResponse(BaseModel):
+    """GET /api/v1/analytics/inactive-patients — a lista real por trás
+    da recomendação "reativar quem não voltou" do insight de meta anual
+    (ver DECISÃO em smart_insights_engine.py::_annual_goal_insight).
+    `total_count` é o total de pacientes inativos (pode ser maior que
+    `len(items)` — a lista é sempre truncada, ver DECISÃO no
+    repositório); `inactive_after_days` é o piso usado (padrão 365)."""
+
+    items: list[InactivePatientItem]
+    total_count: int
+    inactive_after_days: int
