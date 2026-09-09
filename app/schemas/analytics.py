@@ -227,6 +227,11 @@ class DenialRiskDistributionResponse(BaseModel):
 
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive" | "comparativo"
+    # "faturamento" | "agenda" — ver DECISÃO em smart_insights_engine.Insight.
+    # Usado pelo frontend (SmartInsightsFeed.tsx) pra agrupar o feed em
+    # seções por área, em vez de uma lista única misturando cobrança/glosa
+    # com ocupação de agenda.
+    category: str
     title: str
     message: str
     financial_impact: float | None

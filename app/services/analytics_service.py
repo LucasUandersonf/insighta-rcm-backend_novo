@@ -599,6 +599,7 @@ class AnalyticsService:
                 if (
                     insight := build_network_comparativo_insight(
                         metric_label=label,
+                        category="faturamento" if key == "denial" else "agenda",
                         your_rate=your_rate,
                         network_median=network_median,
                         total_billed=total_billed,
@@ -625,6 +626,7 @@ class AnalyticsService:
             insights=[
                 SmartInsightResponse(
                     severity=i.severity,
+                    category=i.category,
                     title=i.title,
                     message=i.message,
                     financial_impact=i.financial_impact,

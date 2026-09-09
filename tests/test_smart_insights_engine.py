@@ -46,6 +46,7 @@ def test_denial_spike_above_threshold_is_flagged_critical():
     insights = generate_insights(current, previous)
     assert len(insights) == 1
     assert insights[0].severity == "critical"
+    assert insights[0].category == "faturamento"
     assert "Unimed Nacional" in insights[0].message
     assert "50%" in insights[0].message
 
@@ -349,6 +350,7 @@ def test_weekday_drop_only_the_worst_day_becomes_a_card_when_several_qualify():
     weekday_titles = [i for i in insights if "está com menos consultas marcadas" in i.title]
     assert len(weekday_titles) == 1
     assert "quarta-feira" in weekday_titles[0].title.lower()
+    assert weekday_titles[0].category == "agenda"
 
 
 def test_weekday_no_show_rate_only_the_worst_day_becomes_a_card_when_several_qualify():
@@ -505,6 +507,10 @@ def test_annual_goal_insight_has_action_pointing_to_inactive_patients_when_prese
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label == "Ver quem não voltou"
     assert insights[0].action_href == "#carteira-inativa"
+    # Categoria é faturamento (meta de faturamento anual) mesmo o botão
+    # apontando pra uma seção de Agenda — categoria segue o QUE o
+    # insight mede, não pra onde o botão leva.
+    assert insights[0].category == "faturamento"
 
 
 def test_annual_goal_insight_has_no_action_when_no_inactive_patients():
@@ -588,10 +594,11 @@ def test_professional_outlier_absent_without_denial_risk_pct():
 
 def test_network_comparativo_flagged_when_gap_above_threshold():
     insight = build_network_comparativo_insight(
-        metric_label="Taxa de glosa", your_rate=0.092, network_median=0.051, total_billed=70_000.0
+        metric_label="Taxa de glosa", category="faturamento", your_rate=0.092, network_median=0.051, total_billed=70_000.0
     )
     assert insight is not None
     assert insight.severity == "comparativo"
+    assert insight.category == "faturamento"
     assert insight.is_new is True
     assert "está acima da rede" in insight.title
     # impacto projetado = (0.092 - 0.051) * 70000 = 2870.0
@@ -601,6 +608,7 @@ def test_network_comparativo_flagged_when_gap_above_threshold():
 def test_network_comparativo_mentions_top_reason_when_provided():
     insight = build_network_comparativo_insight(
         metric_label="Taxa de glosa",
+        category="faturamento",
         your_rate=0.092,
         network_median=0.051,
         total_billed=70_000.0,
@@ -614,7 +622,7 @@ def test_network_comparativo_mentions_top_reason_when_provided():
 
 def test_network_comparativo_omits_reason_note_when_not_provided():
     insight = build_network_comparativo_insight(
-        metric_label="Taxa de falta", your_rate=0.092, network_median=0.051, total_billed=70_000.0
+        metric_label="Taxa de falta", category="agenda", your_rate=0.092, network_median=0.051, total_billed=70_000.0
     )
     assert insight is not None
     assert "bom lugar pra" not in insight.message
@@ -626,12 +634,14 @@ def test_network_comparativo_mentions_worst_weekday_for_no_show_when_provided():
     variante só mostrava o gap em R$, sem nenhuma pista de causa."""
     insight = build_network_comparativo_insight(
         metric_label="Taxa de falta",
+        category="agenda",
         your_rate=0.092,
         network_median=0.051,
         total_billed=70_000.0,
         top_weekday_label="terça-feira",
     )
     assert insight is not None
+    assert insight.category == "agenda"
     assert "terça-feira" in insight.message
     assert "bom lugar pra começar a agir" in insight.message
 
@@ -656,7 +666,7 @@ def test_network_comparativo_absent_when_gap_is_trivial():
     # 5.1% vs 5.0% -> 0.1pp, bem abaixo do piso de 3pp — variação normal
     # entre clínicas parecidas, não é "notícia".
     insight = build_network_comparativo_insight(
-        metric_label="Taxa de glosa", your_rate=0.051, network_median=0.050, total_billed=70_000.0
+        metric_label="Taxa de glosa", category="faturamento", your_rate=0.051, network_median=0.050, total_billed=70_000.0
     )
     assert insight is None
 
@@ -665,14 +675,14 @@ def test_network_comparativo_absent_without_billing_in_period():
     # Sem faturamento no período, a projeção em R$ não tem base — None,
     # nunca um card com impacto R$ 0,00 inventado.
     insight = build_network_comparativo_insight(
-        metric_label="Taxa de glosa", your_rate=0.092, network_median=0.051, total_billed=0.0
+        metric_label="Taxa de glosa", category="faturamento", your_rate=0.092, network_median=0.051, total_billed=0.0
     )
     assert insight is None
 
 
 def test_network_comparativo_enters_generate_insights_via_extra_insights():
     comparativo = build_network_comparativo_insight(
-        metric_label="Taxa de glosa", your_rate=0.30, network_median=0.05, total_billed=100_000.0
+        metric_label="Taxa de glosa", category="faturamento", your_rate=0.30, network_median=0.05, total_billed=100_000.0
     )
     assert comparativo is not None
     insights = generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD, extra_insights=[comparativo])

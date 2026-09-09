@@ -177,6 +177,16 @@ class Insight:
     severity: str  # "critical" | "warning" | "positive" | "comparativo" (ver build_network_comparativo_insight)
     title: str
     message: str
+    # DECISÃO — categoria de área ("faturamento" | "agenda"), pedido explícito
+    # do usuário depois de ver o feed da Sala de Comando na prática: com
+    # cobrança/glosa e agenda/ocupação misturadas na mesma lista, a tela
+    # ficava "embolada" — o gestor do financeiro e o da recepção cuidam de
+    # problemas diferentes, mas viam tudo junto. SmartInsightsFeed.tsx usa
+    # isto pra agrupar em duas seções, mantendo só o insight de maior
+    # impacto (a manchete) fora de qualquer seção. Sem default de propósito:
+    # cada função de insight abaixo precisa declarar a sua categoria
+    # explicitamente, nunca herdar uma categoria errada por omissão.
+    category: str
     financial_impact: float | None = None  # em R$; usado só para ordenar por relevância
     # Marca insights de recursos lançados nesta rodada (Sala de Comando
     # 2.0) — nunca uma afirmação de "dado novo apareceu hoje" sobre o
@@ -268,6 +278,7 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
         insights.append(
             Insight(
                 severity="critical",
+                category="faturamento",
                 title=f"{plan_name} está recusando mais pagamentos que o normal",
                 message=(
                     f"Nos últimos dias, a {plan_name} {what_happened} — {total_cases} atendimento(s) afetado(s) "
@@ -288,6 +299,7 @@ def _financial_hole_insight(current: InsightsPeriodInput, previous: InsightsPeri
     trend = "e essa diferença está aumentando" if delta > 0 else "mas essa diferença já está estável ou diminuindo"
     return Insight(
         severity="warning",
+        category="faturamento",
         title="Você está cobrando menos do que devia de alguns convênios",
         message=(
             f"Nos últimos dias, sua clínica cobrou R$ {current.financial_hole_total:,.2f} abaixo do que estava "
@@ -308,6 +320,7 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
     trend = "e essa diferença está aumentando" if delta > 0 else "mas essa diferença já está estável ou diminuindo"
     return Insight(
         severity="critical",
+        category="faturamento",
         title="Um convênio pagou menos do que devia por atendimentos já confirmados",
         message=(
             f"Você cobrou certo, mas o convênio pagou R$ {current.payment_gap_total:,.2f} menos do que o "
@@ -329,6 +342,7 @@ def _value_saved_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
         return None  # só celebra quando o número de fato melhorou
     return Insight(
         severity="positive",
+        category="faturamento",
         title="O sistema evitou que você perdesse dinheiro com pagamento recusado",
         message=(
             f"Nos últimos dias, o Insighta corrigiu cobranças antes de elas serem enviadas e evitou "
@@ -355,6 +369,7 @@ def _capacity_drop_insight(
         )
         return Insight(
             severity="warning",
+            category="agenda",
             title="Sua agenda está com mais horários vazios do que o normal",
             message=(
                 f"Nos últimos dias, a agenda da sua clínica ficou {drop_pp:.0f} pontos percentuais mais vazia "
@@ -374,6 +389,7 @@ def _no_show_risk_insight(current: InsightsPeriodInput, estimated_revenue_at_ris
     plural = "s" if current.high_risk_no_show_count != 1 else ""
     return Insight(
         severity="warning",
+        category="agenda",
         title="Tem gente com boa chance de não aparecer nos próximos dias",
         message=(
             f"O sistema encontrou {current.high_risk_no_show_count} consulta{plural} marcada{plural} com alta "
@@ -428,6 +444,7 @@ def _weekday_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriod
     label = _WEEKDAY_LABELS[weekday]
     return Insight(
         severity=severity,
+        category="agenda",
         title=f"{label.capitalize()} está com menos consultas marcadas",
         message=(
             f"Toda {label} sua clínica costumava ter {previous_count} consulta(s) marcada(s) — nas "
@@ -517,6 +534,7 @@ def _weekday_no_show_rate_insight(current: InsightsPeriodInput) -> Insight | Non
     comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
     return Insight(
         severity=severity,
+        category="agenda",
         title=f"As pessoas faltam mais nas {label}s do que nos outros dias",
         message=(
             f"Numa {label} comum, {rate * 100:.0f}% das consultas marcadas na sua clínica acabam sendo "
@@ -542,6 +560,7 @@ def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
     severity = "critical" if current.denial_risk_pct >= _DENIAL_RISK_PCT_CRITICAL else "warning"
     return Insight(
         severity=severity,
+        category="faturamento",
         title="Boa parte do que você faturou corre risco de ser recusada pelo convênio",
         message=(
             f"Das contas que você fechou nesses últimos dias, uma parte que soma R$ {current.denial_at_risk_value:,.2f} "
@@ -592,6 +611,7 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
     )
     return Insight(
         severity=severity,
+        category="faturamento",
         title="No ritmo atual, a meta do ano não vai ser alcançada",
         message=(
             f"Sua clínica já faturou R$ {current.ytd_billed_total:,.2f} este ano — isso é {progress_pct:.0f}% da "
@@ -623,6 +643,7 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     plural = "s" if current.appeals_due_soon_count != 1 else ""
     return Insight(
         severity="critical",
+        category="faturamento",
         title="Você está perto de perder o direito de contestar uma recusa de pagamento",
         message=(
             f"Tem {current.appeals_due_soon_count} contestação{plural} de recusa de pagamento com o prazo "
@@ -667,6 +688,7 @@ def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | Non
     comparison = _comparative_phrase(ratio)
     return Insight(
         severity="warning",
+        category="faturamento",
         title=f"{worst_name} está fora do padrão de glosa da equipe",
         message=(
             f"Dos atendimentos de {worst_name} nesses últimos dias, {worst_rate * 100:.0f}% correm risco de o "
@@ -698,6 +720,7 @@ _COMPARATIVO_MIN_GAP_PP = 3.0
 def build_network_comparativo_insight(
     *,
     metric_label: str,
+    category: str,
     your_rate: float,
     network_median: float,
     total_billed: float,
@@ -723,7 +746,13 @@ def build_network_comparativo_insight(
     de acordo com qual métrica é ("denial" recebe reason, "no_show"
     recebe weekday — não faz sentido misturar) — os dois dão ao "onde
     você está perdendo" um "por onde começar", em vez de só mostrar o
-    gap em R$ sem pista de causa."""
+    gap em R$ sem pista de causa.
+
+    `category` — recebido explícito do chamador (nunca inferido de qual
+    dos dois labels acima veio preenchido: describe_denial_reason/
+    describe_worst_no_show_weekday podem voltar None mesmo quando a
+    métrica É a certa, ex: sem dado de motivo de glosa ainda — inferir
+    pela presença do label classificaria errado nesse caso)."""
     gap_pp = (your_rate - network_median) * 100
     if gap_pp < _COMPARATIVO_MIN_GAP_PP:
         return None
@@ -745,6 +774,7 @@ def build_network_comparativo_insight(
         starting_point_note = ""
     return Insight(
         severity="comparativo",
+        category=category,
         title=f"Sua {metric_lower} está acima da rede",
         message=(
             f"Comparamos sua clínica com outras de porte parecido que também usam o Insighta (sempre em grupo, "
