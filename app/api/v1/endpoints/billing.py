@@ -54,6 +54,12 @@ async def list_high_risk_billing(
     db: DbSession,
     limit: int = 20,
     offset: int = 0,
+    # Opcional (Sala de Comando 2.0, item 4 do roadmap) — o insight de
+    # recusa em alta linka pra aqui já com este parâmetro preenchido
+    # (ver DECISÃO em smart_insights_engine.py::_denial_spike_insights),
+    # pra abrir a fila JÁ FILTRADA pelo convênio exato que disparou o
+    # card, em vez da fila geral que o usuário tinha que vasculhar.
+    insurance_plan_id: UUID | None = None,
     current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
 ) -> PaginatedResponse[BillingResponse]:
     """
@@ -69,7 +75,9 @@ async def list_high_risk_billing(
     """
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
-    return await _build_service(db).list_high_risk_paginated(limit=limit, offset=offset)
+    return await _build_service(db).list_high_risk_paginated(
+        limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+    )
 
 
 @router.post("/{billing_id}/settle", response_model=BillingResponse)

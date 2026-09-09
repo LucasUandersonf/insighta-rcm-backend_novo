@@ -199,3 +199,47 @@ async def test_list_high_risk_billing_returns_only_held_for_review(client, auth_
     reasons = [item["denial_reasons"] for item in items]
     assert len(items) == 1
     assert "missing_cid" in reasons[0]
+
+
+async def test_list_high_risk_billing_filters_by_insurance_plan_id(client, auth_headers_a, admin_engine, tenant_a):
+    """Sala de Comando 2.0, item 4 do roadmap ("botão de ação real"): o
+    insight de recusa em alta agora linka pra aqui já filtrado pelo
+    convênio exato — este teste prova que o filtro de verdade restringe
+    a fila, não só decora a URL sem efeito."""
+    plan_a = await _create_insurance_plan(admin_engine, tenant_a, display_name="Bradesco", normalized_key="bradesco")
+    plan_b = await _create_insurance_plan(admin_engine, tenant_a, display_name="Amil", normalized_key="amil")
+    await _create_contract(admin_engine, tenant_a, plan_a, procedure_code="70707070", agreed_value=150.0)
+    await _create_contract(admin_engine, tenant_a, plan_b, procedure_code="80808080", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Dois Convênios"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    async def _create_high_risk_billing(plan_id: str, procedure_code: str) -> None:
+        appt = await client.post(
+            "/api/v1/appointments",
+            json={
+                "patient_id": patient_id,
+                "insurance_plan_id": plan_id,
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "procedure_code": procedure_code,
+                # cid_code omitido -> alto risco
+            },
+            headers=auth_headers_a,
+        )
+        await client.post(
+            "/api/v1/billing",
+            json={"appointment_id": appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 150.0},
+            headers=auth_headers_a,
+        )
+
+    await _create_high_risk_billing(plan_a, "70707070")
+    await _create_high_risk_billing(plan_b, "80808080")
+
+    unfiltered = await client.get("/api/v1/billing/high-risk", headers=auth_headers_a)
+    assert unfiltered.json()["total"] == 2
+
+    filtered = await client.get(f"/api/v1/billing/high-risk?insurance_plan_id={plan_a}", headers=auth_headers_a)
+    assert filtered.status_code == 200
+    body = filtered.json()
+    assert body["total"] == 1
+    assert body["items"][0]["charged_value"] == 150.0

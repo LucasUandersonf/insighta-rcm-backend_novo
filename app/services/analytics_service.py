@@ -484,16 +484,16 @@ class AnalyticsService:
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
 
-        reason_counts: dict[tuple[str, str], int] = {}
-        for plan_name, reasons in denial_findings:
+        reason_counts: dict[tuple[str, str, str], int] = {}
+        for plan_id, plan_name, reasons in denial_findings:
             for reason_code in reasons:
-                key = (plan_name, reason_code)
+                key = (plan_id, plan_name, reason_code)
                 reason_counts[key] = reason_counts.get(key, 0) + 1
 
         return InsightsPeriodInput(
             denial_reason_counts=[
-                DenialReasonCount(plan_name=plan_name, reason_code=reason_code, count=count)
-                for (plan_name, reason_code), count in reason_counts.items()
+                DenialReasonCount(plan_id=plan_id, plan_name=plan_name, reason_code=reason_code, count=count)
+                for (plan_id, plan_name, reason_code), count in reason_counts.items()
             ],
             financial_hole_total=financial_hole,
             payment_gap_total=payment_gap,

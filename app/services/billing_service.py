@@ -139,8 +139,12 @@ class BillingService:
         items = await self.billing_repo.list_high_risk()
         return [BillingResponse.model_validate(i) for i in items]
 
-    async def list_high_risk_paginated(self, *, limit: int, offset: int) -> PaginatedResponse[BillingResponse]:
-        items, total = await self.billing_repo.list_high_risk_paginated(limit=limit, offset=offset)
+    async def list_high_risk_paginated(
+        self, *, limit: int, offset: int, insurance_plan_id: uuid.UUID | None = None
+    ) -> PaginatedResponse[BillingResponse]:
+        items, total = await self.billing_repo.list_high_risk_paginated(
+            limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+        )
         return PaginatedResponse(
             items=[BillingResponse.model_validate(i) for i in items], total=total, limit=limit, offset=offset
         )

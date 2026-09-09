@@ -26,11 +26,22 @@ class BillingRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def list_high_risk_paginated(self, *, limit: int, offset: int) -> tuple[list[Billing], int]:
+    async def list_high_risk_paginated(
+        self, *, limit: int, offset: int, insurance_plan_id: uuid.UUID | None = None
+    ) -> tuple[list[Billing], int]:
         # Mesmo padrão de paginação aplicado a contracts/denial-appeals/
         # patients (ver PaginatedResponse em app/schemas/pagination.py):
         # itens + contagem total, para a UI renderizar "Mostrando X-Y de Z".
+        #
+        # `insurance_plan_id` opcional (Sala de Comando 2.0, item 4 do
+        # roadmap "botão de ação real"): o insight de recusa em alta
+        # agora linka direto pra AQUI, já filtrado pelo convênio exato
+        # que disparou o card — antes sempre caía na fila GERAL, e o
+        # usuário tinha que procurar sozinho quais linhas eram daquele
+        # convênio (ver DECISÃO em smart_insights_engine.py::_denial_spike_insights).
         base = select(Billing).where(Billing.denial_risk_level == "high")
+        if insurance_plan_id is not None:
+            base = base.where(Billing.insurance_plan_id == insurance_plan_id)
         total = (await self.session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
         stmt = base.order_by(Billing.created_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(stmt)
