@@ -18,6 +18,7 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -64,6 +65,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         # Só para ler Tenant.annual_revenue_goal (meta manual) no insight
         # de desempenho anual — ver smart_insights_engine.py::_annual_goal_insight.
         TenantRepository(db),
+        HealthScoreSnapshotRepository(db),
     )
 
 

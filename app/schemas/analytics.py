@@ -316,6 +316,19 @@ class OportunidadesResponse(BaseModel):
     window_days: int
 
 
+class HealthScoreTrendResponse(BaseModel):
+    """Tendência da Nota de Saúde — nota de hoje contra a fotografia mais
+    próxima de ~90 dias atrás (ver DECISÃO em
+    app/sql/034_health_score_snapshots.sql). Só existe quando já há uma
+    fotografia de referência gravada — base nova, sem 3 meses de
+    histórico ainda, simplesmente não tem tendência (nunca um número
+    inventado)."""
+
+    reference_score: float
+    reference_month: date
+    delta: float  # score atual - reference_score; positivo = melhorou
+
+
 class HealthScoreResponse(BaseModel):
     """GET /api/v1/analytics/health-score — Nota de Saúde Financeira
     (Sala de Comando). Janela sempre fixa (ver DECISÃO em
@@ -326,3 +339,4 @@ class HealthScoreResponse(BaseModel):
     score: float | None  # None = amostra insuficiente em TODOS os componentes ainda
     components: list[HealthScoreComponentResponse]
     window_days: int
+    trend: HealthScoreTrendResponse | None = None

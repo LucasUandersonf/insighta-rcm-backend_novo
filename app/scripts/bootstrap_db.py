@@ -235,6 +235,11 @@ _POST_UPGRADE_SQL_FILES = [
     # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
     # em _POST_UPGRADE_MARKER_TABLE.
     "033_network_contract_price_benchmark.sql",
+    # Tendência da Nota de Saúde Financeira — core.health_score_snapshots
+    # (RLS normal, dado da clínica — ver DECISÃO no próprio .sql). CREATE
+    # TABLE sem IF NOT EXISTS — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE).
+    "034_health_score_snapshots.sql",
 ]
 
 _ROLES_SQL = """
@@ -405,6 +410,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "027_platform_risk_alerts.sql": "platform_risk_alerts",
     "028_webhook_delivery_queue.sql": "webhook_delivery_queue",
     "029_platform_users.sql": "platform_users",
+    "034_health_score_snapshots.sql": "health_score_snapshots",
 }
 
 

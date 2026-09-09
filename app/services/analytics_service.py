@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -37,6 +38,7 @@ from app.schemas.analytics import (
     ExecutiveSummaryResponse,
     HealthScoreComponentResponse,
     HealthScoreResponse,
+    HealthScoreTrendResponse,
     NoShowRiskBucket,
     PatientNoShowRankingItem,
     PeakHourBucket,
@@ -67,6 +69,12 @@ from app.services.smart_insights_engine import (
 # dá amostra mínima razoável para o componente de recurso de glosa
 # (resolução de recurso é lenta, poucos por semana).
 _HEALTH_SCORE_WINDOW_DAYS = 90
+
+# Referência da tendência do anel de saúde: "como eu estava há 3 meses"
+# — mesma janela de 90 dias, por consistência com a própria nota (que já
+# usa essa janela para o cálculo atual). Ver DECISÃO completa em
+# app/sql/034_health_score_snapshots.sql.
+_HEALTH_SCORE_TREND_REFERENCE_DAYS = 90
 
 # Janela de alerta de prazo de recurso: "vencendo em breve" — mesmo
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
@@ -156,6 +164,7 @@ class AnalyticsService:
         capacity_repo: CapacityRepository,
         appeal_repo: DenialAppealRepository,
         tenant_repo: TenantRepository,
+        health_score_snapshot_repo: HealthScoreSnapshotRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -163,6 +172,7 @@ class AnalyticsService:
         self.appeal_repo = appeal_repo
         self.tenant_repo = tenant_repo
         self.availability_repo = availability_repo
+        self.health_score_snapshot_repo = health_score_snapshot_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -623,10 +633,11 @@ class AnalyticsService:
 
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(window_start_date, today)
         denial_risk_pct_0_100, _denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
-        # _denial_risk_pct devolve 0-100 (mesma escala do KPI "Faturamento
-        # retido" da Sala de Comando) — health_score_engine.py trabalha
-        # com fração 0.0-1.0 em TODOS os componentes (mesma escala de
-        # no_show_count/no_show_total), por isso a conversão aqui.
+        # _denial_risk_pct devolve 0-100 (mesma escala 0-100 usada em
+        # "faturamentos travados por risco" na tira de KPIs da Sala de
+        # Comando) — health_score_engine.py trabalha com fração 0.0-1.0
+        # em TODOS os componentes (mesma escala de no_show_count/
+        # no_show_total), por isso a conversão aqui.
         denial_risk_pct = denial_risk_pct_0_100 / 100 if denial_risk_pct_0_100 is not None else None
         no_show_count, no_show_total = await self.analytics_repo.overall_no_show_rate(window_start_date, today)
         appeal_counts = await self.appeal_repo.count_resolved_by_status(since=window_start_dt)
@@ -639,6 +650,23 @@ class AnalyticsService:
             appeal_indeferido_count=appeal_counts["indeferido"],
         )
 
+        # Tendência (ver DECISÃO em app/sql/034_health_score_snapshots.sql):
+        # só existe quando (a) a nota atual pôde ser calculada e (b) já
+        # existe uma fotografia gravada de referência com nota não-nula
+        # — base nova, sem 3 meses de histórico ainda, não tem tendência
+        # nenhuma para mostrar (nunca inventa um "0%" ou repete a nota
+        # atual como se fosse a de 3 meses atrás).
+        trend = None
+        if result.score is not None:
+            reference_date = today - timedelta(days=_HEALTH_SCORE_TREND_REFERENCE_DAYS)
+            reference = await self.health_score_snapshot_repo.get_reference_snapshot(on_or_before=reference_date)
+            if reference is not None and reference.score is not None:
+                trend = HealthScoreTrendResponse(
+                    reference_score=reference.score,
+                    reference_month=reference.snapshot_month,
+                    delta=result.score - reference.score,
+                )
+
         return HealthScoreResponse(
             score=result.score,
             components=[
@@ -646,4 +674,5 @@ class AnalyticsService:
                 for c in result.components
             ],
             window_days=_HEALTH_SCORE_WINDOW_DAYS,
+            trend=trend,
         )

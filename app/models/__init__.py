@@ -13,6 +13,7 @@ from app.models.billing import Billing  # noqa: F401
 from app.models.contract import Contract  # noqa: F401
 from app.models.contract_item import ContractItem  # noqa: F401
 from app.models.denial_appeal import DenialAppeal, DenialAppealAttachment  # noqa: F401
+from app.models.health_score_snapshot import HealthScoreSnapshot  # noqa: F401
 from app.models.ingestion_file import IngestionFile  # noqa: F401
 from app.models.ingestion_raw_row import IngestionRawRow  # noqa: F401
 from app.models.insurance_company import InsuranceCompany  # noqa: F401
