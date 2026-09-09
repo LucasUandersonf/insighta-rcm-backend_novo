@@ -39,6 +39,8 @@ from app.schemas.analytics import (
     HealthScoreComponentResponse,
     HealthScoreResponse,
     HealthScoreTrendResponse,
+    InactivePatientItem,
+    InactivePatientsResponse,
     NoShowRiskBucket,
     PatientNoShowRankingItem,
     PeakHourBucket,
@@ -59,6 +61,7 @@ from app.services.smart_insights_engine import (
     InsightsPeriodInput,
     build_network_comparativo_insight,
     describe_denial_reason,
+    describe_worst_no_show_weekday,
     generate_insights,
 )
 
@@ -75,6 +78,13 @@ _HEALTH_SCORE_WINDOW_DAYS = 90
 # usa essa janela para o cálculo atual). Ver DECISÃO completa em
 # app/sql/034_health_score_snapshots.sql.
 _HEALTH_SCORE_TREND_REFERENCE_DAYS = 90
+
+# Mesmo piso usado por _annual_goal_insight (via inactive_patients_count)
+# — "não volta há mais de 1 ano" — repetido aqui só como nome, não como
+# valor duplicado de propósito: os dois pontos que citam esse número (o
+# insight de meta anual e a lista de get_inactive_patients) precisam
+# sempre bater no mesmo piso.
+_INACTIVE_PATIENT_AFTER_DAYS = 365
 
 # Janela de alerta de prazo de recurso: "vencendo em breve" — mesmo
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
@@ -537,7 +547,9 @@ class AnalyticsService:
             annual_revenue_goal=float(tenant.annual_revenue_goal) if tenant and tenant.annual_revenue_goal else None,
             elapsed_year_fraction=_elapsed_year_fraction(today),
             ytd_billed_total=await self.analytics_repo.ytd_billed_total(today),
-            inactive_patients_count=await self.analytics_repo.inactive_patients_count(today),
+            inactive_patients_count=await self.analytics_repo.inactive_patients_count(
+                today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS
+            ),
         )
 
         current_input = await self._period_insights_input(
@@ -565,8 +577,10 @@ class AnalyticsService:
         # manchete, mesmo critério do Radar de Profissional. `key` (além
         # do `label`) identifica qual métrica é "denial" — só essa recebe
         # o "por onde começar" (motivo de glosa mais comum da própria
-        # clínica, ver DECISÃO em build_network_comparativo_insight); não
-        # faz sentido pra taxa de falta.
+        # clínica, ver DECISÃO em build_network_comparativo_insight); a
+        # métrica de falta recebe o equivalente pra taxa de falta (pior
+        # dia da semana da própria clínica, ver describe_worst_no_show_weekday) —
+        # mesmo "por onde começar", fonte de dado diferente.
         extra_insights = []
         if network_benchmark:
             total_billed = (await self.reporting_repo.billing_summary(date_from, date_to))["total_billed"]
@@ -577,6 +591,7 @@ class AnalyticsService:
                     reason_totals[reason_count.reason_code] = reason_totals.get(reason_count.reason_code, 0) + reason_count.count
                 top_reason_code = max(reason_totals, key=lambda code: reason_totals[code])
                 top_reason_label = describe_denial_reason(top_reason_code)
+            top_weekday_label = describe_worst_no_show_weekday(current_input)
 
             candidates = [
                 insight
@@ -588,6 +603,7 @@ class AnalyticsService:
                         network_median=network_median,
                         total_billed=total_billed,
                         top_reason_label=top_reason_label if key == "denial" else None,
+                        top_weekday_label=top_weekday_label if key == "no_show" else None,
                     )
                 )
                 is not None
@@ -675,4 +691,30 @@ class AnalyticsService:
             ],
             window_days=_HEALTH_SCORE_WINDOW_DAYS,
             trend=trend,
+        )
+
+    async def get_inactive_patients(self) -> InactivePatientsResponse:
+        """
+        Carteira de pacientes inativos — a lista real por trás da
+        recomendação "reativar quem não voltou" do insight de meta
+        anual (ver DECISÃO em smart_insights_engine.py::_annual_goal_insight
+        e AnalyticsRepository.list_inactive_patients). Mesmo piso de dias
+        (`_INACTIVE_PATIENT_AFTER_DAYS`) usado nos dois lugares — a
+        contagem que o insight cita e a lista aqui precisam bater.
+        """
+        today = date.today()
+        total_count = await self.analytics_repo.inactive_patients_count(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
+        rows = await self.analytics_repo.list_inactive_patients(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
+        return InactivePatientsResponse(
+            items=[
+                InactivePatientItem(
+                    patient_id=uuid.UUID(patient_id),
+                    full_name=full_name,
+                    last_appointment_at=last_appointment_at,
+                    days_since_last_appointment=(datetime.now(timezone.utc) - last_appointment_at).days,
+                )
+                for patient_id, full_name, last_appointment_at in rows
+            ],
+            total_count=total_count,
+            inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )

@@ -74,7 +74,7 @@ _DENIAL_RISK_PCT_WARNING = 15.0
 # semana (weekday_appointment_counts acima) não responde "quinta tem taxa
 # de falta alta" — só "quinta tem menos gente marcado". Comparação é
 # INTRA-período (o dia contra a MÉDIA do próprio período), não período
-# a período como _weekday_drop_insights: um corte absoluto (ex: "acima de
+# a período como _weekday_drop_insight: um corte absoluto (ex: "acima de
 # 30%") não se adapta ao perfil de cada clínica/especialidade, mas "este
 # dia está X pontos acima da sua própria média" é sempre acionável.
 _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP = 20.0  # pontos percentuais acima da média do período
@@ -134,12 +134,12 @@ class InsightsPeriodInput:
     appeals_due_soon_count: int = 0
     # Volume de agendamentos por dia da semana (0=domingo..6=sábado — ver
     # AnalyticsRepository.appointment_weekday_histogram) — alimenta
-    # _weekday_drop_insights. Default {} para não quebrar chamadas/testes
+    # _weekday_drop_insight. Default {} para não quebrar chamadas/testes
     # existentes que ainda não passam esse dado.
     weekday_appointment_counts: dict[int, int] = field(default_factory=dict)
     # Taxa de falta por dia da semana — {weekday: (no_show_count, total_
     # resolvido)} — ver AnalyticsRepository.weekday_no_show_rate_breakdown
-    # e _weekday_no_show_rate_insights. Só faz sentido em `current` (a
+    # e _weekday_no_show_rate_insight. Só faz sentido em `current` (a
     # comparação é intra-período, contra a própria média do período, não
     # período a período), mas o default {} existe pelo mesmo motivo de
     # weekday_appointment_counts: não quebrar chamadas/testes existentes.
@@ -387,7 +387,7 @@ def _no_show_risk_insight(current: InsightsPeriodInput, estimated_revenue_at_ris
     )
 
 
-def _weekday_drop_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
+def _weekday_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
     """
     Traduz a comparação de agenda por dia da semana em texto acionável —
     exatamente o exemplo do briefing de redesenho: em vez de um número
@@ -399,8 +399,17 @@ def _weekday_drop_insights(current: InsightsPeriodInput, previous: InsightsPerio
     tecnicamente "-100%" todo dia parado, ruído puro. Só reporta QUEDA
     (um salto de agenda não é um alerta, é uma boa notícia que já aparece
     como número em Agenda & Capacidade, sem precisar virar alerta textual).
+
+    DECISÃO — só o PIOR dia vira card, não um por dia
+    -------------------------------------------------------------------
+    Achado real (mesmo espírito de _denial_spike_insights/
+    _professional_outlier_insight): uma clínica com 3 dias da semana
+    caindo ao mesmo tempo mostrava 3 cards quase idênticos no feed —
+    "linguiça" pura. Agora só o dia com a MAIOR queda vira insight; os
+    demais continuam visíveis como número no gráfico de apoio de Agenda
+    & Capacidade, sem precisar de um card de texto cada.
     """
-    insights: list[Insight] = []
+    candidates: list[tuple[int, int, int, float]] = []  # (weekday, previous_count, current_count, drop_pct)
     for weekday in range(7):
         previous_count = previous.weekday_appointment_counts.get(weekday, 0)
         if previous_count < _MIN_WEEKDAY_SAMPLE:
@@ -409,49 +418,44 @@ def _weekday_drop_insights(current: InsightsPeriodInput, previous: InsightsPerio
         drop_pct = ((previous_count - current_count) / previous_count) * 100
         if drop_pct < _WEEKDAY_DROP_WARNING_PCT:
             continue
-        severity = "critical" if drop_pct >= _WEEKDAY_DROP_CRITICAL_PCT else "warning"
-        label = _WEEKDAY_LABELS[weekday]
-        insights.append(
-            Insight(
-                severity=severity,
-                title=f"{label.capitalize()} está com menos consultas marcadas",
-                message=(
-                    f"Toda {label} sua clínica costumava ter {previous_count} consulta(s) marcada(s) — nas "
-                    f"últimas semanas, caiu para {current_count} (uma queda de {drop_pct:.0f}%). Vale entender "
-                    "o motivo: algum profissional que atendia nesse dia mudou de horário? Um lembrete ou uma "
-                    f"condição especial pra quem marcar numa {label} pode ajudar a recuperar esse movimento."
-                ),
-                action_label="Ver volume de consultas",
-                action_href="#agenda-resumo",
-            )
-        )
-    return insights
+        candidates.append((weekday, previous_count, current_count, drop_pct))
+
+    if not candidates:
+        return None
+
+    weekday, previous_count, current_count, drop_pct = max(candidates, key=lambda c: c[3])
+    severity = "critical" if drop_pct >= _WEEKDAY_DROP_CRITICAL_PCT else "warning"
+    label = _WEEKDAY_LABELS[weekday]
+    return Insight(
+        severity=severity,
+        title=f"{label.capitalize()} está com menos consultas marcadas",
+        message=(
+            f"Toda {label} sua clínica costumava ter {previous_count} consulta(s) marcada(s) — nas "
+            f"últimas semanas, caiu para {current_count} (uma queda de {drop_pct:.0f}%). Vale entender "
+            "o motivo: algum profissional que atendia nesse dia mudou de horário? Um lembrete ou uma "
+            f"condição especial pra quem marcar numa {label} pode ajudar a recuperar esse movimento."
+        ),
+        action_label="Ver volume de consultas",
+        action_href="#agenda-resumo",
+    )
 
 
-def _weekday_no_show_rate_insights(current: InsightsPeriodInput) -> list[Insight]:
-    """
-    Responde diretamente "qual dia da semana tem taxa de falta alta" —
-    achado do usuário sobre lacuna do módulo de Agenda (weekday_appointment_counts/
-    _weekday_drop_insights só mostravam VOLUME, nunca a taxa). Compara
-    cada dia contra a MÉDIA do próprio período (intra-período), não
-    contra o período anterior nem contra um corte absoluto — o mesmo
-    corte de 30% pode ser trivial pra uma clínica de estética e grave
-    pra uma de saúde mental, então "X pontos ACIMA da sua própria média"
-    generaliza melhor entre clínicas do que um número fixo.
-
-    Só entram dias com amostra mínima (_MIN_WEEKDAY_SAMPLE) — mesmo
-    raciocínio de _weekday_drop_insights: 1 falta em 1 atendimento seria
-    "100%", ruído estatístico, não um padrão. Só reporta dias ACIMA da
-    média (um dia ótimo não é um alerta, já aparece como número no
-    gráfico de apoio de Agenda & Capacidade).
-    """
+def _worst_no_show_weekday(current: InsightsPeriodInput) -> tuple[int, float, float] | None:
+    """Achado compartilhado por _weekday_no_show_rate_insight e pelo
+    "por onde começar" do Comparativo de taxa de falta (ver
+    describe_worst_no_show_weekday abaixo) — mesmo piso de amostra
+    mínima e mesmo critério "X pontos acima da MÉDIA do próprio
+    período" dos dois lugares, calculado uma única vez. Retorna
+    (weekday, taxa_do_dia, taxa_média_do_período) do dia com o MAIOR
+    desvio acima da média, ou None se nenhum dia tem amostra suficiente
+    ou nenhum está acima do piso de aviso."""
     total_no_show = sum(no_show for no_show, _ in current.weekday_no_show_counts.values())
     total_relevant = sum(total for _, total in current.weekday_no_show_counts.values())
     if total_relevant == 0:
-        return []
+        return None
     overall_rate = total_no_show / total_relevant
 
-    insights: list[Insight] = []
+    candidates: list[tuple[int, float, float]] = []  # (weekday, rate, gap_pp)
     for weekday in range(7):
         no_show_count, total = current.weekday_no_show_counts.get(weekday, (0, 0))
         if total < _MIN_WEEKDAY_SAMPLE:
@@ -460,24 +464,69 @@ def _weekday_no_show_rate_insights(current: InsightsPeriodInput) -> list[Insight
         gap_pp = (rate - overall_rate) * 100
         if gap_pp < _WEEKDAY_NO_SHOW_RATE_WARNING_PP:
             continue
-        severity = "critical" if gap_pp >= _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP else "warning"
-        label = _WEEKDAY_LABELS[weekday]
-        comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
-        insights.append(
-            Insight(
-                severity=severity,
-                title=f"As pessoas faltam mais nas {label}s do que nos outros dias",
-                message=(
-                    f"Numa {label} comum, {rate * 100:.0f}% das consultas marcadas na sua clínica acabam sendo "
-                    f"falta — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Um lembrete de "
-                    f"confirmação enviado com 1 dia de antecedência, especialmente pras {label}s, costuma "
-                    "resolver boa parte disso."
-                ),
-                action_label="Ver risco de falta",
-                action_href="#agenda-resumo",
-            )
-        )
-    return insights
+        candidates.append((weekday, rate, gap_pp))
+
+    if not candidates:
+        return None
+
+    weekday, rate, _gap_pp = max(candidates, key=lambda c: c[2])
+    return weekday, rate, overall_rate
+
+
+def describe_worst_no_show_weekday(current: InsightsPeriodInput) -> str | None:
+    """Tradução em português simples do dia da semana com pior taxa de
+    falta — pública porque analytics_service.py também usa isto pra
+    montar o "por onde começar" do Comparativo de taxa de falta (ver
+    build_network_comparativo_insight), mesmo espírito de
+    describe_denial_reason para a métrica de glosa."""
+    worst = _worst_no_show_weekday(current)
+    if worst is None:
+        return None
+    weekday, _rate, _overall_rate = worst
+    return _WEEKDAY_LABELS[weekday]
+
+
+def _weekday_no_show_rate_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Responde diretamente "qual dia da semana tem taxa de falta alta" —
+    achado do usuário sobre lacuna do módulo de Agenda (weekday_appointment_counts/
+    _weekday_drop_insight só mostrava VOLUME, nunca a taxa). Compara
+    cada dia contra a MÉDIA do próprio período (intra-período), não
+    contra o período anterior nem contra um corte absoluto — o mesmo
+    corte de 30% pode ser trivial pra uma clínica de estética e grave
+    pra uma de saúde mental, então "X pontos ACIMA da sua própria média"
+    generaliza melhor entre clínicas do que um número fixo.
+
+    Só entram dias com amostra mínima (_MIN_WEEKDAY_SAMPLE) — mesmo
+    raciocínio de _weekday_drop_insight: 1 falta em 1 atendimento seria
+    "100%", ruído estatístico, não um padrão. Só reporta dias ACIMA da
+    média (um dia ótimo não é um alerta, já aparece como número no
+    gráfico de apoio de Agenda & Capacidade).
+
+    DECISÃO — só o PIOR dia vira card (mesmo raciocínio de
+    _weekday_drop_insight acima) — usa _worst_no_show_weekday, o mesmo
+    cálculo que alimenta o "por onde começar" do Comparativo.
+    """
+    worst = _worst_no_show_weekday(current)
+    if worst is None:
+        return None
+    weekday, rate, overall_rate = worst
+    gap_pp = (rate - overall_rate) * 100
+    severity = "critical" if gap_pp >= _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP else "warning"
+    label = _WEEKDAY_LABELS[weekday]
+    comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
+    return Insight(
+        severity=severity,
+        title=f"As pessoas faltam mais nas {label}s do que nos outros dias",
+        message=(
+            f"Numa {label} comum, {rate * 100:.0f}% das consultas marcadas na sua clínica acabam sendo "
+            f"falta — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Um lembrete de "
+            f"confirmação enviado com 1 dia de antecedência, especialmente pras {label}s, costuma "
+            "resolver boa parte disso."
+        ),
+        action_label="Ver risco de falta",
+        action_href="#agenda-resumo",
+    )
 
 
 def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
@@ -550,6 +599,15 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
             "ter alcançado nesta época do ano. Vale pensar em trazer pacientes novos ou reativar quem já foi "
             f"cliente e não voltou.{recovery_note}"
         ),
+        # DECISÃO — botão só quando há de fato quem chamar de volta
+        # (antes: nenhum botão, o texto recomendava mas não linkava pra
+        # lugar nenhum — não existia uma lista de quem são esses
+        # pacientes até esta rodada). Ver DECISÃO completa em
+        # AnalyticsRepository.list_inactive_patients e
+        # InactivePatientsPanel.tsx (frontend). Sem lista pra mostrar,
+        # sem botão — nunca um link pra uma seção vazia.
+        action_label="Ver quem não voltou" if current.inactive_patients_count > 0 else None,
+        action_href="#carteira-inativa" if current.inactive_patients_count > 0 else None,
         financial_impact=expected_by_now - current.ytd_billed_total,
     )
 
@@ -644,6 +702,7 @@ def build_network_comparativo_insight(
     network_median: float,
     total_billed: float,
     top_reason_label: str | None = None,
+    top_weekday_label: str | None = None,
 ) -> Insight | None:
     """Constrói o insight de Comparativo a partir do MESMO dado da aba
     Comparativo (your_rate/network_median já vêm com cohort suficiente —
@@ -658,10 +717,13 @@ def build_network_comparativo_insight(
 
     `top_reason_label` (opcional) — o motivo de glosa mais comum da
     própria clínica no período, já traduzido em português simples (ver
-    describe_denial_reason). Só passado pelo chamador para a métrica de glosa (não
-    faz sentido pra taxa de falta) — dá ao "onde você está perdendo"
-    um "por onde começar", em vez de só mostrar o gap em R$ sem pista
-    de causa."""
+    describe_denial_reason). `top_weekday_label` (opcional) — o dia da
+    semana com pior taxa de falta da própria clínica (ver
+    describe_worst_no_show_weekday). O chamador passa só UM dos dois,
+    de acordo com qual métrica é ("denial" recebe reason, "no_show"
+    recebe weekday — não faz sentido misturar) — os dois dão ao "onde
+    você está perdendo" um "por onde começar", em vez de só mostrar o
+    gap em R$ sem pista de causa."""
     gap_pp = (your_rate - network_median) * 100
     if gap_pp < _COMPARATIVO_MIN_GAP_PP:
         return None
@@ -669,18 +731,26 @@ def build_network_comparativo_insight(
         return None
     financial_impact = (your_rate - network_median) * total_billed
     metric_lower = metric_label[0].lower() + metric_label[1:] if metric_label else metric_label
-    reason_note = (
-        f" Na sua clínica, o motivo mais comum de recusa tem sido que {top_reason_label} — é um bom lugar pra "
-        "começar a corrigir." if top_reason_label else ""
-    )
+    if top_reason_label:
+        starting_point_note = (
+            f" Na sua clínica, o motivo mais comum de recusa tem sido que {top_reason_label} — é um bom lugar "
+            "pra começar a corrigir."
+        )
+    elif top_weekday_label:
+        starting_point_note = (
+            f" Na sua clínica, {top_weekday_label} costuma ser o dia com mais falta — é um bom lugar pra "
+            "começar a agir."
+        )
+    else:
+        starting_point_note = ""
     return Insight(
         severity="comparativo",
         title=f"Sua {metric_lower} está acima da rede",
         message=(
             f"Comparamos sua clínica com outras de porte parecido que também usam o Insighta (sempre em grupo, "
             f"nunca o dado de uma clínica específica): a sua {metric_lower} é {your_rate * 100:.1f}%, enquanto a "
-            f"mediana dessas clínicas é {network_median * 100:.1f}% — {gap_pp:.1f} pontos abaixo da sua.{reason_note} "
-            "Se você chegasse nesse nível, deixaria de perder cerca do valor abaixo todo mês."
+            f"mediana dessas clínicas é {network_median * 100:.1f}% — {gap_pp:.1f} pontos abaixo da sua."
+            f"{starting_point_note} Se você chegasse nesse nível, deixaria de perder cerca do valor abaixo todo mês."
         ),
         financial_impact=financial_impact,
         is_new=True,
@@ -698,10 +768,10 @@ def generate_insights(
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
-    insights.extend(_weekday_drop_insights(current, previous))
-    insights.extend(_weekday_no_show_rate_insights(current))
 
     for maybe_insight in (
+        _weekday_drop_insight(current, previous),
+        _weekday_no_show_rate_insight(current),
         _appeals_due_soon_insight(current),
         _denial_risk_pct_insight(current),
         _annual_goal_insight(current),
