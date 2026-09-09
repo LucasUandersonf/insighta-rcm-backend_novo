@@ -123,6 +123,7 @@ _SCHEMA_FILES = [
     "030_platform_feature_usage.sql",
     "031_user_onboarding.sql",
     "032_network_benchmark.sql",
+    "033_network_contract_price_benchmark.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -200,6 +201,18 @@ GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchma
 ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner_test;
 REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_test_runtime;
+
+-- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
+-- PRÓPRIA, mesmo raciocínio de network_benchmark_owner_test acima
+-- (categoria de dado diferente: preço de contrato, não taxa agregada).
+DROP ROLE IF EXISTS contract_price_benchmark_owner_test;
+CREATE ROLE contract_price_benchmark_owner_test NOLOGIN NOSUPERUSER;
+ALTER ROLE contract_price_benchmark_owner_test BYPASSRLS;
+GRANT USAGE ON SCHEMA core TO contract_price_benchmark_owner_test;
+GRANT SELECT ON core.tenants, core.contracts, core.contract_items, core.insurance_plans, core.billing, core.appointments TO contract_price_benchmark_owner_test;
+ALTER FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) OWNER TO contract_price_benchmark_owner_test;
+REVOKE ALL ON FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) TO app_test_runtime;
 """
 
 

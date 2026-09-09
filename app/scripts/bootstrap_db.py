@@ -229,6 +229,12 @@ _POST_UPGRADE_SQL_FILES = [
     # — ver DECISÃO no próprio .sql). DROP + CREATE — auto-idempotente,
     # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "032_network_benchmark.sql",
+    # Oportunidades (Sala de Comando 2.0) — ranking de renegociação de
+    # contrato, cross-tenant (SECURITY DEFINER, role própria
+    # contract_price_benchmark_owner — ver DECISÃO no próprio .sql).
+    # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
+    # em _POST_UPGRADE_MARKER_TABLE.
+    "033_network_contract_price_benchmark.sql",
 ]
 
 _ROLES_SQL = """
@@ -280,6 +286,15 @@ GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchma
 ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner;
 REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_runtime;
+
+-- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
+-- PRÓPRIA, categoria de dado diferente de network_benchmark_owner
+-- (preço de contrato, não taxa agregada de billing/appointments).
+GRANT USAGE ON SCHEMA core TO contract_price_benchmark_owner;
+GRANT SELECT ON core.tenants, core.contracts, core.contract_items, core.insurance_plans, core.billing, core.appointments TO contract_price_benchmark_owner;
+ALTER FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) OWNER TO contract_price_benchmark_owner;
+REVOKE ALL ON FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_contract_price_benchmark(UUID, INT, INT) TO app_runtime;
 """
 
 
@@ -453,7 +468,17 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             logger.info("Criando role network_benchmark_owner...")
             await conn.execute("CREATE ROLE network_benchmark_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
-        logger.info("Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner, network_benchmark_owner)...")
+        contract_price_benchmark_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'contract_price_benchmark_owner')"
+        )
+        if not contract_price_benchmark_owner_exists:
+            logger.info("Criando role contract_price_benchmark_owner...")
+            await conn.execute("CREATE ROLE contract_price_benchmark_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
+        logger.info(
+            "Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner, "
+            "network_benchmark_owner, contract_price_benchmark_owner)..."
+        )
         await conn.execute(_ROLES_SQL)
     finally:
         await conn.close()
