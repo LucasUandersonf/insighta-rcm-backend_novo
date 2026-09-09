@@ -12,16 +12,45 @@ Todas as funções aqui são PURAS (recebem dataclasses já calculados,
 nunca tocam banco) — testáveis isoladamente, sem Postgres, como
 test_denial_risk_engine.py e test_no_show_risk_engine.py fazem para os
 outros motores.
+
+DECISÃO — reescrita de linguagem (UX writing), pedido explícito do
+usuário
+-------------------------------------------------------------------------
+Esta versão troca TODO o texto de cada insight por uma redação sem
+jargão técnico, testada contra o critério "uma pessoa sem nenhum
+conhecimento do setor precisa entender o problema E saber o que fazer
+só de ler o card" — nunca "glosa" sem explicar o que é na mesma frase,
+nunca uma sigla sem tradução (nem "CRM": trocado por "buscar pacientes
+novos ou trazer de volta quem já foi cliente"), sempre terminando numa
+frase de ação concreta, não em "recomendamos revisar" genérico. Cada
+Insight também ganha `action_label`/`action_href` (ver dataclass abaixo)
+— o frontend transforma isso num botão real dentro do card, fechando o
+ciclo "li o problema -> cliquei -> resolvi", em vez de deixar o usuário
+navegar sozinho até achar a tela certa.
+
+DECISÃO — consolidação por convênio em `_denial_spike_insights`
+-------------------------------------------------------------------------
+Antes, cada COMBINAÇÃO (convênio, motivo de glosa) virava um card
+próprio — uma clínica com 3 motivos diferentes de glosa na mesma
+operadora via 3 cards quase idênticos empilhados no feed (achado real,
+testado com dado sintético: uma conta chegou a mostrar 6 cards de
+"Bradesco Saúde" ao mesmo tempo). Isso é exatamente o "encher
+linguiça" que o produto inteiro tenta evitar. Agora é 1 card por
+CONVÊNIO, juntando todos os motivos que dispararam — o motivo mais
+frequente vira a manchete, os demais entram como "e mais N motivo(s)".
 """
 from dataclasses import dataclass, field
 
-# Rótulos legíveis para os reason_code do motor de glosa (denial_risk_engine.py)
-_REASON_LABELS = {
-    "missing_cid": "ausência de CID",
-    "missing_procedure_code": "ausência de código de procedimento",
-    "no_contract_reference": "falta de contrato de referência cadastrado",
-    "value_above_contract": "cobrança acima do valor contratado",
-    "value_below_contract_revenue_leak": "cobrança abaixo do valor contratado",
+# Tradução em português simples de cada motivo técnico do motor de glosa
+# (denial_risk_engine.py) — usada SÓ na composição de frases deste
+# arquivo (não é a fonte de verdade do reason_code em si, que continua
+# vivendo em denial_risk_engine.py).
+_REASON_PLAIN = {
+    "missing_cid": "faltou o código da doença (CID) no atendimento",
+    "missing_procedure_code": "faltou o código do procedimento realizado",
+    "no_contract_reference": "esse convênio ainda não tem uma tabela de preços cadastrada no sistema",
+    "value_above_contract": "o valor cobrado ficou mais alto do que o combinado no contrato",
+    "value_below_contract_revenue_leak": "o valor cobrado ficou mais baixo do que o combinado no contrato",
 }
 
 # Amostra mínima antes de declarar uma variação percentual "spike" —
@@ -57,6 +86,18 @@ _WEEKDAY_NO_SHOW_RATE_WARNING_PP = 10.0
 # todo dia antes de 31/dez estaria "abaixo da meta" por definição.
 _ANNUAL_GOAL_BEHIND_WARNING_PCT = 10.0
 _ANNUAL_GOAL_BEHIND_CRITICAL_PCT = 25.0
+
+
+def _comparative_phrase(ratio: float) -> str:
+    """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
+    pessoa entende de ouvido, sem precisar fazer conta — usado em frases
+    como 'isso é quase o dobro da média da equipe'. Puramente decorativo
+    (o número exato sempre continua na mesma frase, isto só dá cor)."""
+    if ratio >= 1.8:
+        return "quase o dobro"
+    if ratio >= 1.4:
+        return "bem mais"
+    return "um pouco mais"
 
 
 @dataclass
@@ -114,7 +155,7 @@ class InsightsPeriodInput:
     annual_revenue_goal: float | None = None  # Tenant.annual_revenue_goal — NUNCA calculado, só o valor manual
     elapsed_year_fraction: float | None = None  # 0.0 a 1.0 — fração do ano calendário já decorrida (calculado pelo service, não pelo motor, para manter esta função pura/testável)
     ytd_billed_total: float = 0.0  # faturamento acumulado do ano até hoje
-    inactive_patients_count: int = 0  # pacientes sem atendimento há mais de 1 ano — nutre a recomendação de CRM
+    inactive_patients_count: int = 0  # pacientes sem atendimento há mais de 1 ano — nutre a recomendação de recuperação de carteira
     # Radar de Profissional Fora do Padrão — [(nome, taxa_de_risco,
     # total_faturamentos)], só profissionais com amostra mínima (ver
     # AnalyticsRepository.professional_denial_rates). Default [] pelo
@@ -135,10 +176,22 @@ class Insight:
     # TIPO de insight ser recente na plataforma. True hoje só em
     # _professional_outlier_insight e build_network_comparativo_insight.
     is_new: bool = False
+    # Botão de ação real dentro do card (ver DECISÃO no topo do arquivo)
+    # — texto do botão + destino, que o frontend interpreta em 3 formatos:
+    # "/rota" (navega pra outra tela), "#tab:id" (troca de aba dentro da
+    # própria Sala de Comando) ou "#id" (rola até aquele card na mesma
+    # tela). Nenhum destino aqui é inventado: só aponta pra telas/seções
+    # que já existem e já têm o dado que resolve o problema do insight.
+    action_label: str | None = None
+    action_href: str | None = None
 
 
-def _reason_label(code: str) -> str:
-    return _REASON_LABELS.get(code, code)
+def describe_denial_reason(code: str) -> str:
+    """Tradução em português simples de um reason_code do motor de glosa
+    (denial_risk_engine.py) — pública porque analytics_service.py também
+    usa isto pra montar o `top_reason_label` do Comparativo (ver
+    build_network_comparativo_insight)."""
+    return _REASON_PLAIN.get(code, code)
 
 
 def _index_reason_counts(counts: list[DenialReasonCount]) -> dict[tuple[str, str], int]:
@@ -146,29 +199,22 @@ def _index_reason_counts(counts: list[DenialReasonCount]) -> dict[tuple[str, str
 
 
 def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
+    """1 card por CONVÊNIO (nunca por combinação convênio+motivo — ver
+    DECISÃO no topo do arquivo). Cada motivo que disparou (novo padrão OU
+    salto de volume) entra na lista do convênio; o de maior volume atual
+    vira a manchete da frase, os demais somam num "e mais N motivo(s)"."""
     current_idx = _index_reason_counts(current.denial_reason_counts)
     previous_idx = _index_reason_counts(previous.denial_reason_counts)
 
-    insights: list[Insight] = []
+    # plan_name -> lista de (reason_code, current_count, is_new_pattern, growth_pct)
+    flagged_by_plan: dict[str, list[tuple[str, int, bool, float]]] = {}
+
     for (plan_name, reason_code), current_count in current_idx.items():
         previous_count = previous_idx.get((plan_name, reason_code), 0)
-        reason_label = _reason_label(reason_code)
 
         if previous_count == 0:
-            # Padrão novo, sem histórico de comparação — só alerta se já
-            # tem volume suficiente para não ser ruído (ver _MIN_SAMPLE_FOR_TREND).
             if current_count >= _MIN_SAMPLE_FOR_TREND:
-                insights.append(
-                    Insight(
-                        severity="critical",
-                        title=f"Novo padrão de glosa: {plan_name}",
-                        message=(
-                            f"A operadora {plan_name} não registrava glosas por {reason_label} no período anterior "
-                            f"e agora soma {current_count} caso(s) nesta janela. Recomendamos revisar o lote antes "
-                            "de faturar."
-                        ),
-                    )
-                )
+                flagged_by_plan.setdefault(plan_name, []).append((reason_code, current_count, True, 0.0))
             continue
 
         if previous_count < _MIN_SAMPLE_FOR_TREND:
@@ -176,17 +222,40 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
 
         growth_pct = ((current_count - previous_count) / previous_count) * 100
         if growth_pct >= _SPIKE_THRESHOLD_PCT:
-            insights.append(
-                Insight(
-                    severity="critical",
-                    title=f"Salto de glosas: {plan_name}",
-                    message=(
-                        f"A operadora {plan_name} apresentou um salto de {growth_pct:.0f}% em glosas por "
-                        f"{reason_label} nesta janela (de {previous_count} para {current_count} casos). "
-                        "Recomendamos travar o faturamento deste lote até revisão."
-                    ),
-                )
+            flagged_by_plan.setdefault(plan_name, []).append((reason_code, current_count, False, growth_pct))
+
+    insights: list[Insight] = []
+    for plan_name, flags in flagged_by_plan.items():
+        flags.sort(key=lambda f: f[1], reverse=True)  # maior volume primeiro -> vira a manchete
+        headline_reason, headline_count, headline_is_new, headline_growth = flags[0]
+        total_cases = sum(f[1] for f in flags)
+        other_count = len(flags) - 1
+
+        headline_phrase = describe_denial_reason(headline_reason)
+        if headline_is_new:
+            what_happened = f"passou a recusar pagamento porque {headline_phrase}"
+        else:
+            what_happened = f"está recusando {headline_growth:.0f}% mais pagamentos do que antes, principalmente porque {headline_phrase}"
+
+        others_note = (
+            f" Também apareceu mais {other_count} motivo(s) diferente(s) de recusa nesse mesmo convênio."
+            if other_count > 0
+            else ""
+        )
+
+        insights.append(
+            Insight(
+                severity="critical",
+                title=f"{plan_name} está recusando mais pagamentos que o normal",
+                message=(
+                    f"Nos últimos dias, a {plan_name} {what_happened} — {total_cases} atendimento(s) afetado(s) "
+                    f"nesta janela.{others_note} Antes de enviar a próxima cobrança pra essa operadora, vale revisar "
+                    "esses atendimentos com calma, pra não cair na mesma recusa de novo."
+                ),
+                action_label="Ver faturamentos de alto risco",
+                action_href="/",
             )
+        )
     return insights
 
 
@@ -194,16 +263,19 @@ def _financial_hole_insight(current: InsightsPeriodInput, previous: InsightsPeri
     if current.financial_hole_total <= 0:
         return None
     delta = current.financial_hole_total - previous.financial_hole_total
-    trend = "em alta" if delta > 0 else "estável ou em queda"
+    trend = "e essa diferença está aumentando" if delta > 0 else "mas essa diferença já está estável ou diminuindo"
     return Insight(
         severity="warning",
-        title="Buraco financeiro identificado",
+        title="Você está cobrando menos do que devia de alguns convênios",
         message=(
-            f"R$ {current.financial_hole_total:,.2f} cobrados abaixo do valor contratado nesta janela "
-            f"({trend} em relação ao período anterior). Esse valor não é glosa — é receita que já deixou "
-            "de entrar por cobrança abaixo da tabela."
+            f"Nos últimos dias, sua clínica cobrou R$ {current.financial_hole_total:,.2f} abaixo do que estava "
+            f"combinado nos contratos — isso não é o convênio recusando nada, é a sua própria cobrança saindo "
+            f"mais barata do que deveria, dinheiro que nem chegou a ser pedido, {trend}. Vale conferir se a "
+            "tabela de preços de cada convênio está em dia no cadastro de Contratos."
         ),
         financial_impact=current.financial_hole_total,
+        action_label="Ver contratos",
+        action_href="/contracts",
     )
 
 
@@ -211,17 +283,19 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
     if current.payment_gap_total <= 0:
         return None
     delta = current.payment_gap_total - previous.payment_gap_total
-    trend = "em alta" if delta > 0 else "estável ou em queda"
+    trend = "e essa diferença está aumentando" if delta > 0 else "mas essa diferença já está estável ou diminuindo"
     return Insight(
         severity="critical",
-        title="Divergência de recebimento com operadora",
+        title="Um convênio pagou menos do que devia por atendimentos já confirmados",
         message=(
-            f"R$ {current.payment_gap_total:,.2f} pagos pelas operadoras ABAIXO do valor contratado nesta "
-            f"janela, em billings já conciliados ({trend} em relação ao período anterior). Diferente do "
-            "buraco de cobrança, aqui a clínica cobrou certo e a operadora pagou a menos — vale contestação "
-            "junto ao convênio."
+            f"Você cobrou certo, mas o convênio pagou R$ {current.payment_gap_total:,.2f} menos do que o "
+            f"combinado em contrato, em atendimentos que já foram confirmados e recebidos, {trend}. Diferente "
+            "de uma recusa de pagamento, aqui a operadora aceitou a conta e pagou errado — você tem o direito "
+            "de contestar esse valor."
         ),
         financial_impact=current.payment_gap_total,
+        action_label="Abrir um recurso",
+        action_href="/denial-appeals",
     )
 
 
@@ -233,10 +307,12 @@ def _value_saved_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
         return None  # só celebra quando o número de fato melhorou
     return Insight(
         severity="positive",
-        title="Eficiência do motor anti-glosa em alta",
+        title="O sistema evitou que você perdesse dinheiro com pagamento recusado",
         message=(
-            f"R$ {current.total_value_saved:,.2f} protegidos por correções automáticas nesta janela — "
-            f"R$ {delta:,.2f} a mais que no período anterior."
+            f"Nos últimos dias, o Insighta corrigiu cobranças antes de elas serem enviadas e evitou "
+            f"R$ {current.total_value_saved:,.2f} em possíveis recusas de pagamento — R$ {delta:,.2f} a mais "
+            "do que no período anterior. Continue assim: quanto mais cedo o erro é corrigido, menos dinheiro "
+            "fica perdido no caminho."
         ),
         financial_impact=current.total_value_saved,
     )
@@ -249,25 +325,23 @@ def _capacity_drop_insight(
         return None
     drop_pp = (previous.avg_capacity_utilization - current.avg_capacity_utilization) * 100
     if drop_pp >= _UTILIZATION_DROP_ALERT_PP:
-        # Mesmo padrão do insight de no-show (_no_show_risk_insight): a
-        # queda em pontos percentuais diz O QUE mudou, mas é o R$ que
-        # decide a prioridade do alerta na lista (ver generate_insights,
-        # ordenado por financial_impact) — ver DECISÃO em
-        # capacity_service.estimate_idle_capacity_revenue_lost.
         impact_note = (
-            f" — receita cessante estimada de R$ {estimated_idle_capacity_revenue_lost:,.2f} nesta janela"
+            f" — isso representa cerca de R$ {estimated_idle_capacity_revenue_lost:,.2f} que deixaram de "
+            "entrar só por falta de gente marcada, sem nem contar as faltas"
             if estimated_idle_capacity_revenue_lost > 0
             else ""
         )
         return Insight(
             severity="warning",
-            title="Ocupação de agenda em queda",
+            title="Sua agenda está com mais horários vazios do que o normal",
             message=(
-                f"A taxa média de ocupação da agenda caiu {drop_pp:.0f} pontos percentuais em relação ao "
-                f"período anterior{impact_note}. Vale checar ociosidade por profissional no painel de "
-                "Agenda & Capacidade."
+                f"Nos últimos dias, a agenda da sua clínica ficou {drop_pp:.0f} pontos percentuais mais vazia "
+                f"do que estava antes{impact_note}. Vale olhar se algum profissional específico está com a "
+                "agenda mais livre e tentar preencher esses horários."
             ),
             financial_impact=estimated_idle_capacity_revenue_lost or None,
+            action_label="Ver ocupação por profissional",
+            action_href="#agenda-resumo",
         )
     return None
 
@@ -275,14 +349,19 @@ def _capacity_drop_insight(
 def _no_show_risk_insight(current: InsightsPeriodInput, estimated_revenue_at_risk: float) -> Insight | None:
     if current.high_risk_no_show_count < _HIGH_RISK_NO_SHOW_ALERT_THRESHOLD:
         return None
+    plural = "s" if current.high_risk_no_show_count != 1 else ""
     return Insight(
         severity="warning",
-        title="Volume alto de agendamentos com risco de falta",
+        title="Tem gente com boa chance de não aparecer nos próximos dias",
         message=(
-            f"{current.high_risk_no_show_count} agendamento(s) com risco ALTO de no-show nesta janela — "
-            f"receita cessante estimada de R$ {estimated_revenue_at_risk:,.2f} se as faltas se confirmarem."
+            f"O sistema encontrou {current.high_risk_no_show_count} consulta{plural} marcada{plural} com alta "
+            f"chance de o paciente faltar — se isso realmente acontecer, dá pra perder cerca de "
+            f"R$ {estimated_revenue_at_risk:,.2f}. A boa notícia é que dá pra agir antes: ligar ou mandar "
+            "mensagem confirmando a presença costuma reduzir bastante esse risco."
         ),
         financial_impact=estimated_revenue_at_risk,
+        action_label="Ver quem está em risco",
+        action_href="#agenda-resumo",
     )
 
 
@@ -310,16 +389,18 @@ def _weekday_drop_insights(current: InsightsPeriodInput, previous: InsightsPerio
             continue
         severity = "critical" if drop_pct >= _WEEKDAY_DROP_CRITICAL_PCT else "warning"
         label = _WEEKDAY_LABELS[weekday]
-        prefix = "Crítico: " if severity == "critical" else ""
         insights.append(
             Insight(
                 severity=severity,
-                title=f"Queda de agenda: {label.capitalize()}",
+                title=f"{label.capitalize()} está com menos consultas marcadas",
                 message=(
-                    f"{prefix}A agenda de {label} apresenta uma queda de {drop_pct:.0f}% em relação ao período "
-                    f"anterior (de {previous_count} para {current_count} agendamento(s)). É necessário intensificar "
-                    "as ações para aumentar os agendamentos do dia."
+                    f"Toda {label} sua clínica costumava ter {previous_count} consulta(s) marcada(s) — nas "
+                    f"últimas semanas, caiu para {current_count} (uma queda de {drop_pct:.0f}%). Vale entender "
+                    "o motivo: algum profissional que atendia nesse dia mudou de horário? Um lembrete ou uma "
+                    f"condição especial pra quem marcar numa {label} pode ajudar a recuperar esse movimento."
                 ),
+                action_label="Ver volume de consultas",
+                action_href="#agenda-resumo",
             )
         )
     return insights
@@ -359,16 +440,19 @@ def _weekday_no_show_rate_insights(current: InsightsPeriodInput) -> list[Insight
             continue
         severity = "critical" if gap_pp >= _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP else "warning"
         label = _WEEKDAY_LABELS[weekday]
-        prefix = "Crítico: " if severity == "critical" else ""
+        comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
         insights.append(
             Insight(
                 severity=severity,
-                title=f"Taxa de falta acima da média: {label.capitalize()}",
+                title=f"As pessoas faltam mais nas {label}s do que nos outros dias",
                 message=(
-                    f"{prefix}{label.capitalize()} tem taxa de falta de {rate * 100:.0f}% ({no_show_count} de "
-                    f"{total} atendimento(s) resolvido(s)), {gap_pp:.0f} pontos acima da média do período "
-                    f"({overall_rate * 100:.0f}%). Vale reforçar confirmação de presença nesse dia."
+                    f"Numa {label} comum, {rate * 100:.0f}% das consultas marcadas na sua clínica acabam sendo "
+                    f"falta — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Um lembrete de "
+                    f"confirmação enviado com 1 dia de antecedência, especialmente pras {label}s, costuma "
+                    "resolver boa parte disso."
                 ),
+                action_label="Ver risco de falta",
+                action_href="#agenda-resumo",
             )
         )
     return insights
@@ -385,16 +469,18 @@ def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
     if current.denial_risk_pct is None or current.denial_risk_pct < _DENIAL_RISK_PCT_WARNING:
         return None
     severity = "critical" if current.denial_risk_pct >= _DENIAL_RISK_PCT_CRITICAL else "warning"
-    prefix = "Alerta de Faturamento: " if severity == "critical" else ""
     return Insight(
         severity=severity,
-        title="Risco de glosa no faturamento atual",
+        title="Boa parte do que você faturou corre risco de ser recusada pelo convênio",
         message=(
-            f"{prefix}Há um risco de até {current.denial_risk_pct:.0f}% de glosas nas contas faturadas nesta "
-            f"janela (R$ {current.denial_at_risk_value:,.2f} em risco médio ou alto). É urgente revisar esses "
-            "registros com a equipe de faturamento antes do envio."
+            f"Das contas que você fechou nesses últimos dias, uma parte que soma R$ {current.denial_at_risk_value:,.2f} "
+            f"tem risco médio ou alto de o convênio recusar o pagamento — isso é {current.denial_risk_pct:.0f}% de "
+            "tudo que foi cobrado na janela. Antes de mandar essas cobranças pro convênio, vale revisar linha por "
+            "linha com quem cuida do faturamento."
         ),
         financial_impact=current.denial_at_risk_value,
+        action_label="Ver faturamentos de alto risco",
+        action_href="/",
     )
 
 
@@ -402,7 +488,7 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
     """
     Terceiro exemplo do briefing de redesenho: em vez de um gráfico frio
     de meta, um diagnóstico em texto com recomendação concreta de ação
-    (CRM / recuperação de pacientes inativos). Confirmado explicitamente
+    (captar cliente novo / recuperar quem sumiu). Confirmado explicitamente
     pelo usuário: a meta é SEMPRE manual (Tenant.annual_revenue_goal,
     configurada em Minha Clínica) — este motor nunca a calcula sozinho,
     só compara o real com o que foi configurado.
@@ -427,21 +513,20 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
 
     severity = "critical" if behind_pct >= _ANNUAL_GOAL_BEHIND_CRITICAL_PCT else "warning"
     progress_pct = (current.ytd_billed_total / current.annual_revenue_goal) * 100
-    prefix = "Crítico: " if severity == "critical" else ""
     recovery_note = (
-        f" Há {current.inactive_patients_count} paciente(s) sem consulta há mais de 1 ano — "
-        "um ponto de partida concreto para essa campanha de recuperação."
+        f" Aliás, {current.inactive_patients_count} paciente(s) não voltam há mais de um ano — é um bom primeiro "
+        "grupo pra chamar de volta."
         if current.inactive_patients_count > 0
         else ""
     )
     return Insight(
         severity=severity,
-        title="Faturamento anual abaixo do ritmo da meta",
+        title="No ritmo atual, a meta do ano não vai ser alcançada",
         message=(
-            f"{prefix}O faturamento anual está em R$ {current.ytd_billed_total:,.2f} ({progress_pct:.0f}% da meta de "
-            f"R$ {current.annual_revenue_goal:,.2f}), abaixo do ritmo esperado para esta altura do ano. Recomendamos "
-            "iniciar um projeto de CRM para captação de novos clientes ou recuperação de pacientes inativos há mais "
-            f"de um ano.{recovery_note}"
+            f"Sua clínica já faturou R$ {current.ytd_billed_total:,.2f} este ano — isso é {progress_pct:.0f}% da "
+            f"meta de R$ {current.annual_revenue_goal:,.2f} que você definiu, mas fica abaixo do que já devíamos "
+            "ter alcançado nesta época do ano. Vale pensar em trazer pacientes novos ou reativar quem já foi "
+            f"cliente e não voltou.{recovery_note}"
         ),
         financial_impact=expected_by_now - current.ytd_billed_total,
     )
@@ -458,12 +543,14 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     plural = "s" if current.appeals_due_soon_count != 1 else ""
     return Insight(
         severity="critical",
-        title="Prazo de recurso de glosa vencendo",
+        title="Você está perto de perder o direito de contestar uma recusa de pagamento",
         message=(
-            f"{current.appeals_due_soon_count} recurso{plural} de glosa com prazo vencendo nos próximos dias "
-            "(ou já vencido) sem resposta protocolada. Perder o prazo contratual costuma significar perder o "
-            "direito de contestar — verifique a lista de recursos em aberto."
+            f"Tem {current.appeals_due_soon_count} contestação{plural} de recusa de pagamento com o prazo "
+            "acabando nos próximos dias — ou já vencido — e ainda sem protocolo enviado. Se o prazo passar, "
+            "normalmente você perde o direito de reclamar esse dinheiro de volta. Vale protocolar o quanto antes."
         ),
+        action_label="Ver recursos em aberto",
+        action_href="/denial-appeals",
     )
 
 
@@ -497,15 +584,20 @@ def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | Non
         return None
 
     ratio = worst_rate / tenant_avg
+    comparison = _comparative_phrase(ratio)
     return Insight(
         severity="warning",
-        title=f"{worst_name} fora do padrão de glosa",
+        title=f"{worst_name} está fora do padrão de glosa da equipe",
         message=(
-            f"Taxa de risco de glosa de {worst_rate * 100:.1f}% nos faturamentos de {worst_name} nesta janela "
-            f"({worst_total} faturamentos) — {ratio:.1f}x a média da própria clínica ({tenant_avg * 100:.1f}%). "
-            "Vale revisar como esse profissional preenche CID e código de procedimento."
+            f"Dos atendimentos de {worst_name} nesses últimos dias, {worst_rate * 100:.0f}% correm risco de o "
+            f"convênio recusar o pagamento ({worst_total} atendimento(s)) — {comparison} que a média da sua "
+            f"clínica ({tenant_avg * 100:.0f}%). Isso costuma acontecer quando falta preencher o código da "
+            f"doença (CID) ou do procedimento na hora do atendimento. Vale conversar com {worst_name} sobre "
+            "esse preenchimento."
         ),
         is_new=True,
+        action_label="Ver profissionais",
+        action_href="/professionals",
     )
 
 
@@ -519,7 +611,12 @@ _COMPARATIVO_MIN_GAP_PP = 3.0
 
 
 def build_network_comparativo_insight(
-    *, metric_label: str, your_rate: float, network_median: float, total_billed: float
+    *,
+    metric_label: str,
+    your_rate: float,
+    network_median: float,
+    total_billed: float,
+    top_reason_label: str | None = None,
 ) -> Insight | None:
     """Constrói o insight de Comparativo a partir do MESMO dado da aba
     Comparativo (your_rate/network_median já vêm com cohort suficiente —
@@ -530,7 +627,14 @@ def build_network_comparativo_insight(
     estimated_revenue_at_risk/estimated_idle_capacity_revenue_lost, nunca
     um número contábil fechado. Retorna None (nunca 0 ou um card vazio)
     quando total_billed é zero — sem faturamento no período, a projeção em
-    R$ não tem base para existir."""
+    R$ não tem base para existir.
+
+    `top_reason_label` (opcional) — o motivo de glosa mais comum da
+    própria clínica no período, já traduzido em português simples (ver
+    describe_denial_reason). Só passado pelo chamador para a métrica de glosa (não
+    faz sentido pra taxa de falta) — dá ao "onde você está perdendo"
+    um "por onde começar", em vez de só mostrar o gap em R$ sem pista
+    de causa."""
     gap_pp = (your_rate - network_median) * 100
     if gap_pp < _COMPARATIVO_MIN_GAP_PP:
         return None
@@ -538,16 +642,23 @@ def build_network_comparativo_insight(
         return None
     financial_impact = (your_rate - network_median) * total_billed
     metric_lower = metric_label[0].lower() + metric_label[1:] if metric_label else metric_label
+    reason_note = (
+        f" Na sua clínica, o motivo mais comum de recusa tem sido que {top_reason_label} — é um bom lugar pra "
+        "começar a corrigir." if top_reason_label else ""
+    )
     return Insight(
         severity="comparativo",
         title=f"Sua {metric_lower} está acima da rede",
         message=(
-            f"{your_rate * 100:.1f}% nesta janela — a mediana de clínicas de porte parecido na base Insighta é "
-            f"{network_median * 100:.1f}%, {gap_pp:.1f} pontos percentuais abaixo da sua. Projetado sobre o "
-            "faturamento do período, isso equivale ao valor estimado abaixo."
+            f"Comparamos sua clínica com outras de porte parecido que também usam o Insighta (sempre em grupo, "
+            f"nunca o dado de uma clínica específica): a sua {metric_lower} é {your_rate * 100:.1f}%, enquanto a "
+            f"mediana dessas clínicas é {network_median * 100:.1f}% — {gap_pp:.1f} pontos abaixo da sua.{reason_note} "
+            "Se você chegasse nesse nível, deixaria de perder cerca do valor abaixo todo mês."
         ),
         financial_impact=financial_impact,
         is_new=True,
+        action_label="Ver comparativo completo",
+        action_href="#tab:comparativo",
     )
 
 

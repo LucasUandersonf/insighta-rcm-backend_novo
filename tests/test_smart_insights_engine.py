@@ -111,6 +111,37 @@ def test_new_reason_from_zero_needs_minimum_volume_to_be_flagged():
     assert "Bradesco Saúde" in insights[0].title
 
 
+def test_denial_spike_consolidates_multiple_reasons_of_the_same_plan_into_one_card():
+    """Achado real (dado sintético chegou a gerar 6 cards de 'Bradesco
+    Saúde' ao mesmo tempo, um por motivo) — agora é 1 card por convênio,
+    mesmo quando vários motivos disparam juntos."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[
+            DenialReasonCount("Bradesco Saúde", "missing_cid", 6),
+            DenialReasonCount("Bradesco Saúde", "value_above_contract", 4),
+        ],
+        financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    bradesco_insights = [i for i in insights if "Bradesco Saúde" in i.title]
+    assert len(bradesco_insights) == 1
+    # O motivo de maior volume (missing_cid, 6 casos) vira a manchete; o
+    # outro motivo entra como "mais 1 motivo", nunca some silenciosamente.
+    assert "código da doença" in bradesco_insights[0].message
+    assert "mais 1 motivo" in bradesco_insights[0].message
+    assert "10" in bradesco_insights[0].message  # total consolidado (6 + 4)
+
+
+def test_denial_spike_has_action_pointing_to_high_risk_billing_queue():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[DenialReasonCount("Unimed Nacional", "missing_cid", 5)],
+        financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert insights[0].action_label is not None
+    assert insights[0].action_href == "/"
+
+
 def test_financial_hole_insight_carries_financial_impact_for_ranking():
     current = InsightsPeriodInput(
         denial_reason_counts=[],
@@ -147,7 +178,7 @@ def test_capacity_drop_above_threshold_is_flagged():
     insights = generate_insights(current, previous)
     assert len(insights) == 1
     assert insights[0].severity == "warning"
-    assert "queda" in insights[0].title.lower()
+    assert "vazios" in insights[0].title.lower()
 
 
 def test_capacity_drop_uses_estimated_idle_capacity_revenue_lost():
@@ -160,7 +191,7 @@ def test_capacity_drop_uses_estimated_idle_capacity_revenue_lost():
     insights = generate_insights(current, previous, estimated_idle_capacity_revenue_lost=2400.0)
     assert len(insights) == 1
     assert insights[0].financial_impact == 2400.0
-    assert "receita cessante" in insights[0].message
+    assert "deixaram de entrar" in insights[0].message
 
 
 def test_capacity_drop_without_idle_estimate_omits_financial_impact():
@@ -172,7 +203,7 @@ def test_capacity_drop_without_idle_estimate_omits_financial_impact():
     )
     insights = generate_insights(current, previous)
     assert insights[0].financial_impact is None
-    assert "receita cessante" not in insights[0].message
+    assert "deixaram de entrar" not in insights[0].message
 
 
 def test_high_risk_no_show_volume_uses_estimated_revenue_at_risk():
@@ -391,7 +422,9 @@ def test_annual_goal_insight_warning_band():
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert len(insights) == 1
     assert insights[0].severity == "warning"
-    assert "CRM" in insights[0].message
+    # Linguagem sem jargão (nem sigla) — ver DECISÃO de reescrita no topo
+    # de smart_insights_engine.py: nunca "CRM", sempre a ação em português comum.
+    assert "trazer pacientes novos" in insights[0].message or "reativar" in insights[0].message
 
 
 def test_annual_goal_insight_critical_band():
@@ -416,7 +449,7 @@ def test_annual_goal_insight_omits_inactive_patients_note_when_zero():
         inactive_patients_count=0,
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
-    assert "paciente(s) sem consulta" not in insights[0].message
+    assert "não voltam há mais de um ano" not in insights[0].message
 
 
 def test_professional_outlier_flagged_when_double_the_clinic_average():
@@ -476,6 +509,28 @@ def test_network_comparativo_flagged_when_gap_above_threshold():
     assert "está acima da rede" in insight.title
     # impacto projetado = (0.092 - 0.051) * 70000 = 2870.0
     assert insight.financial_impact == pytest.approx(2870.0)
+
+
+def test_network_comparativo_mentions_top_reason_when_provided():
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de glosa",
+        your_rate=0.092,
+        network_median=0.051,
+        total_billed=70_000.0,
+        top_reason_label="faltou o código da doença (CID) no atendimento",
+    )
+    assert insight is not None
+    assert "faltou o código da doença" in insight.message
+    assert insight.action_label is not None
+    assert insight.action_href == "#tab:comparativo"
+
+
+def test_network_comparativo_omits_reason_note_when_not_provided():
+    insight = build_network_comparativo_insight(
+        metric_label="Taxa de falta", your_rate=0.092, network_median=0.051, total_billed=70_000.0
+    )
+    assert insight is not None
+    assert "bom lugar pra" not in insight.message
 
 
 def test_network_comparativo_absent_when_gap_is_trivial():
