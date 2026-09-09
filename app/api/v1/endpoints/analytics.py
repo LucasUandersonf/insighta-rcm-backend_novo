@@ -107,7 +107,7 @@ async def get_smart_insights(
         uuid.UUID(current_user.tenant_id)
     )
     network_benchmark = [
-        (m.label, m.your_rate, m.network_median)
+        (m.key, m.label, m.your_rate, m.network_median)
         for m in benchmark.metrics
         if m.your_rate is not None and m.network_median is not None
     ]

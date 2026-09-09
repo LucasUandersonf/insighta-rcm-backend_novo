@@ -235,6 +235,11 @@ class SmartInsightResponse(BaseModel):
     # smart_insights_engine.Insight.is_new. Default False para não quebrar
     # nenhuma leitura antiga desta resposta.
     is_new: bool = False
+    # Botão de ação real do card (ver DECISÃO em smart_insights_engine.Insight)
+    # — ambos None quando o insight não tem uma tela/seção específica de
+    # destino (ex: meta anual, que é estratégico, não um clique só).
+    action_label: str | None = None
+    action_href: str | None = None
 
 
 class SmartInsightsResponse(BaseModel):

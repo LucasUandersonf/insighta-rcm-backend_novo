@@ -237,7 +237,10 @@ async def test_smart_insights_flags_financial_hole_from_current_period(client, a
     )
     assert response.status_code == 200
     insights = response.json()["insights"]
-    assert any(i["title"] == "Buraco financeiro identificado" and i["financial_impact"] == 50.0 for i in insights)
+    assert any(
+        i["title"] == "Você está cobrando menos do que devia de alguns convênios" and i["financial_impact"] == 50.0
+        for i in insights
+    )
 
 
 async def test_atendimento_cannot_access_analytics(client, admin_engine, tenant_a):
@@ -305,7 +308,7 @@ async def test_smart_insights_has_no_annual_goal_insight_when_goal_not_configure
     )
     assert response.status_code == 200
     titles = [i["title"] for i in response.json()["insights"]]
-    assert "Faturamento anual abaixo do ritmo da meta" not in titles
+    assert "No ritmo atual, a meta do ano não vai ser alcançada" not in titles
 
 
 async def test_smart_insights_flags_annual_goal_behind_pace_when_configured(client, auth_headers_a, tenant_a):
@@ -319,13 +322,15 @@ async def test_smart_insights_flags_annual_goal_behind_pace_when_configured(clie
     )
     assert response.status_code == 200
     insights = response.json()["insights"]
-    annual_insight = next((i for i in insights if i["title"] == "Faturamento anual abaixo do ritmo da meta"), None)
+    annual_insight = next((i for i in insights if i["title"] == "No ritmo atual, a meta do ano não vai ser alcançada"), None)
     # Sem nenhum faturamento no ano (banco limpo por teste), o ritmo real
     # é 0% de qualquer ritmo esperado > 0 -> sempre crítico, qualquer que
     # seja a data em que a suíte rodar.
     assert annual_insight is not None
     assert annual_insight["severity"] == "critical"
-    assert "CRM" in annual_insight["message"]
+    # Linguagem sem jargão nem sigla — ver DECISÃO de reescrita em
+    # smart_insights_engine.py.
+    assert "trazer pacientes novos" in annual_insight["message"] or "reativar" in annual_insight["message"]
 
 
 # --- Painel → Faturamento: ranking de perda por convênio e utilização

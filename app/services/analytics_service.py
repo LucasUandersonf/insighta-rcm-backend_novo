@@ -56,6 +56,7 @@ from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    describe_denial_reason,
     generate_insights,
 )
 
@@ -507,7 +508,7 @@ class AnalyticsService:
         date_to: date,
         *,
         tenant_id: str,
-        network_benchmark: list[tuple[str, float, float]] | None = None,
+        network_benchmark: list[tuple[str, str, float, float]] | None = None,
     ) -> SmartInsightsResponse:
         previous = _previous_period(date_from, date_to)
         appeals_due_soon = await self.appeal_repo.count_due_within(
@@ -551,16 +552,32 @@ class AnalyticsService:
         # e app/sql/032_network_benchmark.sql). Cada item já vem com
         # cohort suficiente (o SQL nunca devolve mediana sem amostra
         # mínima) — só o pior desvio (maior impacto projetado) vira
-        # manchete, mesmo critério do Radar de Profissional.
+        # manchete, mesmo critério do Radar de Profissional. `key` (além
+        # do `label`) identifica qual métrica é "denial" — só essa recebe
+        # o "por onde começar" (motivo de glosa mais comum da própria
+        # clínica, ver DECISÃO em build_network_comparativo_insight); não
+        # faz sentido pra taxa de falta.
         extra_insights = []
         if network_benchmark:
             total_billed = (await self.reporting_repo.billing_summary(date_from, date_to))["total_billed"]
+            top_reason_label = None
+            if current_input.denial_reason_counts:
+                reason_totals: dict[str, int] = {}
+                for reason_count in current_input.denial_reason_counts:
+                    reason_totals[reason_count.reason_code] = reason_totals.get(reason_count.reason_code, 0) + reason_count.count
+                top_reason_code = max(reason_totals, key=lambda code: reason_totals[code])
+                top_reason_label = describe_denial_reason(top_reason_code)
+
             candidates = [
                 insight
-                for (label, your_rate, network_median) in network_benchmark
+                for (key, label, your_rate, network_median) in network_benchmark
                 if (
                     insight := build_network_comparativo_insight(
-                        metric_label=label, your_rate=your_rate, network_median=network_median, total_billed=total_billed
+                        metric_label=label,
+                        your_rate=your_rate,
+                        network_median=network_median,
+                        total_billed=total_billed,
+                        top_reason_label=top_reason_label if key == "denial" else None,
                     )
                 )
                 is not None
@@ -586,6 +603,8 @@ class AnalyticsService:
                     message=i.message,
                     financial_impact=i.financial_impact,
                     is_new=i.is_new,
+                    action_label=i.action_label,
+                    action_href=i.action_href,
                 )
                 for i in insights
             ],
