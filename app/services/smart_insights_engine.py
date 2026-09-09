@@ -105,6 +105,11 @@ class DenialReasonCount:
     plan_name: str
     reason_code: str
     count: int
+    # UUID (string) do convênio — entra nesta rodada só para o botão de
+    # ação do insight linkar direto pra fila de faturamento JÁ FILTRADA
+    # por este convênio (ver DECISÃO em _denial_spike_insights). Default
+    # "" para não quebrar chamada antiga/teste que só monta pelo nome.
+    plan_id: str = ""
 
 
 @dataclass
@@ -156,12 +161,15 @@ class InsightsPeriodInput:
     elapsed_year_fraction: float | None = None  # 0.0 a 1.0 — fração do ano calendário já decorrida (calculado pelo service, não pelo motor, para manter esta função pura/testável)
     ytd_billed_total: float = 0.0  # faturamento acumulado do ano até hoje
     inactive_patients_count: int = 0  # pacientes sem atendimento há mais de 1 ano — nutre a recomendação de recuperação de carteira
-    # Radar de Profissional Fora do Padrão — [(nome, taxa_de_risco,
-    # total_faturamentos)], só profissionais com amostra mínima (ver
-    # AnalyticsRepository.professional_denial_rates). Default [] pelo
-    # mesmo motivo dos demais campos com default: não quebrar chamadas/
-    # testes existentes que ainda não passam esse dado.
-    professional_denial_rates: list[tuple[str, float, int]] = field(default_factory=list)
+    # Radar de Profissional Fora do Padrão — [(professional_id, nome,
+    # taxa_de_risco, total_faturamentos)], só profissionais com amostra
+    # mínima (ver AnalyticsRepository.professional_denial_rates). O id
+    # entra nesta rodada só para o botão de ação linkar direto pro
+    # profissional exato em /professionals (ver DECISÃO em
+    # _professional_outlier_insight) — nunca exibido como texto solto.
+    # Default [] pelo mesmo motivo dos demais campos com default: não
+    # quebrar chamadas/testes existentes que ainda não passam esse dado.
+    professional_denial_rates: list[tuple[str, str, float, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -195,7 +203,19 @@ def describe_denial_reason(code: str) -> str:
 
 
 def _index_reason_counts(counts: list[DenialReasonCount]) -> dict[tuple[str, str], int]:
-    return {(c.plan_name, c.reason_code): c.count for c in counts}
+    return {(c.plan_id, c.reason_code): c.count for c in counts}
+
+
+def _high_risk_billing_href(plan_id: str) -> str:
+    """DECISÃO — deep-link para a fila de faturamento JÁ FILTRADA pelo
+    convênio que disparou o insight (antes: sempre "/", a fila GERAL —
+    o usuário via "Unimed está recusando mais" e precisava procurar
+    sozinho quais faturamentos eram da Unimed). `insurance_plan_id` é o
+    parâmetro que o Painel usa de verdade (ver
+    BillingRepository.list_high_risk_paginated e DashboardPage.tsx,
+    frontend) — o `action_label` já nomeia o convênio na própria frase
+    do botão, então o destino não precisa repetir o nome na URL."""
+    return f"/?insurance_plan_id={plan_id}"
 
 
 def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
@@ -205,16 +225,17 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
     vira a manchete da frase, os demais somam num "e mais N motivo(s)"."""
     current_idx = _index_reason_counts(current.denial_reason_counts)
     previous_idx = _index_reason_counts(previous.denial_reason_counts)
+    plan_names = {c.plan_id: c.plan_name for c in current.denial_reason_counts}
 
-    # plan_name -> lista de (reason_code, current_count, is_new_pattern, growth_pct)
+    # plan_id -> lista de (reason_code, current_count, is_new_pattern, growth_pct)
     flagged_by_plan: dict[str, list[tuple[str, int, bool, float]]] = {}
 
-    for (plan_name, reason_code), current_count in current_idx.items():
-        previous_count = previous_idx.get((plan_name, reason_code), 0)
+    for (plan_id, reason_code), current_count in current_idx.items():
+        previous_count = previous_idx.get((plan_id, reason_code), 0)
 
         if previous_count == 0:
             if current_count >= _MIN_SAMPLE_FOR_TREND:
-                flagged_by_plan.setdefault(plan_name, []).append((reason_code, current_count, True, 0.0))
+                flagged_by_plan.setdefault(plan_id, []).append((reason_code, current_count, True, 0.0))
             continue
 
         if previous_count < _MIN_SAMPLE_FOR_TREND:
@@ -222,10 +243,11 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
 
         growth_pct = ((current_count - previous_count) / previous_count) * 100
         if growth_pct >= _SPIKE_THRESHOLD_PCT:
-            flagged_by_plan.setdefault(plan_name, []).append((reason_code, current_count, False, growth_pct))
+            flagged_by_plan.setdefault(plan_id, []).append((reason_code, current_count, False, growth_pct))
 
     insights: list[Insight] = []
-    for plan_name, flags in flagged_by_plan.items():
+    for plan_id, flags in flagged_by_plan.items():
+        plan_name = plan_names[plan_id]
         flags.sort(key=lambda f: f[1], reverse=True)  # maior volume primeiro -> vira a manchete
         headline_reason, headline_count, headline_is_new, headline_growth = flags[0]
         total_cases = sum(f[1] for f in flags)
@@ -252,8 +274,8 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
                     f"nesta janela.{others_note} Antes de enviar a próxima cobrança pra essa operadora, vale revisar "
                     "esses atendimentos com calma, pra não cair na mesma recusa de novo."
                 ),
-                action_label="Ver faturamentos de alto risco",
-                action_href="/",
+                action_label=f"Ver faturamentos de alto risco da {plan_name}",
+                action_href=_high_risk_billing_href(plan_id),
             )
         )
     return insights
@@ -577,7 +599,7 @@ def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | Non
     if tenant_avg <= 0:
         return None
 
-    worst_name, worst_rate, worst_total = max(current.professional_denial_rates, key=lambda t: t[1])
+    worst_id, worst_name, worst_rate, worst_total = max(current.professional_denial_rates, key=lambda t: t[2])
     if worst_rate < tenant_avg * _PROFESSIONAL_OUTLIER_MIN_RATIO:
         return None
     if worst_rate - tenant_avg < _PROFESSIONAL_OUTLIER_MIN_ABS_GAP:
@@ -596,8 +618,13 @@ def _professional_outlier_insight(current: InsightsPeriodInput) -> Insight | Non
             "esse preenchimento."
         ),
         is_new=True,
-        action_label="Ver profissionais",
-        action_href="/professionals",
+        action_label=f"Ver {worst_name} em Profissionais",
+        # DECISÃO — deep-link direto para o profissional exato (antes:
+        # sempre "/professionals", a lista GERAL — o usuário precisava
+        # procurar sozinho pelo nome). `highlight` é lido por
+        # ProfessionalsPage.tsx (frontend) para rolar e realçar a linha
+        # exata, nunca para filtrar/escondar os demais profissionais.
+        action_href=f"/professionals?highlight={worst_id}",
     )
 
 

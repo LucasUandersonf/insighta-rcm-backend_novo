@@ -132,14 +132,18 @@ def test_denial_spike_consolidates_multiple_reasons_of_the_same_plan_into_one_ca
     assert "10" in bradesco_insights[0].message  # total consolidado (6 + 4)
 
 
-def test_denial_spike_has_action_pointing_to_high_risk_billing_queue():
+def test_denial_spike_has_action_pointing_to_the_exact_plans_high_risk_billing_queue():
+    """Antes o botão sempre caía na fila GERAL ("/") — agora aponta já
+    filtrado pelo convênio EXATO que disparou o card (ver DECISÃO em
+    _denial_spike_insights), não a fila inteira."""
     current = InsightsPeriodInput(
-        denial_reason_counts=[DenialReasonCount("Unimed Nacional", "missing_cid", 5)],
+        denial_reason_counts=[DenialReasonCount("Unimed Nacional", "missing_cid", 5, plan_id="plan-unimed-123")],
         financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=0,
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label is not None
-    assert insights[0].action_href == "/"
+    assert "Unimed Nacional" in insights[0].action_label
+    assert insights[0].action_href == "/?insurance_plan_id=plan-unimed-123"
 
 
 def test_financial_hole_insight_carries_financial_impact_for_ranking():
@@ -457,7 +461,7 @@ def test_professional_outlier_flagged_when_double_the_clinic_average():
     # 25% é 2.5x a média E 15 pontos percentuais acima -> passa os dois limiares.
     current = _minimal(
         denial_risk_pct=10.0,
-        professional_denial_rates=[("Dr. X", 0.25, 8), ("Dr. Y", 0.09, 12)],
+        professional_denial_rates=[("prof-x", "Dr. X", 0.25, 8), ("prof-y", "Dr. Y", 0.09, 12)],
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     outlier = next(i for i in insights if "fora do padrão" in i.title)
@@ -465,9 +469,25 @@ def test_professional_outlier_flagged_when_double_the_clinic_average():
     assert outlier.severity == "warning"
 
 
+def test_professional_outlier_has_action_pointing_to_the_exact_professional():
+    """Antes o botão sempre caía em "/professionals" (a lista GERAL) —
+    agora leva direto pro profissional que disparou o card via query
+    param, pra tela rolar/realçar a linha exata (ver DECISÃO em
+    _professional_outlier_insight)."""
+    current = _minimal(
+        denial_risk_pct=10.0,
+        professional_denial_rates=[("prof-x-id", "Dr. X", 0.25, 8), ("prof-y-id", "Dr. Y", 0.09, 12)],
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    outlier = next(i for i in insights if "fora do padrão" in i.title)
+    assert outlier.action_label is not None
+    assert "Dr. X" in outlier.action_label
+    assert outlier.action_href == "/professionals?highlight=prof-x-id"
+
+
 def test_professional_outlier_absent_when_below_ratio_threshold():
     # 15% vs média 10% -> só 1.5x, abaixo do limiar de 2x.
-    current = _minimal(denial_risk_pct=10.0, professional_denial_rates=[("Dr. X", 0.15, 8)])
+    current = _minimal(denial_risk_pct=10.0, professional_denial_rates=[("prof-x", "Dr. X", 0.15, 8)])
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert not any("fora do padrão" in i.title for i in insights)
 
@@ -475,7 +495,7 @@ def test_professional_outlier_absent_when_below_ratio_threshold():
 def test_professional_outlier_absent_when_gap_is_trivial_in_absolute_terms():
     # 2% vs média 1% -> 2x em proporção, mas só 1 ponto percentual de
     # diferença absoluta — abaixo do piso de 5pp, não deveria disparar.
-    current = _minimal(denial_risk_pct=1.0, professional_denial_rates=[("Dr. X", 0.02, 8)])
+    current = _minimal(denial_risk_pct=1.0, professional_denial_rates=[("prof-x", "Dr. X", 0.02, 8)])
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert not any("fora do padrão" in i.title for i in insights)
 
@@ -483,7 +503,11 @@ def test_professional_outlier_absent_when_gap_is_trivial_in_absolute_terms():
 def test_professional_outlier_only_flags_the_worst_case():
     current = _minimal(
         denial_risk_pct=10.0,
-        professional_denial_rates=[("Dr. X", 0.25, 8), ("Dr. Z", 0.40, 6), ("Dr. Y", 0.09, 12)],
+        professional_denial_rates=[
+            ("prof-x", "Dr. X", 0.25, 8),
+            ("prof-z", "Dr. Z", 0.40, 6),
+            ("prof-y", "Dr. Y", 0.09, 12),
+        ],
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     outliers = [i for i in insights if "fora do padrão" in i.title]
@@ -492,7 +516,7 @@ def test_professional_outlier_only_flags_the_worst_case():
 
 
 def test_professional_outlier_absent_without_denial_risk_pct():
-    current = _minimal(denial_risk_pct=None, professional_denial_rates=[("Dr. X", 0.25, 8)])
+    current = _minimal(denial_risk_pct=None, professional_denial_rates=[("prof-x", "Dr. X", 0.25, 8)])
     assert generate_insights(current, _EMPTY_PERIOD) == []
 
 

@@ -401,20 +401,26 @@ class AnalyticsRepository:
         )
         return float((await self.session.execute(stmt)).scalar_one())
 
-    async def denial_findings_by_plan(self, date_from: date, date_to: date) -> list[tuple[str, list[str]]]:
+    async def denial_findings_by_plan(self, date_from: date, date_to: date) -> list[tuple[str, str, list[str]]]:
         """
-        Retorna (nome_do_convenio, lista_de_reason_codes) por linha de
-        billing com risco de glosa no período. A contagem POR motivo é
-        feita em Python (ver smart_insights_engine.py) em vez de um
-        UNNEST de JSONB em SQL — mesma decisão de "grade pequena -> lista
+        Retorna (insurance_plan_id, nome_do_convenio, lista_de_reason_codes)
+        por linha de billing com risco de glosa no período. A contagem POR
+        motivo é feita em Python (ver smart_insights_engine.py) em vez de
+        um UNNEST de JSONB em SQL — mesma decisão de "grade pequena -> lista
         em Python" de capacity_service.py: o volume de billings com risco
         num período de dashboard (dias/semanas) é pequeno o bastante para
         não justificar a complexidade de um LATERAL UNNEST só para contar
         strings dentro de um array JSONB.
+
+        `insurance_plan_id` entra nesta rodada só para o botão de ação real
+        do insight de recusa em alta poder linkar direto para a fila de
+        faturamento JÁ FILTRADA por este convênio (ver DECISÃO em
+        smart_insights_engine.py::_denial_spike_insights) — antes só o
+        nome saía daqui, que não é uma chave estável para filtro de URL.
         """
         start, end = _bounds(date_from, date_to)
         stmt = (
-            select(InsurancePlan.display_name, Billing.denial_reasons)
+            select(InsurancePlan.id, InsurancePlan.display_name, Billing.denial_reasons)
             .select_from(Billing)
             .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
             .where(
@@ -424,7 +430,7 @@ class AnalyticsRepository:
             )
         )
         result = await self.session.execute(stmt)
-        return [(plan_name, reasons or []) for plan_name, reasons in result.all()]
+        return [(str(plan_id), plan_name, reasons or []) for plan_id, plan_name, reasons in result.all()]
 
     async def appointment_hour_histogram(self, date_from: date, date_to: date) -> dict[int, int]:
         """Horários de pico — para identificar em que faixa do dia a
@@ -631,7 +637,7 @@ class AnalyticsRepository:
         no_show, total = (await self.session.execute(stmt)).one()
         return int(no_show or 0), int(total or 0)
 
-    async def professional_denial_rates(self, date_from: date, date_to: date, *, min_sample: int = 5) -> list[tuple[str, float, int]]:
+    async def professional_denial_rates(self, date_from: date, date_to: date, *, min_sample: int = 5) -> list[tuple[str, str, float, int]]:
         """
         Taxa de glosa (risco médio/alto) por profissional executante, só
         para quem tem amostra mínima (`min_sample`) de faturamento no
@@ -643,12 +649,22 @@ class AnalyticsRepository:
 
         JOIN Billing -> Appointment -> Professional porque
         `professional_id` mora no agendamento, não no faturamento (ver
-        DECISÃO em app/models/billing.py) — professional_name já
-        resolvido aqui (não no service) para não vazar o UUID do
-        profissional para uma camada que só precisa exibir o nome.
+        DECISÃO em app/models/billing.py).
 
-        Retorna [(nome_profissional, taxa_de_risco, total_faturamentos)],
-        só profissionais com amostra >= min_sample.
+        DECISÃO — devolve professional_id junto do nome (mudança desta
+        rodada)
+        -------------------------------------------------------------------
+        Antes só devolvia o nome, de propósito ("não vazar o UUID do
+        profissional para uma camada que só precisa exibir o nome"). O
+        botão de ação real do insight (ver DECISÃO em
+        smart_insights_engine.py::_professional_outlier_insight) precisa
+        linkar para o profissional EXATO em /professionals, e o nome sozinho
+        não é uma chave estável (dois profissionais podem ter o mesmo nome)
+        — o id só sai desta camada dentro do `action_href` do insight, nunca
+        é exibido como texto solto na Sala de Comando.
+
+        Retorna [(professional_id, nome_profissional, taxa_de_risco,
+        total_faturamentos)], só profissionais com amostra >= min_sample.
         """
         from app.models.professional import Professional
 
@@ -656,7 +672,7 @@ class AnalyticsRepository:
         risk_expr = func.sum(case((Billing.denial_risk_level.in_(("medium", "high")), 1), else_=0))
         total_expr = func.count()
         stmt = (
-            select(Professional.full_name, risk_expr, total_expr)
+            select(Professional.id, Professional.full_name, risk_expr, total_expr)
             .select_from(Billing)
             .join(Appointment, Appointment.id == Billing.appointment_id)
             .join(Professional, Professional.id == Appointment.professional_id)
@@ -665,4 +681,7 @@ class AnalyticsRepository:
             .having(func.count() >= min_sample)
         )
         result = await self.session.execute(stmt)
-        return [(name, (int(risk) / int(total)), int(total)) for name, risk, total in result.all()]
+        return [
+            (str(professional_id), name, (int(risk) / int(total)), int(total))
+            for professional_id, name, risk, total in result.all()
+        ]

@@ -679,9 +679,16 @@ async def test_smart_insights_flags_professional_outlier(client, auth_headers_a,
         f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
     )
     assert response.status_code == 200
-    titles = [i["title"] for i in response.json()["insights"]]
+    insights = response.json()["insights"]
+    titles = [i["title"] for i in insights]
     assert any("Dr. Radar" in t and "fora do padrão" in t for t in titles)
     assert not any("Dra. Normal" in t for t in titles)
+
+    # Botão de ação real (Sala de Comando 2.0, item 4 do roadmap) — o
+    # href precisa levar pro Dr. Radar EXATO via query param, não pra
+    # lista geral de /professionals.
+    outlier = next(i for i in insights if "Dr. Radar" in i["title"])
+    assert outlier["action_href"] == f"/professionals?highlight={outlier_id}"
 
 
 async def test_smart_insights_flags_network_comparativo_when_gap_is_large(client, auth_headers_a, admin_engine, tenant_a):

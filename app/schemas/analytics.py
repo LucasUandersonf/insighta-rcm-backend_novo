@@ -283,6 +283,52 @@ class NetworkBenchmarkResponse(BaseModel):
     window_days: int
 
 
+class OportunidadeItem(BaseModel):
+    """Uma linha da aba Oportunidades — um procedimento que a clínica já
+    tem homologado com um convênio, cujo preço acordado está ABAIXO da
+    mediana de outras clínicas para o mesmo convênio+procedimento (ver
+    DECISÃO em app/sql/033_network_contract_price_benchmark.sql). Só
+    aparecem aqui pares com `gap_value > 0` — a função de ranking em
+    OportunidadesService já descarta o resto (preço no nível da rede ou
+    acima não é uma "oportunidade" de renegociação)."""
+
+    insurance_plan_id: UUID
+    plan_display_name: str
+    tuss_code: str
+    procedure_name: str | None
+    your_price: float
+    network_median_price: float
+    network_cohort_size: int
+    monthly_volume: float
+    gap_value: float  # network_median_price - your_price, sempre > 0
+    gap_pct: float  # gap_value / your_price
+    estimated_monthly_opportunity: float  # gap_value * monthly_volume
+
+
+class OportunidadesResponse(BaseModel):
+    """GET /api/v1/analytics/oportunidades — Sala de Comando 2.0, aba
+    Oportunidades. Janela de volume fixa (mesmo espírito de
+    NetworkBenchmarkResponse) — não segue o seletor de período de 7 dias
+    da tela, porque "quanto vale por mês" precisa de uma janela estável
+    para o volume não oscilar a cada troca de filtro."""
+
+    items: list[OportunidadeItem]
+    window_days: int
+
+
+class HealthScoreTrendResponse(BaseModel):
+    """Tendência da Nota de Saúde — nota de hoje contra a fotografia mais
+    próxima de ~90 dias atrás (ver DECISÃO em
+    app/sql/034_health_score_snapshots.sql). Só existe quando já há uma
+    fotografia de referência gravada — base nova, sem 3 meses de
+    histórico ainda, simplesmente não tem tendência (nunca um número
+    inventado)."""
+
+    reference_score: float
+    reference_month: date
+    delta: float  # score atual - reference_score; positivo = melhorou
+
+
 class HealthScoreResponse(BaseModel):
     """GET /api/v1/analytics/health-score — Nota de Saúde Financeira
     (Sala de Comando). Janela sempre fixa (ver DECISÃO em
@@ -293,3 +339,4 @@ class HealthScoreResponse(BaseModel):
     score: float | None  # None = amostra insuficiente em TODOS os componentes ainda
     components: list[HealthScoreComponentResponse]
     window_days: int
+    trend: HealthScoreTrendResponse | None = None
