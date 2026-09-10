@@ -240,6 +240,12 @@ _POST_UPGRADE_SQL_FILES = [
     # TABLE sem IF NOT EXISTS — precisa do marcador (ver
     # _POST_UPGRADE_MARKER_TABLE).
     "034_health_score_snapshots.sql",
+    # Terceiro Template de Integração ("Glosa" — ver docstring de
+    # RawDenialRow em app/worker/schemas.py): alarga
+    # ingestion_files_data_type_check para aceitar 'glosa'. DROP
+    # CONSTRAINT IF EXISTS + ADD — auto-idempotente, roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "035_glosa_ingestion.sql",
 ]
 
 _ROLES_SQL = """

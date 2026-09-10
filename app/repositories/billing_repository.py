@@ -9,10 +9,13 @@ desenvolvedor lembrar de filtrar por tenant em toda query nova.
 """
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.appointment import Appointment
 from app.models.billing import Billing
+from app.models.insurance_plan import InsurancePlan
+from app.models.patient import Patient
 
 
 class BillingRepository:
@@ -51,6 +54,57 @@ class BillingRepository:
         stmt = select(Billing).where(Billing.id == billing_id)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_by_guia(self, guia_id: uuid.UUID) -> list[Billing]:
+        """Usado pela normalização do Template de Integração "Glosa" (ver
+        NormalizationService.normalize_glosa_row) para achar a(s) linha(s)
+        de billing que uma guia agrupa — 1 quando a guia tem um único
+        procedimento (caso comum), N quando é uma SADT com vários itens
+        (nesse caso, quem chama precisa desambiguar por procedure_code —
+        ver list_by_guia_and_procedure_code)."""
+        stmt = select(Billing).where(Billing.guia_id == guia_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def search(self, query: str, *, limit: int = 20) -> list[tuple[Billing, str, str | None, str]]:
+        """
+        Busca por nome/CPF do paciente — a tela de Recurso de Glosa (e
+        qualquer outra que hoje pede o billing_id colado como UUID cru)
+        usa isso para deixar o usuário procurar "Maria Silva" em vez de
+        precisar saber o UUID interno de cor. Devolve
+        (Billing, nome_do_paciente, codigo_procedimento, nome_do_convenio)
+        já resolvidos — um único round-trip, sem N+1 no chamador.
+        """
+        digits = "".join(ch for ch in query if ch.isdigit())
+        stmt = (
+            select(Billing, Patient.full_name, Appointment.procedure_code, InsurancePlan.display_name)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(
+                or_(
+                    Patient.full_name.ilike(f"%{query}%"),
+                    (Patient.cpf == digits) if digits else False,
+                )
+            )
+            .order_by(Billing.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.all())
+
+    async def list_by_guia_and_procedure_code(self, guia_id: uuid.UUID, procedure_code: str) -> list[Billing]:
+        """Desambigua entre as várias linhas de billing de uma mesma guia
+        pelo código de procedimento do atendimento associado — é assim
+        que o demonstrativo de pagamento identifica QUAL item de uma SADT
+        com múltiplos procedimentos está sendo liquidado."""
+        stmt = (
+            select(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.guia_id == guia_id, Appointment.procedure_code == procedure_code)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
 
     async def add(self, billing: Billing) -> Billing:
         self.session.add(billing)

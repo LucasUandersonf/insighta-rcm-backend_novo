@@ -275,6 +275,90 @@ class RawAppointmentRow(BaseModel):
         return normalized
 
 
+class RawDenialRow(BaseModel):
+    """
+    Schema canônico do TERCEIRO Template de Integração, "Glosa" — o
+    demonstrativo de pagamento/glosa que a operadora devolve depois de
+    processar um lote de guias (ver achado do Raio-X da Sala de Comando:
+    pct_conciliado estava em 34,4% porque `settle_billing` existe mas
+    nada em massa alimentava ele). Diferente de Faturamento/Agenda, esta
+    linha NUNCA cria um Appointment/Patient novo — ela CASA com um
+    Billing que já existe (criado quando a guia foi originalmente
+    cobrada) e registra o resultado real do pagamento.
+
+    DECISÃO — casamento por (convênio, guia_numero, procedure_code opcional),
+    nunca por um ID interno do nosso banco
+    -------------------------------------------------------------------------
+    O demonstrativo da operadora não tem ideia do nosso billing_id (UUID
+    interno) — ele fala a língua da guia (numero + tabela/procedimento),
+    exatamente o mesmo vocabulário que o template de Faturamento já grava
+    em Guia.numero via guia_numero (ver RawBillingRow). `procedure_code` é
+    OPCIONAL: só é exigido quando a guia agrupa mais de uma linha de
+    billing (uma SADT com vários procedimentos) — nesse caso, sem ele, a
+    linha é rejeitada por ambiguidade em vez de adivinhar qual procedimento
+    o pagamento se refere (mesmo princípio de "nunca inventar" de todo o
+    motor de risco).
+
+    DECISÃO — motivo de glosa NÃO entra em Billing.denial_reasons, entra
+    em core.glosas (Glosa REAL — já existe, ver app/models/glosa.py)
+    -------------------------------------------------------------------------
+    `Billing.denial_reasons` guarda os motivos PREVISTOS pelo nosso
+    próprio motor de risco (ex: "missing_cid") — misturar aí o motivo REAL
+    que a operadora devolveu confundiria previsão com fato. `core.glosas`
+    já existe exatamente para o fato ("a operadora negou/reduziu X") e já
+    alimenta `GlosaService.get_reconciliation` (Previsto x Realizado,
+    precisão/recall do motor de risco) — essa tabela está vazia hoje pela
+    MESMA razão que received_value está: não existe caminho em massa que
+    escreva nela, só o endpoint manual POST /glosas. Este template
+    normaliza para as DUAS entidades a partir do mesmo demonstrativo:
+    settle o Billing (received_value) e, quando `charged_value -
+    received_value > 0`, registra a Glosa correspondente — nunca pede
+    `valor_glosado` no arquivo (evita o arquivo contradizer os próprios
+    valores cobrado/pago), deriva do que já está no Billing.
+    """
+
+    insurance_plan_raw_name: str = Field(min_length=1, max_length=255)
+    guia_numero: str = Field(min_length=1, max_length=50)
+    procedure_code: str | None = None
+    # ge=0 (não gt=0, diferente de charged_value): 0 é um valor real e
+    # esperado aqui — glosa total, a operadora pagou zero pelo item.
+    received_value: float = Field(ge=0, le=500_000)
+    settlement_date: date | None = None
+    # Motivo da glosa (Tabela 27 TISS/ANS) — OPCIONAIS: só existem
+    # quando charged_value > received_value (houve glosa de fato) e nem
+    # todo demonstrativo traz o código estruturado (às vezes só texto
+    # livre) — mesma nulabilidade de Glosa.codigo_motivo/descricao_motivo.
+    codigo_motivo: str | None = None
+    descricao_motivo: str | None = None
+
+    @field_validator("procedure_code", "codigo_motivo", "descricao_motivo")
+    @classmethod
+    def blank_to_none(cls, v: str | None) -> str | None:
+        return v or None
+
+
+class DenialRowParseResult(BaseModel):
+    """Espelha AgendaRowParseResult, para RawDenialRow — ver docstring de
+    RowParseResult para o contrato (sempre exatamente um entre `row`/
+    `errors` preenchido)."""
+
+    row_number: int
+    row: RawDenialRow | None = None
+    errors: list[str] | None = None
+
+    @classmethod
+    def ok(cls, row_number: int, row: RawDenialRow) -> "DenialRowParseResult":
+        return cls(row_number=row_number, row=row, errors=None)
+
+    @classmethod
+    def failed(cls, row_number: int, exc: ValidationError | Exception) -> "DenialRowParseResult":
+        if isinstance(exc, ValidationError):
+            messages = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+        else:
+            messages = [str(exc)]
+        return cls(row_number=row_number, row=None, errors=messages)
+
+
 class AgendaRowParseResult(BaseModel):
     """
     Espelha RowParseResult, mas para RawAppointmentRow — ver docstring de

@@ -40,6 +40,7 @@ from datetime import datetime, time, timezone
 from app.core.text_utils import slugify
 from app.models.appointment import Appointment
 from app.models.billing import Billing
+from app.models.glosa import Glosa
 from app.models.guia import Guia
 from app.models.ingestion_raw_row import IngestionRawRow
 from app.models.local import Local
@@ -48,6 +49,7 @@ from app.models.professional import Professional
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.glosa_repository import GlosaRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.insurance_plan_repository import InsurancePlanRepository
 from app.repositories.local_repository import LocalRepository
@@ -57,7 +59,7 @@ from app.repositories.tenant_repository import TenantRepository
 from app.services.denial_risk_engine import assess
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 from app.services.no_show_risk_engine import resolve_thresholds
-from app.worker.schemas import RawAppointmentRow, RawBillingRow
+from app.worker.schemas import RawAppointmentRow, RawBillingRow, RawDenialRow
 
 
 @dataclass
@@ -81,6 +83,7 @@ class NormalizationService:
         local_repo: LocalRepository,
         guia_repo: GuiaRepository,
         tenant_repo: TenantRepository,
+        glosa_repo: GlosaRepository | None = None,
     ):
         self.patient_repo = patient_repo
         self.professional_repo = professional_repo
@@ -91,6 +94,11 @@ class NormalizationService:
         self.local_repo = local_repo
         self.guia_repo = guia_repo
         self.tenant_repo = tenant_repo
+        # Opcional (default None) para não quebrar os dois chamadores que
+        # não usam o Template de Glosa (o worker de Faturamento/Agenda
+        # nunca precisa dele) — só é de fato exigido dentro de
+        # normalize_glosa_row/rows, ver checagem lá.
+        self.glosa_repo = glosa_repo
 
     async def _get_or_create_patient(self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow) -> Patient:
         if row.patient_cpf:
@@ -436,6 +444,119 @@ class NormalizationService:
         for raw_row in raw_rows:
             was_pending = raw_row.status == "pending_normalization"
             promoted = await self.normalize_agenda_row(tenant_id, raw_row, source_file, no_show_thresholds=no_show_thresholds)
+            if promoted:
+                summary.normalized += 1
+            elif was_pending and raw_row.status == "rejected":
+                summary.rejected += 1
+        return summary
+
+    async def normalize_glosa_row(self, tenant_id: uuid.UUID, raw_row: IngestionRawRow, source_file: str | None) -> bool:
+        """
+        Equivalente a `normalize_row`, mas para o Template de Integração
+        "Glosa" (ver docstring de RawDenialRow em app/worker/schemas.py):
+        NUNCA cria Appointment/Patient — CASA com um Billing que já existe
+        (via convênio + Guia.numero, desambiguado por procedure_code
+        quando a guia agrupa mais de uma linha), registra o resultado real
+        do pagamento nele (settle) e, quando pago < cobrado, cria a Glosa
+        correspondente em core.glosas. Motivos de rejeição próprios deste
+        template (`guia_not_found`, `billing_not_found`,
+        `ambiguous_guia_multiple_billings`) — nenhum deles é
+        "unknown_insurance_plan", que continua tratado exatamente como
+        nos outros dois templates (linha fica pendente de resolução
+        manual na tela de Setup).
+        """
+        if raw_row.status != "pending_normalization":
+            return False
+        assert self.glosa_repo is not None, "normalize_glosa_row exige glosa_repo — ver __init__"
+
+        row = RawDenialRow.model_validate(raw_row.payload)
+
+        plan = await self.insurance_plan_repo.resolve(row.insurance_plan_raw_name, slugify(row.insurance_plan_raw_name))
+        if plan is None:
+            raw_row.status = "rejected"
+            raw_row.validation_errors = {"reason": "unknown_insurance_plan", "raw_value": row.insurance_plan_raw_name}
+            return False
+
+        guia = await self.guia_repo.get_by_numero(plan.id, row.guia_numero)
+        if guia is None:
+            raw_row.status = "rejected"
+            raw_row.validation_errors = {"reason": "guia_not_found", "raw_value": row.guia_numero}
+            return False
+
+        if row.procedure_code:
+            billings = await self.billing_repo.list_by_guia_and_procedure_code(guia.id, row.procedure_code)
+            not_found_reason = "billing_not_found_for_procedure"
+        else:
+            billings = await self.billing_repo.list_by_guia(guia.id)
+            not_found_reason = "billing_not_found"
+
+        if not billings:
+            raw_row.status = "rejected"
+            raw_row.validation_errors = {"reason": not_found_reason, "raw_value": row.guia_numero}
+            return False
+        if len(billings) > 1:
+            # Guia com mais de um item e o demonstrativo não trouxe
+            # procedure_code para desambiguar — melhor rejeitar
+            # explicitamente do que liquidar a linha errada (mesmo
+            # princípio de "nunca adivinhar" de todo o resto do pipeline).
+            raw_row.status = "rejected"
+            raw_row.validation_errors = {
+                "reason": "ambiguous_guia_multiple_billings",
+                "raw_value": row.guia_numero,
+            }
+            return False
+
+        billing = billings[0]
+        settled_at = (
+            datetime.combine(row.settlement_date, time.min, tzinfo=timezone.utc)
+            if row.settlement_date is not None
+            else datetime.now(timezone.utc)
+        )
+        charged_value = float(billing.charged_value)
+        valor_glosado = round(charged_value - row.received_value, 2)
+
+        billing.received_value = row.received_value
+        billing.settled_at = settled_at
+        # received_value > 0 -> operadora pagou algo (mesmo que parcial,
+        # mesmo critério de BillingService.settle_billing); == 0 -> glosa
+        # total confirmada, status próprio para diferenciar de um
+        # pagamento efetivo no funil de status.
+        billing.status = "paid" if row.received_value > 0 else "denied"
+        await self.billing_repo.save(billing)
+
+        # Registra o FATO em core.glosas (Glosa REAL, já existe — ver
+        # app/models/glosa.py) sempre que pago < cobrado. NUNCA lê
+        # valor_glosado do arquivo (ver docstring de RawDenialRow) —
+        # deriva do próprio Billing, então nunca pode contradizer
+        # charged_value/received_value. É esta tabela que alimenta
+        # GlosaService.get_reconciliation (Previsto x Realizado).
+        if valor_glosado > 0:
+            await self.glosa_repo.add(
+                Glosa(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    billing_id=billing.id,
+                    codigo_motivo=row.codigo_motivo,
+                    descricao_motivo=row.descricao_motivo,
+                    valor_glosado=valor_glosado,
+                    data_recebimento=settled_at,
+                )
+            )
+
+        raw_row.status = "normalized"
+        return True
+
+    async def normalize_glosa_rows(
+        self, tenant_id: uuid.UUID, raw_rows: list[IngestionRawRow], source_file: str | None = None
+    ) -> NormalizationSummary:
+        """Equivalente a `normalize_rows`/`normalize_agenda_rows`, chamando
+        `normalize_glosa_row` por linha — mesmo cuidado de contagem
+        documentado lá (uma linha já rejeitada na Etapa 1 não é contada de
+        novo aqui)."""
+        summary = NormalizationSummary()
+        for raw_row in raw_rows:
+            was_pending = raw_row.status == "pending_normalization"
+            promoted = await self.normalize_glosa_row(tenant_id, raw_row, source_file)
             if promoted:
                 summary.normalized += 1
             elif was_pending and raw_row.status == "rejected":

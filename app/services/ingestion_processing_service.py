@@ -45,6 +45,7 @@ from app.models.ingestion_file import IngestionFile
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
+from app.repositories.glosa_repository import GlosaRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.ingestion_column_alias_repository import IngestionColumnAliasRepository
 from app.repositories.ingestion_repository import IngestionRepository
@@ -59,6 +60,9 @@ from app.worker.parsers import (
     agenda_json_parser,
     agenda_xml_parser,
     csv_parser,
+    glosa_csv_parser,
+    glosa_json_parser,
+    glosa_xml_parser,
     json_parser,
     xml_parser,
 )
@@ -75,6 +79,14 @@ _AGENDA_PARSERS = {
     "csv": agenda_csv_parser.parse,
     "xml": agenda_xml_parser.parse,
     "json": agenda_json_parser.parse,
+}
+
+# Template "Glosa" (demonstrativo de pagamento — ver docstring de
+# RawDenialRow em app/worker/schemas.py) — os mesmos 3 formatos.
+_GLOSA_PARSERS = {
+    "csv": glosa_csv_parser.parse,
+    "xml": glosa_xml_parser.parse,
+    "json": glosa_json_parser.parse,
 }
 
 
@@ -142,10 +154,12 @@ async def process_uploaded_file(
     caminho SQS não tem "nome original" — a chave S3 já É o nome do
     arquivo do jeito que o SFTP depositou); fica None para o worker.
 
-    `data_type` ("faturamento", padrão, ou "agenda" — ver
-    app/sql/019_agenda_ingestion.sql) escolhe QUAL par (parser, método de
-    normalização) roda — os dois templates de integração compartilham
-    todo o resto do pipeline (idempotência, landing zone, histórico).
+    `data_type` ("faturamento", padrão, "agenda" — ver
+    app/sql/019_agenda_ingestion.sql — ou "glosa", ver docstring de
+    RawDenialRow em app/worker/schemas.py) escolhe QUAL par (parser,
+    método de normalização) roda — os três templates de integração
+    compartilham todo o resto do pipeline (idempotência, landing zone,
+    histórico).
 
     Retorna `ProcessingResult` com `already_claimed=True` quando o
     arquivo (mesma chave de idempotência tenant_id+bucket+key+version)
@@ -156,7 +170,7 @@ async def process_uploaded_file(
     ingestion_raw_rows.status='rejected', contados em `rejected_count`
     depois da normalização).
     """
-    parsers = _AGENDA_PARSERS if data_type == "agenda" else _PARSERS
+    parsers = _AGENDA_PARSERS if data_type == "agenda" else (_GLOSA_PARSERS if data_type == "glosa" else _PARSERS)
     if file_format not in parsers:
         raise UnknownFileFormatError(f"Formato de arquivo não suportado para data_type={data_type!r}: {file_format!r}")
 
@@ -211,9 +225,12 @@ async def process_uploaded_file(
         local_repo=LocalRepository(db),
         guia_repo=GuiaRepository(db),
         tenant_repo=TenantRepository(db),
+        glosa_repo=GlosaRepository(db),
     )
     if data_type == "agenda":
         summary = await normalization_service.normalize_agenda_rows(tenant_id, saved_rows, source_file=s3_key)
+    elif data_type == "glosa":
+        summary = await normalization_service.normalize_glosa_rows(tenant_id, saved_rows, source_file=s3_key)
     else:
         summary = await normalization_service.normalize_rows(tenant_id, saved_rows, source_file=s3_key)
 

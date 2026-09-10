@@ -7,18 +7,18 @@ chave do objeto S3, seguindo a convenção documentada em
 
     tenants/{tenant_id}/incoming/{csv|xml|json}/{arquivo}                  (Faturamento — padrão, retrocompatível)
     tenants/{tenant_id}/incoming/agenda/{csv|xml|json}/{arquivo}           (Agenda — ver 019_agenda_ingestion.sql)
+    tenants/{tenant_id}/incoming/glosa/{csv|xml|json}/{arquivo}            (Glosa — ver RawDenialRow em app/worker/schemas.py)
 
-DECISÃO — segmento "agenda/" OPCIONAL, não uma reescrita da convenção
+DECISÃO — segmento de template OPCIONAL, não uma reescrita da convenção
 -------------------------------------------------------------------------
-Faturamento é o caminho SFTP que já existia antes do template de Agenda
-sequer ser cogitado — qualquer objeto já depositado (ou pipeline
-Terraform/SFTP já configurado) na convenção antiga precisa continuar
-funcionando sem nenhuma mudança. Por isso a única mudança é ACRESCENTAR
-um segmento reconhecido a mais (`agenda/`), nunca alterar o formato
-existente: ausência do segmento = "faturamento" (default), presença
-exata de "agenda/" = Agenda. Isso espelha a mesma retrocompatibilidade
-já garantida no caminho HTTP (`data_type` default "faturamento" em
-POST /ingestion/upload).
+Faturamento é o caminho SFTP que já existia antes de qualquer outro
+template sequer ser cogitado — qualquer objeto já depositado (ou
+pipeline Terraform/SFTP já configurado) na convenção antiga precisa
+continuar funcionando sem nenhuma mudança. Por isso cada template novo só
+ACRESCENTA um segmento reconhecido a mais (`agenda/`, `glosa/`), nunca
+altera o formato existente: ausência do segmento = "faturamento"
+(default). Isso espelha a mesma retrocompatibilidade já garantida no
+caminho HTTP (`data_type` default "faturamento" em POST /ingestion/upload).
 
 Tratamos qualquer valor extraído daqui como NÃO CONFIÁVEL até validar
 contra core.tenants (feito em ingestion_worker.py, não aqui) — este
@@ -30,7 +30,7 @@ import uuid
 from dataclasses import dataclass
 
 _KEY_PATTERN = re.compile(
-    r"^tenants/(?P<tenant_id>[0-9a-fA-F-]{36})/incoming/(?:(?P<data_type>agenda)/)?(?P<file_format>csv|xml|json)/.+$"
+    r"^tenants/(?P<tenant_id>[0-9a-fA-F-]{36})/incoming/(?:(?P<data_type>agenda|glosa)/)?(?P<file_format>csv|xml|json)/.+$"
 )
 
 

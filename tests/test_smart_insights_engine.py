@@ -13,6 +13,7 @@ from app.services.smart_insights_engine import (
     build_network_comparativo_insight,
     describe_worst_no_show_weekday,
     generate_insights,
+    is_true_denial_risk_reason,
 )
 
 _EMPTY_PERIOD = InsightsPeriodInput(
@@ -67,6 +68,58 @@ def test_denial_spike_below_threshold_is_not_flagged():
         high_risk_no_show_count=0,
     )
     assert generate_insights(current, previous) == []
+
+
+def test_is_true_denial_risk_reason_excludes_revenue_leak():
+    """Ver DECISÃO em is_true_denial_risk_reason — cobrar ABAIXO do
+    contrato não é motivo de recusa do convênio, é vazamento de receita
+    da própria clínica."""
+    assert is_true_denial_risk_reason("value_below_contract_revenue_leak") is False
+    assert is_true_denial_risk_reason("missing_cid") is True
+    assert is_true_denial_risk_reason("missing_procedure_code") is True
+    assert is_true_denial_risk_reason("no_contract_reference") is True
+    assert is_true_denial_risk_reason("value_above_contract") is True
+
+
+def test_denial_spike_never_flags_a_plan_for_revenue_leak_alone():
+    """Achado do usuário: "value_below_contract_revenue_leak" não é
+    recusa — um convênio cobrado abaixo do contrato NUNCA deveria virar
+    um card "está recusando mais pagamentos", mesmo que o volume dispare
+    (esse buraco já tem card próprio, _financial_hole_insight)."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[DenialReasonCount("Unimed Nacional", "value_below_contract_revenue_leak", 6)],
+        financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=0,
+    )
+    assert generate_insights(current, previous) == []
+
+
+def test_denial_spike_ignores_revenue_leak_but_still_flags_a_real_reason_in_the_same_plan():
+    """Mesmo convênio com os dois motivos ao mesmo tempo: só o motivo de
+    recusa DE VERDADE (missing_cid) deveria virar manchete/entrar na
+    contagem — revenue leak fica de fora, sem contaminar "e mais N
+    motivo(s)" nem a contagem total."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[
+            DenialReasonCount("Unimed Nacional", "missing_cid", 5),
+            DenialReasonCount("Unimed Nacional", "value_below_contract_revenue_leak", 9),  # maior volume, mas não é recusa
+        ],
+        financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=0,
+    )
+    insights = generate_insights(current, previous)
+    unimed_insights = [i for i in insights if "Unimed Nacional" in i.title]
+    assert len(unimed_insights) == 1
+    assert "código da doença" in unimed_insights[0].message
+    assert "mais barato" not in unimed_insights[0].message
+    assert "mais baixo" not in unimed_insights[0].message
+    assert "mais 1 motivo" not in unimed_insights[0].message  # o único outro motivo era o filtrado
 
 
 def test_small_sample_spike_is_ignored_as_noise():

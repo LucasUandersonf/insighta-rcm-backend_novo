@@ -47,6 +47,22 @@ class BillingResponse(BaseModel):
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
 
+class BillingSearchItem(BaseModel):
+    """Linha de resultado de GET /billing/search — só os campos que
+    ajudam um humano a reconhecer QUAL faturamento é o certo (paciente,
+    procedimento, convênio, valor) sem precisar saber o UUID de cor.
+    Ver DECISÃO em BillingRepository.search."""
+
+    id: UUID
+    patient_name: str
+    procedure_code: str | None
+    insurance_plan_name: str
+    charged_value: float
+    status: str
+    denial_risk_level: str
+    created_at: datetime
+
+
 class BillingSettleRequest(BaseModel):
     """Liquidação do lote — Módulo de Taxas, Custos e Repasses: registra
     quanto a operadora efetivamente pagou, para o dashboard cruzar contra
