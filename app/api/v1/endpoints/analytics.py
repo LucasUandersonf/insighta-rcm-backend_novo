@@ -29,6 +29,7 @@ from app.schemas.analytics import (
     ContractUtilizationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
+    FinancialHoleBillingsResponse,
     HealthScoreResponse,
     InactivePatientsResponse,
     NetworkBenchmarkResponse,
@@ -175,6 +176,25 @@ async def get_recall_candidates(
     return await _build_service(db).get_recall_candidates(
         weekday=weekday, professional_id=str(professional_id) if professional_id else None
     )
+
+
+@router.get("/financial-hole-billings", response_model=FinancialHoleBillingsResponse)
+async def get_financial_hole_billings(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> FinancialHoleBillingsResponse:
+    """
+    As contas reais por trás do insight "Você está cobrando menos do que
+    devia de alguns convênios" (ver DECISÃO em
+    smart_insights_engine.py::_financial_hole_insight e
+    AnalyticsService.get_financial_hole_billings) — mesmo período do
+    resto da Sala de Comando (não é um estado "AGORA" como
+    inactive-patients/recall-candidates).
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_financial_hole_billings(start, end)
 
 
 @router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)

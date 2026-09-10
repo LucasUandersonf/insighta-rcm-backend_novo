@@ -45,6 +45,8 @@ from app.schemas.analytics import (
     PatientNoShowRankingItem,
     PeakHourBucket,
     PeriodKPI,
+    FinancialHoleBillingItem,
+    FinancialHoleBillingsResponse,
     PlanLossItem,
     PlanLossRankingResponse,
     ProfessionalCapacityMetric,
@@ -796,4 +798,37 @@ class AnalyticsService:
             weekday=weekday,
             professional_id=professional_uuid,
             professional_name=professional_name,
+        )
+
+    async def get_financial_hole_billings(self, date_from: date, date_to: date) -> FinancialHoleBillingsResponse:
+        """
+        Lista real por trás do insight "Você está cobrando menos do que
+        devia de alguns convênios" (ver DECISÃO em
+        smart_insights_engine.py::_financial_hole_insight e
+        AnalyticsRepository.list_financial_hole_billings) — achado do
+        usuário: o card dizia QUANTO no total, mas não QUAIS contas
+        corrigir. `total_hole_value` reaproveita financial_hole_total
+        (mesma query-base do agregado) em vez de somar `items` na mão —
+        os dois precisam bater mesmo quando a lista é truncada.
+        """
+        total_count = await self.analytics_repo.count_financial_hole_billings(date_from, date_to)
+        total_hole_value = await self.analytics_repo.financial_hole_total(date_from, date_to)
+        rows = await self.analytics_repo.list_financial_hole_billings(date_from, date_to)
+        return FinancialHoleBillingsResponse(
+            period_start=date_from,
+            period_end=date_to,
+            items=[
+                FinancialHoleBillingItem(
+                    billing_id=uuid.UUID(row["billing_id"]),
+                    patient_full_name=row["patient_full_name"],
+                    procedure_label=row["procedure_label"],
+                    insurance_plan_name=row["insurance_plan_name"],
+                    charged_value=row["charged_value"],
+                    agreed_price=row["agreed_price"],
+                    hole_value=row["hole_value"],
+                )
+                for row in rows
+            ],
+            total_count=total_count,
+            total_hole_value=total_hole_value,
         )

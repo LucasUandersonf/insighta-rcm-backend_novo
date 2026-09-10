@@ -332,8 +332,17 @@ def _financial_hole_insight(current: InsightsPeriodInput, previous: InsightsPeri
             "tabela de preços de cada convênio está em dia no cadastro de Contratos."
         ),
         financial_impact=current.financial_hole_total,
-        action_label="Ver contratos",
-        action_href="/contracts",
+        # DECISÃO — antes o botão só levava pro cadastro de Contratos
+        # (achado do usuário: "vale conferir a tabela de preços" não
+        # dizia QUAIS contas estavam erradas, só um valor total em R$).
+        # Agora aponta pra lista real das contas — paciente, procedimento,
+        # convênio, valor cobrado x valor contratado (ver DECISÃO em
+        # AnalyticsRepository.list_financial_hole_billings e
+        # FinancialHoleBillingsPanel.tsx, frontend) — a correção da
+        # tabela de preços em si continua em Contratos, linkada de dentro
+        # do próprio painel.
+        action_label="Ver contas abaixo do combinado",
+        action_href="#buraco-financeiro",
     )
 
 

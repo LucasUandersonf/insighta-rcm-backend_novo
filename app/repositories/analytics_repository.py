@@ -155,6 +155,78 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return {name: float(total) for name, total in result.all() if total}
 
+    # Bloco WHERE/JOIN compartilhado por list_financial_hole_billings/
+    # count_financial_hole_billings — mesma regra de LATERAL JOIN de
+    # financial_hole_total (ver DECISÃO no topo do arquivo sobre por que
+    # isto é SQL cru, não ORM), agora por LINHA de billing em vez de
+    # somada: achado do usuário depois de ver o card na tela — "vale
+    # conferir a tabela de preços" não dizia QUAIS contas estavam
+    # erradas, só o buraco total em R$. `ci.agreed_price > b.charged_value`
+    # exclui tanto quem não tem contrato vigente encontrado (ci.agreed_price
+    # NULL — "sem contrato pra comparar" é outro problema, não este)
+    # quanto quem cobrou em cima ou acima do combinado.
+    _FINANCIAL_HOLE_BILLINGS_FROM = """
+        FROM core.billing b
+        JOIN core.appointments a ON a.id = b.appointment_id
+        JOIN core.patients p ON p.id = a.patient_id
+        JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+        LEFT JOIN LATERAL (
+            SELECT it.agreed_price, it.procedure_name
+            FROM core.contract_items it
+            JOIN core.contracts c ON c.id = it.contract_id
+            WHERE c.insurance_plan_id = b.insurance_plan_id
+              AND it.tuss_code = a.procedure_code
+              AND c.status = 'homologado'
+              AND c.valid_from <= b.created_at::date
+              AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+            ORDER BY c.valid_from DESC
+            LIMIT 1
+        ) ci ON true
+        WHERE b.created_at >= :start AND b.created_at <= :end
+          AND ci.agreed_price IS NOT NULL
+          AND ci.agreed_price > b.charged_value
+    """
+
+    async def count_financial_hole_billings(self, date_from: date, date_to: date) -> int:
+        start, end = _bounds(date_from, date_to)
+        stmt = text(f"SELECT COUNT(*) {self._FINANCIAL_HOLE_BILLINGS_FROM}")
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return int(result.scalar_one())
+
+    async def list_financial_hole_billings(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        As contas reais por trás do "Divergência de Cobrança" — o insight
+        de cobrança abaixo do contrato (smart_insights_engine.py::
+        _financial_hole_insight) diz QUANTO no total, esta lista diz
+        QUAIS contas, pra quem cuida do faturamento revisar e corrigir
+        uma a uma. Só as piores (`hole_value` maior) primeiro — mesmo
+        espírito de "lista curta e acionável" de list_inactive_patients/
+        list_recall_candidates, não uma tela de auditoria completa.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            f"""
+            SELECT b.id, p.full_name, COALESCE(ci.procedure_name, a.procedure_code) AS procedure_label,
+                   ip.display_name, b.charged_value, ci.agreed_price, (ci.agreed_price - b.charged_value) AS hole_value
+            {self._FINANCIAL_HOLE_BILLINGS_FROM}
+            ORDER BY hole_value DESC
+            LIMIT :limit
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end, "limit": limit})
+        return [
+            {
+                "billing_id": str(row[0]),
+                "patient_full_name": row[1],
+                "procedure_label": row[2],
+                "insurance_plan_name": row[3],
+                "charged_value": float(row[4]),
+                "agreed_price": float(row[5]),
+                "hole_value": float(row[6]),
+            }
+            for row in result.all()
+        ]
+
     async def payment_gap_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `payment_gap_total`, agrupada por convênio."""
         start, end = _bounds(date_from, date_to)

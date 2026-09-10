@@ -160,6 +160,9 @@ def test_financial_hole_insight_carries_financial_impact_for_ranking():
     assert len(insights) == 1
     assert insights[0].severity == "warning"
     assert insights[0].financial_impact == 1200.50
+    # DECISÃO — o botão aponta pra lista real das contas, não mais direto
+    # pro cadastro de Contratos (ver DECISÃO em _financial_hole_insight).
+    assert insights[0].action_href == "#buraco-financeiro"
 
 
 def test_value_saved_improvement_is_positive_insight():
