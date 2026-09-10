@@ -67,6 +67,7 @@ from app.services.smart_insights_engine import (
     describe_denial_reason,
     describe_worst_no_show_weekday,
     generate_insights,
+    is_true_denial_risk_reason,
 )
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
@@ -622,9 +623,17 @@ class AnalyticsService:
         if network_benchmark:
             total_billed = (await self.reporting_repo.billing_summary(date_from, date_to))["total_billed"]
             top_reason_label = None
-            if current_input.denial_reason_counts:
+            # Filtra fora "value_below_contract_revenue_leak" antes de somar
+            # (ver DECISÃO em smart_insights_engine.is_true_denial_risk_reason)
+            # — achado do usuário: sem isso, o "por onde começar" da glosa
+            # podia apontar "o motivo mais comum de recusa tem sido cobrar
+            # mais barato", que não é recusa nenhuma, é vazamento de receita.
+            denial_reasons_for_hint = [
+                c for c in current_input.denial_reason_counts if is_true_denial_risk_reason(c.reason_code)
+            ]
+            if denial_reasons_for_hint:
                 reason_totals: dict[str, int] = {}
-                for reason_count in current_input.denial_reason_counts:
+                for reason_count in denial_reasons_for_hint:
                     reason_totals[reason_count.reason_code] = reason_totals.get(reason_count.reason_code, 0) + reason_count.count
                 top_reason_code = max(reason_totals, key=lambda code: reason_totals[code])
                 top_reason_label = describe_denial_reason(top_reason_code)

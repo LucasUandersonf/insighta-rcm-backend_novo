@@ -12,12 +12,18 @@ import uuid
 from sqlalchemy import text
 
 
-async def _seed_billing_rows(admin_engine, tenant_id: str, *, n: int, risk_level: str) -> None:
+async def _seed_billing_rows(admin_engine, tenant_id: str, *, n: int, risk_level: str, reasons: list[str] | None = None) -> None:
     """Seeding direto via SQL (bypassa API) — só precisamos de linhas
     reais em core.billing/core.appointments com o denial_risk_level
-    desejado, não do fluxo de negócio inteiro."""
+    desejado, não do fluxo de negócio inteiro. `reasons` opcional
+    (default []) — só usado pelo teste do "por onde começar" do
+    Comparativo, que precisa de denial_reasons preenchido de verdade
+    (ver AnalyticsRepository.denial_findings_by_plan)."""
+    import json
+
     patient_id = str(uuid.uuid4())
     plan_id = str(uuid.uuid4())
+    reasons_json = json.dumps(reasons or [])
     async with admin_engine.begin() as conn:
         await conn.execute(
             text("INSERT INTO core.patients (id, tenant_id, full_name) VALUES (:id, :t, 'Paciente Benchmark')"),
@@ -41,10 +47,10 @@ async def _seed_billing_rows(admin_engine, tenant_id: str, *, n: int, risk_level
             )
             await conn.execute(
                 text(
-                    "INSERT INTO core.billing (tenant_id, appointment_id, insurance_plan_id, charged_value, denial_risk_level) "
-                    "VALUES (:t, :a, :plan, 100.0, :risk)"
+                    "INSERT INTO core.billing (tenant_id, appointment_id, insurance_plan_id, charged_value, denial_risk_level, denial_reasons) "
+                    "VALUES (:t, :a, :plan, 100.0, :risk, CAST(:reasons AS jsonb))"
                 ),
-                {"t": tenant_id, "a": appointment_id, "plan": plan_id, "risk": risk_level},
+                {"t": tenant_id, "a": appointment_id, "plan": plan_id, "risk": risk_level, "reasons": reasons_json},
             )
 
 

@@ -236,6 +236,23 @@ def describe_denial_reason(code: str) -> str:
     return _REASON_PLAIN.get(code, code)
 
 
+def is_true_denial_risk_reason(code: str) -> bool:
+    """DECISÃO — corrige um rótulo enganoso encontrado ao documentar o
+    produto para o usuário: "value_below_contract_revenue_leak" é um dos
+    reason_code que o motor de risco grava (ver denial_risk_engine.py::
+    _rule_value_mismatch), mas o comentário do PRÓPRIO motor já deixa
+    claro que cobrar ABAIXO do contrato não é risco de recusa — "convênio
+    não recusa por cobrar barato demais", é vazamento de receita da
+    própria clínica (categoria diferente, já coberta por
+    _financial_hole_insight). Sem este filtro, tanto
+    _denial_spike_insights (card "Convênio X está recusando mais
+    pagamentos") quanto o "por onde começar" do Comparativo de glosa
+    (ver AnalyticsService.get_smart_insights) podiam nomear esse motivo
+    como causa de RECUSA — o oposto do que ele significa. Público porque
+    os dois lugares precisam do mesmo filtro."""
+    return code != "value_below_contract_revenue_leak"
+
+
 def _index_reason_counts(counts: list[DenialReasonCount]) -> dict[tuple[str, str], int]:
     return {(c.plan_id, c.reason_code): c.count for c in counts}
 
@@ -256,10 +273,16 @@ def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPerio
     """1 card por CONVÊNIO (nunca por combinação convênio+motivo — ver
     DECISÃO no topo do arquivo). Cada motivo que disparou (novo padrão OU
     salto de volume) entra na lista do convênio; o de maior volume atual
-    vira a manchete da frase, os demais somam num "e mais N motivo(s)"."""
-    current_idx = _index_reason_counts(current.denial_reason_counts)
-    previous_idx = _index_reason_counts(previous.denial_reason_counts)
-    plan_names = {c.plan_id: c.plan_name for c in current.denial_reason_counts}
+    vira a manchete da frase, os demais somam num "e mais N motivo(s)".
+
+    Filtra fora "value_below_contract_revenue_leak" antes de tudo (ver
+    DECISÃO em is_true_denial_risk_reason) — este card é especificamente
+    sobre RECUSA de pagamento, e esse motivo não é recusa nenhuma."""
+    current_counts = [c for c in current.denial_reason_counts if is_true_denial_risk_reason(c.reason_code)]
+    previous_counts = [c for c in previous.denial_reason_counts if is_true_denial_risk_reason(c.reason_code)]
+    current_idx = _index_reason_counts(current_counts)
+    previous_idx = _index_reason_counts(previous_counts)
+    plan_names = {c.plan_id: c.plan_name for c in current_counts}
 
     # plan_id -> lista de (reason_code, current_count, is_new_pattern, growth_pct)
     flagged_by_plan: dict[str, list[tuple[str, int, bool, float]]] = {}

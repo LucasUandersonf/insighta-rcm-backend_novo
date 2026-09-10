@@ -812,6 +812,35 @@ async def test_smart_insights_flags_network_comparativo_when_gap_is_large(client
     assert "acima da rede" in comparativo["title"]
 
 
+async def test_smart_insights_comparativo_never_blames_revenue_leak_as_denial_reason(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Achado do usuário ao documentar o produto: "value_below_contract_revenue_leak"
+    (cobrar ABAIXO do contrato) não é motivo de RECUSA — é a própria
+    clínica cobrando barato demais (ver DECISÃO em
+    smart_insights_engine.is_true_denial_risk_reason). Sem o filtro, o
+    "por onde começar" do Comparativo podia apontar esse motivo como se
+    fosse causa de glosa. Aqui, o ÚNICO motivo presente é esse — então o
+    "por onde começar" precisa ficar ausente, nunca apontar pra ele."""
+    from tests.integration.test_network_benchmark import _insert_tenant, _seed_billing_rows
+
+    await _seed_billing_rows(admin_engine, tenant_a, n=6, risk_level="high", reasons=["value_below_contract_revenue_leak"])
+    for i in range(5):
+        other = await _insert_tenant(admin_engine, trade_name=f"Clínica Rede Revenue Leak {i}")
+        await _seed_billing_rows(admin_engine, other, n=6, risk_level="low")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    comparativo = next((i for i in insights if i["severity"] == "comparativo"), None)
+    assert comparativo is not None
+    assert "é um bom lugar pra começar a corrigir" not in comparativo["message"]
+    assert "mais baixo" not in comparativo["message"]
+
+
 async def test_smart_insights_has_no_comparativo_when_cohort_is_insufficient(client, auth_headers_a, admin_engine, tenant_a):
     """Sem clínicas suficientes na rede (só 1 outra), o Comparativo nunca
     deveria virar insight — mesma garantia de amostra mínima da aba
