@@ -60,6 +60,11 @@ _MIN_SAMPLE_FOR_TREND = 3
 _SPIKE_THRESHOLD_PCT = 15.0
 _HIGH_RISK_NO_SHOW_ALERT_THRESHOLD = 5
 _UTILIZATION_DROP_ALERT_PP = 10.0  # pontos percentuais
+# Mesmo piso de "agenda livre" usado em occupancyBarClass/occupancyNote
+# (ExecutiveAgendaSummary.tsx, frontend) — para o texto do insight NUNCA
+# nomear alguém que o painel de apoio logo abaixo não classificaria como
+# "com a agenda livre" (as duas leituras precisam bater).
+_IDLE_PROFESSIONAL_UTILIZATION_THRESHOLD = 0.6
 
 # Auditoria Go-Live — redesenho "menos BI" do painel: dois novos insights
 # textuais, mesmo padrão de threshold nomeado e amostra mínima dos demais.
@@ -170,6 +175,25 @@ class InsightsPeriodInput:
     # Default [] pelo mesmo motivo dos demais campos com default: não
     # quebrar chamadas/testes existentes que ainda não passam esse dado.
     professional_denial_rates: list[tuple[str, str, float, int]] = field(default_factory=list)
+    # {dia_da_semana: contagem} de agendamentos FUTUROS com risco médio/
+    # alto de falta (ver AnalyticsRepository.upcoming_risk_count_by_weekday)
+    # — dá ao insight de taxa de falta por dia (_weekday_no_show_rate_insight)
+    # um "e olha, você já tem N marcadas pra esse dia com risco", em vez
+    # de só um padrão histórico sem conexão com o que já está na agenda.
+    # Só faz sentido em `current` (é "agora", mesmo raciocínio de
+    # appeals_due_soon_count) — default {} pelo motivo de sempre: não
+    # quebrar chamada/teste que ainda não passa esse dado.
+    upcoming_risk_count_by_weekday: dict[int, int] = field(default_factory=dict)
+    # Taxa de ocupação por profissional no período atual — [(professional_id,
+    # nome, taxa_de_ocupação 0-1)], só quem tem grade cadastrada (ver
+    # DECISÃO em AnalyticsService.get_smart_insights; mesmo motivo de
+    # professionals_without_availability_count no schema de agenda-metrics:
+    # sem grade, "ocupação" não tem denominador). Mesmo raciocínio de
+    # professional_denial_rates acima: o SERVIÇO só entrega o dado cru por
+    # profissional, é o MOTOR (_capacity_drop_insight) que decide qual é
+    # o pior caso — mantém a mesma divisão de responsabilidade em todo o
+    # arquivo. Default [] pelo motivo de sempre.
+    professional_utilization_rates: list[tuple[str, str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -367,18 +391,39 @@ def _capacity_drop_insight(
             if estimated_idle_capacity_revenue_lost > 0
             else ""
         )
+        # DECISÃO — nomeia QUEM está ocioso, quando dá (achado do usuário:
+        # "algum profissional específico" não é uma ação, é uma pergunta
+        # de volta pro gestor). Mesmo critério de "worst case" de
+        # _professional_outlier_insight: pega o de MENOR ocupação entre
+        # quem tem grade, só nomeia se estiver de fato abaixo do piso de
+        # "agenda livre" (mesmo limiar de occupancyBarClass/occupancyNote
+        # em ExecutiveAgendaSummary.tsx, pra o texto nunca contradizer o
+        # painel de apoio) — sem ninguém nesse caso, cai no texto
+        # genérico de sempre em vez de inventar um nome.
+        idlest = min(current.professional_utilization_rates, key=lambda t: t[2], default=None)
+        if idlest and idlest[2] < _IDLE_PROFESSIONAL_UTILIZATION_THRESHOLD:
+            professional_id, professional_name, utilization_rate = idlest
+            who_note = (
+                f" — principalmente {professional_name}, com só {utilization_rate * 100:.0f}% da agenda ocupada"
+            )
+            action_label = f"Ver candidatos pra agenda de {professional_name}"
+            action_href = f"#professional:{professional_id}"
+        else:
+            who_note = ""
+            action_label = "Ver ocupação por profissional"
+            action_href = "#agenda-resumo"
         return Insight(
             severity="warning",
             category="agenda",
             title="Sua agenda está com mais horários vazios do que o normal",
             message=(
                 f"Nos últimos dias, a agenda da sua clínica ficou {drop_pp:.0f} pontos percentuais mais vazia "
-                f"do que estava antes{impact_note}. Vale olhar se algum profissional específico está com a "
-                "agenda mais livre e tentar preencher esses horários."
+                f"do que estava antes{impact_note}{who_note}. Vale tentar preencher esses horários com quem já "
+                "foi paciente e ainda não tem retorno marcado."
             ),
             financial_impact=estimated_idle_capacity_revenue_lost or None,
-            action_label="Ver ocupação por profissional",
-            action_href="#agenda-resumo",
+            action_label=action_label,
+            action_href=action_href,
         )
     return None
 
@@ -448,12 +493,18 @@ def _weekday_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriod
         title=f"{label.capitalize()} está com menos consultas marcadas",
         message=(
             f"Toda {label} sua clínica costumava ter {previous_count} consulta(s) marcada(s) — nas "
-            f"últimas semanas, caiu para {current_count} (uma queda de {drop_pct:.0f}%). Vale entender "
-            "o motivo: algum profissional que atendia nesse dia mudou de horário? Um lembrete ou uma "
-            f"condição especial pra quem marcar numa {label} pode ajudar a recuperar esse movimento."
+            f"últimas semanas, caiu para {current_count} (uma queda de {drop_pct:.0f}%). Quem costumava "
+            f"vir numa {label} e ainda não tem retorno marcado é um bom primeiro grupo pra recontatar."
         ),
-        action_label="Ver volume de consultas",
-        action_href="#agenda-resumo",
+        # DECISÃO — antes o botão só levava pro gráfico de volume ("olha
+        # que caiu"), sem terminar no passo que reverte a perda (achado
+        # do usuário: "vale entender o motivo" não é uma ação). Agora
+        # aponta pra lista real de quem recontatar — ver DECISÃO em
+        # AnalyticsRepository.list_recall_candidates e
+        # ExecutiveAgendaSummary.tsx (frontend), que também mostra o
+        # gráfico de volume na mesma seção.
+        action_label=f"Ver quem costumava vir {label}",
+        action_href=f"#weekday:{weekday}",
     )
 
 
@@ -532,6 +583,19 @@ def _weekday_no_show_rate_insight(current: InsightsPeriodInput) -> Insight | Non
     severity = "critical" if gap_pp >= _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP else "warning"
     label = _WEEKDAY_LABELS[weekday]
     comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
+    # DECISÃO — conecta o padrão HISTÓRICO (taxa de falta por dia) com o
+    # que já está marcado pra frente (achado do usuário: "um lembrete
+    # pode ajudar" não diz quem ligar nem quando) — quando já existem
+    # consultas futuras nesse mesmo dia da semana com risco médio/alto
+    # (ver AnalyticsRepository.upcoming_risk_count_by_weekday), o texto
+    # aponta o número exato em vez de ficar só na generalidade histórica.
+    upcoming_count = current.upcoming_risk_count_by_weekday.get(weekday, 0)
+    upcoming_note = (
+        f" Aliás, você já tem {upcoming_count} consulta(s) marcada(s) pra {label} que vem que também corre "
+        "esse risco — vale confirmar essas primeiro."
+        if upcoming_count > 0
+        else ""
+    )
     return Insight(
         severity=severity,
         category="agenda",
@@ -540,10 +604,14 @@ def _weekday_no_show_rate_insight(current: InsightsPeriodInput) -> Insight | Non
             f"Numa {label} comum, {rate * 100:.0f}% das consultas marcadas na sua clínica acabam sendo "
             f"falta — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Um lembrete de "
             f"confirmação enviado com 1 dia de antecedência, especialmente pras {label}s, costuma "
-            "resolver boa parte disso."
+            f"resolver boa parte disso.{upcoming_note}"
         ),
+        # Aponta pra visão focada nesse dia da semana (ver DECISÃO em
+        # _weekday_drop_insight acima e ExecutiveAgendaSummary.tsx,
+        # frontend) — mesma seção de sempre ("#agenda-resumo"), agora
+        # filtrada e com a lista de recontato pra esse dia específico.
         action_label="Ver risco de falta",
-        action_href="#agenda-resumo",
+        action_href=f"#weekday:{weekday}",
     )
 
 

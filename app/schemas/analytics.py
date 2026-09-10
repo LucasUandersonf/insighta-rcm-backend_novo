@@ -370,3 +370,35 @@ class InactivePatientsResponse(BaseModel):
     items: list[InactivePatientItem]
     total_count: int
     inactive_after_days: int
+
+
+class RecallCandidateItem(BaseModel):
+    """Uma linha de "candidato a recontato" — ver DECISÃO em
+    AnalyticsRepository._recall_candidates_last_appointment. Diferente de
+    InactivePatientItem (piso fixo de 365 dias): aqui o critério é só
+    "já foi atendido, sem nenhum retorno futuro marcado", então
+    days_since_last_appointment pode ser bem menor que 365."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    days_since_last_appointment: int
+    # Profissional do último atendimento — null quando aquele agendamento
+    # não tinha profissional associado (dado antigo/incompleto).
+    last_professional_name: str | None
+
+
+class RecallCandidatesResponse(BaseModel):
+    """GET /api/v1/analytics/recall-candidates — a lista real por trás
+    dos botões de ação de _weekday_drop_insight/_weekday_no_show_rate_insight/
+    _capacity_drop_insight (ver DECISÃO em smart_insights_engine.py).
+    Exatamente um filtro é usado por vez hoje (`weekday` OU
+    `professional_id`, nunca os dois — ver chamadores em
+    ExecutiveAgendaSummary.tsx, frontend); os campos ecoam de volta qual
+    filtro foi aplicado, pra tela não precisar adivinhar."""
+
+    items: list[RecallCandidateItem]
+    total_count: int
+    weekday: int | None
+    professional_id: UUID | None
+    professional_name: str | None

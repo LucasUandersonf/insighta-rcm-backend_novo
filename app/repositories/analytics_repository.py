@@ -41,6 +41,7 @@ LOCAL aplicado) — RLS filtra billing/appointments/contracts/contract_items
 pelo tenant normalmente, mesmo em SQL cru, porque roda na MESMA
 conexão/transação da requisição.
 """
+import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import case, func, select, text
@@ -394,6 +395,32 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
+    async def upcoming_risk_count_by_weekday(self, *, as_of: datetime) -> dict[int, int]:
+        """
+        Mesmo filtro de `upcoming_risk_appointments` (agendamento futuro,
+        'scheduled', risco médio/alto), mas agrupado por dia da semana em
+        vez de listar nominalmente — alimenta o "por onde começar" do
+        insight de taxa de falta por dia (ver
+        smart_insights_engine.py::_weekday_no_show_rate_insight): não
+        basta dizer "quinta tem taxa de falta alta historicamente", vale
+        dizer também "e você já tem N consulta(s) de quinta que viraram
+        MARCADA(S) com risco, esta semana". Retorna só os dias com pelo
+        menos 1 ocorrência (dict esparso, mesmo espírito de
+        weekday_no_show_rate_breakdown).
+        """
+        stmt = text(
+            """
+            SELECT EXTRACT(DOW FROM a.scheduled_at)::int AS weekday, COUNT(*)
+            FROM core.appointments a
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :as_of
+              AND a.no_show_risk_level = ANY(:levels)
+            GROUP BY weekday
+            """
+        )
+        result = await self.session.execute(stmt, {"as_of": as_of, "levels": ["medio", "alto"]})
+        return {int(weekday): int(count) for weekday, count in result.all()}
+
     async def avg_charged_value(self, date_from: date, date_to: date) -> float:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(
@@ -656,6 +683,94 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
+
+    def _recall_candidates_last_appointment(self, as_of: datetime, weekday: int | None, professional_id: uuid.UUID | None):
+        """
+        Base compartilhada de list_recall_candidates/count_recall_candidates
+        — DECISÃO — "candidato a recontato" é um conceito DIFERENTE de
+        paciente inativo (list_inactive_patients/inactive_patients_count,
+        piso fixo de 365 dias): aqui o critério é só "já foi atendido
+        alguma vez, e não tem NENHUM retorno futuro marcado", sem piso de
+        tempo — alguém que costumava vir toda quarta e não voltou há 3
+        semanas já é candidato a recontato pro insight de queda de
+        agenda (ver smart_insights_engine.py::_weekday_drop_insight),
+        mesmo sem se qualificar como "inativo" ainda.
+
+        DISTINCT ON (Postgres-específico, mesmo dialeto assumido em
+        upcoming_risk_appointments acima) pega o ÚLTIMO agendamento
+        PASSADO de cada paciente — junto com o profissional daquele
+        atendimento, para permitir o filtro por `professional_id` abaixo
+        (não dá pra filtrar por "profissional do último atendimento" só
+        com o MAX(scheduled_at) escalar de list_inactive_patients, que
+        não carrega mais nenhuma outra coluna daquela linha).
+
+        `weekday` (0=domingo..6=sábado) filtra pelo dia da semana do
+        último atendimento — proxy razoável de "dia que esse paciente
+        costuma vir" (mesmo espírito de "chute razoável" documentado em
+        no_show_risk_engine.py), não uma contagem de todos os dias que
+        ele já visitou. `professional_id` filtra pelo profissional do
+        último atendimento. Os dois filtros são normalmente usados um de
+        cada vez (nunca os dois pela mesma chamada nesta rodada), mas
+        nada impede compor os dois se um dia fizer sentido.
+        """
+        last_appointment = (
+            select(Appointment.patient_id, Appointment.scheduled_at, Appointment.professional_id)
+            .where(Appointment.scheduled_at <= as_of)
+            .distinct(Appointment.patient_id)
+            .order_by(Appointment.patient_id, Appointment.scheduled_at.desc())
+            .subquery()
+        )
+        future_patient_ids = select(Appointment.patient_id).where(
+            Appointment.scheduled_at > as_of, Appointment.status == "scheduled"
+        )
+        conditions = [last_appointment.c.patient_id.not_in(future_patient_ids)]
+        if weekday is not None:
+            conditions.append(func.extract("dow", last_appointment.c.scheduled_at) == weekday)
+        if professional_id is not None:
+            conditions.append(last_appointment.c.professional_id == professional_id)
+        return last_appointment, conditions
+
+    async def count_recall_candidates(
+        self, as_of: datetime, *, weekday: int | None = None, professional_id: uuid.UUID | None = None
+    ) -> int:
+        last_appointment, conditions = self._recall_candidates_last_appointment(as_of, weekday, professional_id)
+        stmt = select(func.count()).select_from(last_appointment).where(*conditions)
+        return int((await self.session.execute(stmt)).scalar_one())
+
+    async def list_recall_candidates(
+        self,
+        as_of: datetime,
+        *,
+        weekday: int | None = None,
+        professional_id: uuid.UUID | None = None,
+        limit: int = 15,
+    ) -> list[tuple[str, str, datetime, str | None]]:
+        """
+        Ver DECISÃO completa em _recall_candidates_last_appointment. Lista
+        curta (mesmo espírito de list_inactive_patients: não é tela de
+        gestão de carteira, é "por onde começar a ligar hoje"), ordenada
+        por quem parou de vir há MAIS tempo primeiro.
+
+        Retorna [(patient_id, nome, data_do_último_atendimento,
+        nome_do_profissional_daquele_atendimento_ou_None)].
+        """
+        from app.models.patient import Patient
+        from app.models.professional import Professional
+
+        last_appointment, conditions = self._recall_candidates_last_appointment(as_of, weekday, professional_id)
+        stmt = (
+            select(Patient.id, Patient.full_name, last_appointment.c.scheduled_at, Professional.full_name)
+            .join(last_appointment, last_appointment.c.patient_id == Patient.id)
+            .outerjoin(Professional, Professional.id == last_appointment.c.professional_id)
+            .where(*conditions)
+            .order_by(last_appointment.c.scheduled_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            (str(patient_id), full_name, last_appointment_at, professional_name)
+            for patient_id, full_name, last_appointment_at, professional_name in result.all()
+        ]
 
     async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
         """

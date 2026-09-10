@@ -212,6 +212,43 @@ def test_capacity_drop_without_idle_estimate_omits_financial_impact():
     assert "deixaram de entrar" not in insights[0].message
 
 
+def test_capacity_drop_names_idlest_professional_when_below_free_threshold():
+    """Achado do usuário: 'algum profissional específico' não é uma
+    ação, é uma pergunta de volta pro gestor — agora nomeia quem está
+    de fato ocioso e aponta pro botão certo (candidatos a recontato
+    daquele profissional)."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.80, high_risk_no_show_count=0
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.65, high_risk_no_show_count=0,
+        professional_utilization_rates=[("prof-1", "Dr. Ricardo", 0.90), ("prof-2", "Dra. Ana", 0.40)],
+    )
+    insights = generate_insights(current, previous)
+    assert len(insights) == 1
+    assert "Dra. Ana" in insights[0].message
+    assert "Dr. Ricardo" not in insights[0].message
+    assert insights[0].action_label == "Ver candidatos pra agenda de Dra. Ana"
+    assert insights[0].action_href == "#professional:prof-2"
+
+
+def test_capacity_drop_falls_back_to_generic_text_when_nobody_is_free_enough():
+    """Ninguém abaixo do piso de "agenda livre" — mesmo texto/ação
+    genéricos de antes, nunca nomeia alguém que o painel de apoio não
+    classificaria como ocioso."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.80, high_risk_no_show_count=0
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=0.65, high_risk_no_show_count=0,
+        professional_utilization_rates=[("prof-1", "Dr. Ricardo", 0.90), ("prof-2", "Dra. Ana", 0.70)],
+    )
+    insights = generate_insights(current, previous)
+    assert "Dra. Ana" not in insights[0].message
+    assert insights[0].action_label == "Ver ocupação por profissional"
+    assert insights[0].action_href == "#agenda-resumo"
+
+
 def test_high_risk_no_show_volume_uses_estimated_revenue_at_risk():
     current = InsightsPeriodInput(
         denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None, high_risk_no_show_count=8
@@ -237,6 +274,11 @@ def test_weekday_drop_above_threshold_is_flagged_critical():
     assert insights[0].severity == "critical"
     assert "segunda-feira" in insights[0].message
     assert "33%" in insights[0].message
+    # DECISÃO — o botão aponta pra visão focada nesse dia da semana (lista
+    # de recontato), não mais só pro gráfico de volume (ver DECISÃO em
+    # _weekday_drop_insight).
+    assert insights[0].action_href == "#weekday:1"
+    assert "segunda-feira" in insights[0].action_label.lower()
 
 
 def test_weekday_drop_below_threshold_is_not_flagged():
@@ -303,6 +345,27 @@ def test_weekday_no_show_rate_above_average_is_flagged():
     assert len(insights) == 1
     assert "segunda-feira" in insights[0].message.lower()
     assert insights[0].severity == "warning"
+    # DECISÃO — aponta pra visão focada nesse dia (ver DECISÃO em
+    # _weekday_no_show_rate_insight), sem consulta futura marcada nesse
+    # dia da semana o texto não menciona nenhum número em cima do padrão
+    # histórico.
+    assert insights[0].action_href == "#weekday:1"
+    assert "consulta(s) marcada(s)" not in insights[0].message
+
+
+def test_weekday_no_show_rate_mentions_upcoming_marked_appointments_with_risk():
+    """Conecta o padrão histórico com o que já está marcado pra frente —
+    achado do usuário: 'um lembrete pode ajudar' não dizia quem ligar
+    nem quando."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_no_show_counts={1: (4, 10), 5: (1, 10)},
+        upcoming_risk_count_by_weekday={1: 3, 2: 7},  # 3 é do dia flagrado (segunda); 2 (terça) não deve aparecer
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert "3 consulta(s) marcada(s)" in insights[0].message
+    assert "7 consulta(s)" not in insights[0].message
 
 
 def test_weekday_no_show_rate_far_above_average_is_critical():

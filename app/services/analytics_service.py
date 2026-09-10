@@ -48,6 +48,8 @@ from app.schemas.analytics import (
     PlanLossItem,
     PlanLossRankingResponse,
     ProfessionalCapacityMetric,
+    RecallCandidateItem,
+    RecallCandidatesResponse,
     SmartInsightResponse,
     SmartInsightsResponse,
     UpcomingRiskAppointmentItem,
@@ -468,6 +470,8 @@ class AnalyticsService:
         *,
         appeals_due_soon: int = 0,
         annual_goal_context: "_AnnualGoalContext | None" = None,
+        upcoming_risk_count_by_weekday: dict[int, int] | None = None,
+        professional_utilization_rates: list[tuple[str, str, float]] | None = None,
     ) -> InsightsPeriodInput:
         # appeals_due_soon é passado de fora, não recalculado aqui: é um
         # estado "AGORA" (prazo vencendo hoje), não algo que faça sentido
@@ -520,6 +524,8 @@ class AnalyticsService:
             ytd_billed_total=annual_goal_context.ytd_billed_total if annual_goal_context else 0.0,
             inactive_patients_count=annual_goal_context.inactive_patients_count if annual_goal_context else 0,
             professional_denial_rates=professional_denial_rates,
+            upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday or {},
+            professional_utilization_rates=professional_utilization_rates or [],
         )
 
     async def get_smart_insights(
@@ -552,8 +558,37 @@ class AnalyticsService:
             ),
         )
 
+        # Ocupação por profissional no período ATUAL — mesmo cálculo de
+        # get_agenda_metrics (capacity_service.get_utilization), só que
+        # aqui alimenta o texto do insight de queda de agenda (ver DECISÃO
+        # em smart_insights_engine.py::_capacity_drop_insight nomear QUEM
+        # está ocioso). Só quem tem grade cadastrada entra (available_minutes
+        # > 0) — sem grade, "ocupação" não tem denominador (mesmo motivo de
+        # professionals_without_availability_count). Estado "AGORA" do
+        # período atual, mesmo raciocínio de professional_denial_rates —
+        # não faz sentido perguntar "ocupação do período anterior" pra
+        # decidir quem nomear hoje.
+        professionals = await self.professional_repo.list_active()
+        professional_utilization_rates: list[tuple[str, str, float]] = []
+        for professional in professionals:
+            result = await self.capacity_service.get_utilization(professional.id, date_from, date_to)
+            if result.available_minutes > 0:
+                professional_utilization_rates.append((str(professional.id), professional.full_name, result.utilization_rate))
+
+        # Agendamentos futuros com risco médio/alto, por dia da semana —
+        # alimenta o "e olha, você já tem N marcadas com risco pra esse
+        # dia" de _weekday_no_show_rate_insight.
+        upcoming_risk_count_by_weekday = await self.analytics_repo.upcoming_risk_count_by_weekday(
+            as_of=datetime.now(timezone.utc)
+        )
+
         current_input = await self._period_insights_input(
-            date_from, date_to, appeals_due_soon=appeals_due_soon, annual_goal_context=annual_goal_context
+            date_from,
+            date_to,
+            appeals_due_soon=appeals_due_soon,
+            annual_goal_context=annual_goal_context,
+            upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday,
+            professional_utilization_rates=professional_utilization_rates,
         )
         previous_input = await self._period_insights_input(previous.start, previous.end)
         avg_charged = await self.analytics_repo.avg_charged_value(date_from, date_to)
@@ -719,4 +754,46 @@ class AnalyticsService:
             ],
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
+    async def get_recall_candidates(
+        self, *, weekday: int | None = None, professional_id: str | None = None, limit: int = 15
+    ) -> RecallCandidatesResponse:
+        """
+        Lista real por trás dos botões de ação de _weekday_drop_insight/
+        _weekday_no_show_rate_insight (filtro `weekday`) e
+        _capacity_drop_insight (filtro `professional_id`) — ver DECISÃO em
+        AnalyticsRepository._recall_candidates_last_appointment. Exatamente
+        um dos dois filtros é esperado por chamada (o endpoint valida
+        isso); nenhum dos dois = candidatos sem filtro nenhum (não usado
+        hoje pela Sala de Comando, mas a query aceita).
+        """
+        as_of = datetime.now(timezone.utc)
+        professional_uuid = uuid.UUID(professional_id) if professional_id else None
+        professional_name: str | None = None
+        if professional_uuid is not None:
+            professional = await self.professional_repo.get_by_id(professional_uuid)
+            professional_name = professional.full_name if professional else None
+
+        total_count = await self.analytics_repo.count_recall_candidates(
+            as_of, weekday=weekday, professional_id=professional_uuid
+        )
+        rows = await self.analytics_repo.list_recall_candidates(
+            as_of, weekday=weekday, professional_id=professional_uuid, limit=limit
+        )
+        return RecallCandidatesResponse(
+            items=[
+                RecallCandidateItem(
+                    patient_id=uuid.UUID(patient_id),
+                    full_name=full_name,
+                    last_appointment_at=last_appointment_at,
+                    days_since_last_appointment=(datetime.now(timezone.utc) - last_appointment_at).days,
+                    last_professional_name=last_professional_name,
+                )
+                for patient_id, full_name, last_appointment_at, last_professional_name in rows
+            ],
+            total_count=total_count,
+            weekday=weekday,
+            professional_id=professional_uuid,
+            professional_name=professional_name,
         )
