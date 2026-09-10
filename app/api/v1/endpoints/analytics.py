@@ -29,11 +29,13 @@ from app.schemas.analytics import (
     ContractUtilizationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
+    FinancialHoleBillingsResponse,
     HealthScoreResponse,
     InactivePatientsResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     PlanLossRankingResponse,
+    RecallCandidatesResponse,
     SmartInsightsResponse,
 )
 from app.services.analytics_service import AnalyticsService
@@ -145,6 +147,54 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/recall-candidates", response_model=RecallCandidatesResponse)
+async def get_recall_candidates(
+    db: DbSession,
+    weekday: int | None = None,
+    professional_id: uuid.UUID | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> RecallCandidatesResponse:
+    """
+    Candidatos a recontato (Sala de Comando) — a lista real por trás dos
+    botões de ação dos insights de agenda que apontam pra um dia da
+    semana ou um profissional específico (ver DECISÃO em
+    smart_insights_engine.py::_weekday_drop_insight/
+    _weekday_no_show_rate_insight/_capacity_drop_insight). Exatamente um
+    dos dois filtros é esperado — os dois juntos ("candidatos desse
+    profissional NESSE dia") ou nenhum não têm um card que os produza
+    hoje, então rejeitamos aqui em vez de devolver um resultado ambíguo
+    silenciosamente.
+    """
+    if (weekday is None) == (professional_id is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Informe exatamente um entre weekday e professional_id."
+        )
+    if weekday is not None and not (0 <= weekday <= 6):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="weekday deve estar entre 0 e 6.")
+    return await _build_service(db).get_recall_candidates(
+        weekday=weekday, professional_id=str(professional_id) if professional_id else None
+    )
+
+
+@router.get("/financial-hole-billings", response_model=FinancialHoleBillingsResponse)
+async def get_financial_hole_billings(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> FinancialHoleBillingsResponse:
+    """
+    As contas reais por trás do insight "Você está cobrando menos do que
+    devia de alguns convênios" (ver DECISÃO em
+    smart_insights_engine.py::_financial_hole_insight e
+    AnalyticsService.get_financial_hole_billings) — mesmo período do
+    resto da Sala de Comando (não é um estado "AGORA" como
+    inactive-patients/recall-candidates).
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_financial_hole_billings(start, end)
 
 
 @router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)

@@ -103,6 +103,97 @@ async def test_executive_summary_computes_financial_hole_and_margin(client, auth
     assert body["margin_vs_contracted_pct"] == 75.0  # 150 / (150 + 50) * 100
 
 
+async def test_financial_hole_billings_lists_the_underpriced_line(client, auth_headers_a, admin_engine, tenant_a):
+    """A lista real por trás do insight "Você está cobrando menos do que
+    devia" (achado do usuário: o card só mostrava o total em R$, não
+    QUAIS contas). Sem procedure_name cadastrado no contrato (mesmo
+    seed de test_executive_summary_computes_financial_hole_and_margin),
+    procedure_label cai pro código TUSS cru."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_count"] == 1
+    assert body["total_hole_value"] == 50.0
+    item = body["items"][0]
+    assert item["patient_full_name"] == "Paciente Analytics"
+    assert item["insurance_plan_name"] == "Unimed Nacional"
+    assert item["procedure_label"] == "10101012"  # sem nome cadastrado, cai pro código TUSS
+    assert item["charged_value"] == 150.0
+    assert item["agreed_price"] == 200.0
+    assert item["hole_value"] == 50.0
+
+
+async def test_financial_hole_billings_shows_procedure_name_when_registered(client, admin_engine, tenant_a, auth_headers_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    contract_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status) "
+                "VALUES (:id, :t, :plan, '2026-01-01', 'homologado')"
+            ),
+            {"id": contract_id, "t": tenant_a, "plan": plan_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO core.contract_items (tenant_id, contract_id, tuss_code, procedure_name, agreed_price) "
+                "VALUES (:t, :contract, :code, :name, :value)"
+            ),
+            {"t": tenant_a, "contract": contract_id, "code": "10101012", "name": "Consulta em consultório", "value": 200.0},
+        )
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Com Nome"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.json()["items"][0]["procedure_label"] == "Consulta em consultório"
+
+
+async def test_financial_hole_billings_excludes_lines_charged_at_or_above_contract(client, admin_engine, tenant_a, auth_headers_a):
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=200.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["total_count"] == 0
+    assert body["items"] == []
+
+
+async def test_financial_hole_billings_isolates_between_tenants(client, admin_engine, tenant_a, auth_headers_a, auth_headers_b):
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response_b = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_b
+    )
+    assert response_b.status_code == 200
+    assert response_b.json()["total_count"] == 0
+
+
 async def test_agenda_metrics_returns_peak_hours_and_professionals(client, auth_headers_a, admin_engine, tenant_a):
     professional_resp = await client.post(
         "/api/v1/professionals",

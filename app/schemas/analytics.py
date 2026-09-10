@@ -227,6 +227,11 @@ class DenialRiskDistributionResponse(BaseModel):
 
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive" | "comparativo"
+    # "faturamento" | "agenda" — ver DECISÃO em smart_insights_engine.Insight.
+    # Usado pelo frontend (SmartInsightsFeed.tsx) pra agrupar o feed em
+    # seções por área, em vez de uma lista única misturando cobrança/glosa
+    # com ocupação de agenda.
+    category: str
     title: str
     message: str
     financial_impact: float | None
@@ -365,3 +370,66 @@ class InactivePatientsResponse(BaseModel):
     items: list[InactivePatientItem]
     total_count: int
     inactive_after_days: int
+
+
+class RecallCandidateItem(BaseModel):
+    """Uma linha de "candidato a recontato" — ver DECISÃO em
+    AnalyticsRepository._recall_candidates_last_appointment. Diferente de
+    InactivePatientItem (piso fixo de 365 dias): aqui o critério é só
+    "já foi atendido, sem nenhum retorno futuro marcado", então
+    days_since_last_appointment pode ser bem menor que 365."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    days_since_last_appointment: int
+    # Profissional do último atendimento — null quando aquele agendamento
+    # não tinha profissional associado (dado antigo/incompleto).
+    last_professional_name: str | None
+
+
+class RecallCandidatesResponse(BaseModel):
+    """GET /api/v1/analytics/recall-candidates — a lista real por trás
+    dos botões de ação de _weekday_drop_insight/_weekday_no_show_rate_insight/
+    _capacity_drop_insight (ver DECISÃO em smart_insights_engine.py).
+    Exatamente um filtro é usado por vez hoje (`weekday` OU
+    `professional_id`, nunca os dois — ver chamadores em
+    ExecutiveAgendaSummary.tsx, frontend); os campos ecoam de volta qual
+    filtro foi aplicado, pra tela não precisar adivinhar."""
+
+    items: list[RecallCandidateItem]
+    total_count: int
+    weekday: int | None
+    professional_id: UUID | None
+    professional_name: str | None
+
+
+class FinancialHoleBillingItem(BaseModel):
+    """Uma linha de "Divergência de Cobrança" — ver DECISÃO em
+    AnalyticsRepository.list_financial_hole_billings. `procedure_label`
+    é o nome do procedimento cadastrado no contrato (ContractItem.
+    procedure_name), ou o código TUSS cru quando não há nome cadastrado.
+    `agreed_price` é sempre > `charged_value` (ver filtro no repositório
+    — nunca uma linha "certa" ou "cobrada a mais" aparece aqui)."""
+
+    billing_id: UUID
+    patient_full_name: str
+    procedure_label: str
+    insurance_plan_name: str
+    charged_value: float
+    agreed_price: float
+    hole_value: float
+
+
+class FinancialHoleBillingsResponse(BaseModel):
+    """GET /api/v1/analytics/financial-hole-billings — a lista real por
+    trás do insight "Você está cobrando menos do que devia de alguns
+    convênios" (ver DECISÃO em smart_insights_engine.py::_financial_hole_insight).
+    `total_hole_value` é o mesmo número que o insight cita (ver
+    AnalyticsRepository.financial_hole_total) — os dois precisam bater."""
+
+    period_start: date
+    period_end: date
+    items: list[FinancialHoleBillingItem]
+    total_count: int
+    total_hole_value: float
