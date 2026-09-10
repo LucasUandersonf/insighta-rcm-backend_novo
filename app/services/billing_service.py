@@ -24,7 +24,7 @@ from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
-from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
+from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSearchItem, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.denial_risk_engine import assess
 from app.services.webhook_dispatch_service import dispatch_event
@@ -148,6 +148,24 @@ class BillingService:
         return PaginatedResponse(
             items=[BillingResponse.model_validate(i) for i in items], total=total, limit=limit, offset=offset
         )
+
+    async def search_billing(self, query: str) -> list[BillingSearchItem]:
+        if not query or len(query.strip()) < 2:
+            return []  # evita varrer a tabela inteira com 0-1 caractere
+        rows = await self.billing_repo.search(query.strip(), limit=20)
+        return [
+            BillingSearchItem(
+                id=billing.id,
+                patient_name=patient_name,
+                procedure_code=procedure_code,
+                insurance_plan_name=plan_name,
+                charged_value=float(billing.charged_value),
+                status=billing.status,
+                denial_risk_level=billing.denial_risk_level,
+                created_at=billing.created_at,
+            )
+            for billing, patient_name, procedure_code, plan_name in rows
+        ]
 
     async def settle_billing(
         self, tenant_id: str, actor_user_id: uuid.UUID | None, billing_id: uuid.UUID, data: BillingSettleRequest

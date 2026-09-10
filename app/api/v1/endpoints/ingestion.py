@@ -186,7 +186,7 @@ async def resolve_insurance_plan(
     )
 
 
-_VALID_DATA_TYPES = ("faturamento", "agenda")
+_VALID_DATA_TYPES = ("faturamento", "agenda", "glosa")
 
 
 @router.post("/upload", response_model=UploadIngestionFileResponse, status_code=status.HTTP_201_CREATED)
@@ -206,8 +206,10 @@ async def upload_ingestion_file(
     processamento na mesma requisição.
 
     `data_type` escolhe QUAL template de integração o arquivo segue —
-    "faturamento" ou "agenda" (ver app/sql/019_agenda_ingestion.sql) —
-    os dois aceitam CSV/XML/JSON e compartilham o resto do pipeline.
+    "faturamento", "agenda" (ver app/sql/019_agenda_ingestion.sql) ou
+    "glosa" (demonstrativo de pagamento — ver docstring de RawDenialRow
+    em app/worker/schemas.py) — os três aceitam CSV/XML/JSON e
+    compartilham o resto do pipeline.
 
     - 201: arquivo novo, processado agora.
     - 200: MESMO arquivo (mesma chave de idempotência) já havia sido

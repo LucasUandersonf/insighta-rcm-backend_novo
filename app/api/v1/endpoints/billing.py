@@ -13,7 +13,7 @@ camada. Esta camada só decide RBAC (quem pode fazer o quê).
 """
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.appointment_repository import AppointmentRepository
@@ -22,7 +22,7 @@ from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
-from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSettleRequest
+from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSearchItem, BillingSettleRequest
 from app.schemas.pagination import PaginatedResponse
 from app.services.billing_service import BillingService
 
@@ -47,6 +47,22 @@ async def create_billing(
     current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
 ) -> BillingResponse:
     return await _build_service(db).create_billing(current_user.tenant_id, UUID(current_user.id), payload)
+
+
+@router.get("/search", response_model=list[BillingSearchItem])
+async def search_billing(
+    db: DbSession,
+    q: str = Query(min_length=2, max_length=100),
+    current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
+) -> list[BillingSearchItem]:
+    """
+    Busca por nome/CPF do paciente — alimenta o autocomplete da tela de
+    Recurso de Glosa (e de "registrar pagamento recebido"), que antes
+    pedia o billing_id colado como UUID cru. Achado do Raio-X da Sala de
+    Comando: exigir um UUID de cor era a barreira de UX real por trás de
+    uma feature que já funcionava de ponta a ponta no backend.
+    """
+    return await _build_service(db).search_billing(q)
 
 
 @router.get("/high-risk", response_model=PaginatedResponse[BillingResponse])
