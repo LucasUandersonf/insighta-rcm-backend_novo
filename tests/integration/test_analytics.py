@@ -88,6 +88,108 @@ async def _seed_revenue_leak_billing(client, admin_engine, tenant_id, headers, *
     return billing_resp.json()
 
 
+# PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito do
+# Gestor Clínico" (Seção 4, Achado 2): billing.created_at/settled_at
+# sempre existiram no banco, mas nenhum indicador calculava essa
+# diferença até esta rodada.
+
+
+async def _create_settled_billing_direct(client, admin_engine, tenant_id, headers, plan_id, *, days_to_receive, charged_value=200.0, created_at=None):
+    """Cria o billing via API (mais simples pros FKs de appointment/
+    convênio) e depois sobrescreve created_at/settled_at via SQL direto
+    — POST /billing e settle_billing sempre gravam now(), sem jeito de
+    simular "criado há N dias, recebido X dias depois" pela API (mesmo
+    motivo dos demais helpers `_direct` deste arquivo)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente PMR"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        },
+        headers=headers,
+    )
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    billing_id = billing_resp.json()["id"]
+    created = created_at or datetime.now(timezone.utc)
+    settled = created + timedelta(days=days_to_receive)
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE core.billing SET created_at = :created_at, settled_at = :settled_at, "
+                "received_value = charged_value, status = 'paid' WHERE id = :id"
+            ),
+            {"created_at": created, "settled_at": settled, "id": billing_id},
+        )
+    return billing_id
+
+
+async def test_executive_summary_includes_payment_lag_kpi(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    for days in (40.0, 60.0):
+        await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, plan_id, days_to_receive=days)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/executive-summary?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["avg_days_to_receive"] is not None
+    assert body["avg_days_to_receive"]["value"] == 50.0  # média de (40, 60)
+
+
+async def test_executive_summary_payment_lag_is_null_without_any_settled_billing(client, auth_headers_a, tenant_a):
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/executive-summary?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.json()["avg_days_to_receive"] is None
+
+
+async def test_payment_lag_by_plan_orders_worst_first(client, auth_headers_a, admin_engine, tenant_a):
+    slow_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Convênio Lento", normalized_key="convenio_lento")
+    fast_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Convênio Rápido", normalized_key="convenio_rapido")
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, slow_plan, days_to_receive=100.0)
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, fast_plan, days_to_receive=10.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/payment-lag-by-plan?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["billings_settled_count"] == 2
+    assert body["avg_days_to_receive"] == 55.0  # média de (100, 10)
+    assert [item["insurance_plan_name"] for item in body["items"]] == ["Convênio Lento", "Convênio Rápido"]
+    assert body["items"][0]["avg_days_to_receive"] == 100.0
+    assert body["items"][1]["avg_days_to_receive"] == 10.0
+
+
+async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # 5 billings conciliados, todos acima do limiar de alerta (60 dias)
+    # e do benchmark de mercado (77 dias, ANAHP) — amostra mínima cumprida.
+    for _ in range(5):
+        await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, plan_id, days_to_receive=95.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    lag_insight = next((i for i in insights if "demorando" in i["title"].lower()), None)
+    assert lag_insight is not None
+    assert lag_insight["severity"] == "critical"  # 95 dias >= 90 (limiar crítico)
+    assert "média do setor" in lag_insight["message"]
+
+
 async def test_executive_summary_computes_financial_hole_and_margin(client, auth_headers_a, admin_engine, tenant_a):
     await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
     date_from, date_to = _window()

@@ -122,6 +122,68 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
 
+    async def payment_lag_total(self, date_from: date, date_to: date) -> tuple[float | None, int]:
+        """
+        Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito
+        do Gestor Clínico": `billing.created_at`/`settled_at` sempre
+        existiram no banco, na mesma linha, mas nenhum indicador do
+        produto calculava essa diferença. Segundo a ANAHP, o PMR do
+        setor de saúde suplementar chegou a 77 dias em 2025 — quase tão
+        grave quanto a glosa (que já tinha insight próprio desde antes).
+
+        Mesma semântica de período de `financial_hole_total`/
+        `payment_gap_total`: billing CRIADO na janela (`created_at`), só
+        entram os já conciliados (`settled_at IS NOT NULL`, mesmo filtro
+        de `payment_gap_total`) — um billing sem `settled_at` ainda não
+        tem "prazo de recebimento" pra medir, só "ainda não recebido".
+
+        Devolve (média de dias entre `created_at` e `settled_at`,
+        quantidade de billings considerados) — a média é `None` quando
+        não há nenhum billing conciliado no período (amostra zero, nunca
+        "0 dias" inventado).
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0), COUNT(*)
+            FROM core.billing b
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.settled_at IS NOT NULL
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        avg_days, count = result.one()
+        return (float(avg_days) if avg_days is not None else None, int(count))
+
+    async def payment_lag_by_plan(self, date_from: date, date_to: date) -> list[dict]:
+        """Mesma regra de `payment_lag_total`, agrupada por convênio —
+        pior prazo primeiro, pra apontar QUAL operadora está de fato
+        travando o caixa (ver PaymentLagPanel.tsx, frontend)."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT ip.id, ip.display_name,
+                   AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0) AS avg_days,
+                   COUNT(*) AS settled_count
+            FROM core.billing b
+            JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.settled_at IS NOT NULL
+            GROUP BY ip.id, ip.display_name
+            ORDER BY avg_days DESC
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return [
+            {
+                "insurance_plan_id": str(row[0]),
+                "insurance_plan_name": row[1],
+                "avg_days_to_receive": float(row[2]),
+                "billings_settled_count": int(row[3]),
+            }
+            for row in result.all()
+        ]
+
     async def financial_hole_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `financial_hole_total`, mas agrupada por
         convênio — a base do ranking de perda financeira por operadora

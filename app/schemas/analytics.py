@@ -40,6 +40,37 @@ class ExecutiveSummaryResponse(BaseModel):
     # quando não há faturamento no período (% sobre base zero é indefinida).
     denial_risk_pct: float | None
     denial_at_risk_value: float
+    # Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito do
+    # Gestor Clínico": billing.created_at/settled_at sempre existiram no
+    # banco, mas nenhum indicador calculava essa diferença até esta
+    # rodada (ver AnalyticsRepository.payment_lag_total). None quando não
+    # há nenhum billing conciliado no período — não é "0 dias", é
+    # amostra vazia.
+    avg_days_to_receive: PeriodKPI | None
+
+
+class PaymentLagByPlanItem(BaseModel):
+    """Uma linha do ranking de PMR por convênio (ver
+    AnalyticsRepository.payment_lag_by_plan) — pior prazo primeiro, pra
+    apontar QUAL operadora está de fato travando o caixa."""
+
+    insurance_plan_id: UUID
+    insurance_plan_name: str
+    avg_days_to_receive: float
+    billings_settled_count: int
+
+
+class PaymentLagByPlanResponse(BaseModel):
+    """GET /api/v1/analytics/payment-lag-by-plan — Painel → Faturamento.
+    `avg_days_to_receive`/`billings_settled_count` no topo são o
+    agregado do TENANT inteiro (mesmo número de ExecutiveSummaryResponse.
+    avg_days_to_receive.value) — os `items` decompõem isso por convênio."""
+
+    period_start: date
+    period_end: date
+    avg_days_to_receive: float | None
+    billings_settled_count: int
+    items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
 
 
 class ProfessionalCapacityMetric(BaseModel):

@@ -1105,3 +1105,91 @@ def test_stale_open_lotes_insight_is_current_period_state_never_from_previous():
     assert len(lote_titles) == 1
     assert "2 lotes" in lote_titles[0].message
     assert "10 dias" in lote_titles[0].message
+
+
+# PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito do
+# Gestor Clínico" (Seção 4, Achado 2): billing.created_at/settled_at
+# sempre existiram no banco, mas nenhum indicador calculava essa
+# diferença até esta rodada.
+
+
+def test_payment_lag_insight_fires_above_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=65.0, payment_lag_settled_count=10,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    lag_titles = [i for i in insights if "demorando" in i.title.lower()]
+    assert len(lag_titles) == 1
+    assert lag_titles[0].severity == "warning"
+    assert lag_titles[0].category == "faturamento"
+    assert "65 dias" in lag_titles[0].message
+    assert lag_titles[0].action_href == "/"
+
+
+def test_payment_lag_insight_critical_above_90_days():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=95.0, payment_lag_settled_count=10,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    lag_titles = [i for i in insights if "demorando" in i.title.lower()]
+    assert len(lag_titles) == 1
+    assert lag_titles[0].severity == "critical"
+    # Acima do benchmark de mercado (77 dias, ANAHP) — a mensagem cita isso.
+    assert "média do setor" in lag_titles[0].message
+
+
+def test_payment_lag_insight_absent_below_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=45.0, payment_lag_settled_count=10,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_payment_lag_insight_absent_with_small_sample():
+    """Amostra pequena demais (menos de _MIN_PAYMENT_LAG_SAMPLE billings
+    conciliados) — mesmo raciocínio de amostra mínima do resto do
+    arquivo: 1-2 casos isolados não provam nada sobre o prazo médio real
+    da clínica."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=90.0, payment_lag_settled_count=2,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_payment_lag_insight_absent_without_any_settled_billing():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_payment_lag_insight_notes_when_trend_is_worsening():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=70.0, payment_lag_settled_count=10,
+    )
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=55.0, payment_lag_settled_count=10,
+    )
+    insights = generate_insights(current, previous)
+    lag_titles = [i for i in insights if "demorando" in i.title.lower()]
+    assert len(lag_titles) == 1
+    assert "piorando" in lag_titles[0].message
+    assert "15 dias" in lag_titles[0].message
+
+
+def test_payment_lag_insight_no_trend_note_when_previous_sample_is_too_small():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=70.0, payment_lag_settled_count=10,
+    )
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, avg_days_to_receive=20.0, payment_lag_settled_count=1,
+    )
+    insights = generate_insights(current, previous)
+    lag_titles = [i for i in insights if "demorando" in i.title.lower()]
+    assert len(lag_titles) == 1
+    assert "piorando" not in lag_titles[0].message

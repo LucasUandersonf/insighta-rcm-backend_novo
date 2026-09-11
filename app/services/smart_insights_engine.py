@@ -154,6 +154,27 @@ _MIN_COPARTICIPATION_SAMPLE = 5
 # motor só recebe a contagem pronta (ver _stale_open_lotes_insight
 # abaixo) e decide "mostra ou não", nunca reaplica o corte.
 
+# PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito do
+# Gestor Clínico" (Seção 4, Achado 2): billing.created_at/settled_at
+# sempre existiram no banco, na mesma linha, mas nenhum indicador do
+# produto calculava essa diferença. Diferente do bloco de Lotes acima,
+# o corte AQUI não precisa chegar até a query SQL (a agregação —
+# AnalyticsRepository.payment_lag_total — devolve a média crua, sem
+# filtro de "quando alertar"), então os limiares vivem no motor, mesmo
+# padrão do resto deste arquivo.
+#
+# _PAYMENT_LAG_MARKET_BENCHMARK_DAYS é só contexto NARRATIVO (citado na
+# mensagem quando o prazo da própria clínica já passa dele) — nunca o
+# gatilho do alerta, que são os dois limiares abaixo. Segundo a ANAHP, o
+# PMR do setor de saúde suplementar no Brasil chegou a 77 dias em 2025;
+# 60/90 são um "chute razoável" ancorado nesse número (mesma limitação
+# de todo o resto dos limiares deste arquivo — Achado 7 da Auditoria de
+# Templates e Insights: não calibrado contra dado real de produção).
+_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 77.0
+_PAYMENT_LAG_WARNING_DAYS = 60.0
+_PAYMENT_LAG_CRITICAL_DAYS = 90.0
+_MIN_PAYMENT_LAG_SAMPLE = 5  # mesmo raciocínio de amostra mínima do resto do arquivo
+
 
 def _comparative_phrase(ratio: float) -> str:
     """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
@@ -295,6 +316,18 @@ class InsightsPeriodInput:
     # do período anterior" — comparar contra si mesmo não faz sentido).
     stale_open_lotes_count: int = 0
     oldest_open_lote_age_days: int | None = None
+    # PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito
+    # do Gestor Clínico": billing.created_at/settled_at sempre
+    # existiram no banco, mas nenhum indicador calculava essa diferença
+    # até esta rodada (ver AnalyticsRepository.payment_lag_total e
+    # _payment_lag_insight). Estado do PERÍODO (billing criado na
+    # janela, já conciliado) — comparável contra o período anterior,
+    # mesmo raciocínio de financial_hole_total/payment_gap_total, ao
+    # contrário de appeals_due_soon_count/stale_open_lotes_count (que
+    # são "AGORA"). None quando não há amostra (nenhum billing
+    # conciliado no período).
+    avg_days_to_receive: float | None = None
+    payment_lag_settled_count: int = 0
 
 
 @dataclass
@@ -488,6 +521,59 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
         financial_impact=current.payment_gap_total,
         action_label="Abrir um recurso",
         action_href="/denial-appeals",
+    )
+
+
+def _payment_lag_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    PMR (achado da auditoria "Veredito do Gestor Clínico" — Seção 4,
+    Achado 2): o segundo maior vilão financeiro do setor segundo a
+    ANAHP (77 dias em 2025), ao lado da glosa — e o dado pra calculá-lo
+    (billing.created_at/settled_at) sempre esteve no banco sem nenhum
+    indicador consumindo. Estado do PERÍODO (billing criado na janela,
+    já conciliado) — comparável contra o período anterior, mesmo
+    raciocínio de _financial_hole_insight/_payment_gap_insight, ao
+    contrário de _appeals_due_soon_insight/_stale_open_lotes_insight
+    (que são "AGORA").
+
+    Sem financial_impact de propósito: estimar quanto dinheiro fica
+    "preso" pelo atraso exigiria multiplicar dias por uma taxa de
+    oportunidade de capital que este produto não tem como saber — mesmo
+    princípio de nunca inventar um número que pareça mais preciso do
+    que a informação disponível sustenta.
+    """
+    if current.avg_days_to_receive is None or current.payment_lag_settled_count < _MIN_PAYMENT_LAG_SAMPLE:
+        return None
+    if current.avg_days_to_receive < _PAYMENT_LAG_WARNING_DAYS:
+        return None
+
+    severity = "critical" if current.avg_days_to_receive >= _PAYMENT_LAG_CRITICAL_DAYS else "warning"
+
+    trend_note = ""
+    if previous.avg_days_to_receive is not None and previous.payment_lag_settled_count >= _MIN_PAYMENT_LAG_SAMPLE:
+        delta_days = current.avg_days_to_receive - previous.avg_days_to_receive
+        if delta_days >= 5:
+            plural = "s" if round(delta_days) != 1 else ""
+            trend_note = f" E está piorando: {delta_days:.0f} dia{plural} a mais do que no período anterior."
+
+    market_note = ""
+    if current.avg_days_to_receive > _PAYMENT_LAG_MARKET_BENCHMARK_DAYS:
+        market_note = (
+            f" Isso já passa da média do setor de saúde suplementar no Brasil "
+            f"(~{_PAYMENT_LAG_MARKET_BENCHMARK_DAYS:.0f} dias, segundo a ANAHP)."
+        )
+
+    return Insight(
+        severity=severity,
+        category="faturamento",
+        title="Os convênios estão demorando demais pra pagar",
+        message=(
+            f"As contas já conciliadas neste período levaram em média {current.avg_days_to_receive:.0f} dias "
+            f"entre o faturamento e o recebimento.{market_note}{trend_note} Vale revisar quais convênios estão "
+            "puxando essa média pra cima e cobrar prazo deles."
+        ),
+        action_label="Ver prazo por convênio",
+        action_href="/",
     )
 
 
@@ -1230,6 +1316,7 @@ def generate_insights(
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),
+        _payment_lag_insight(current, previous),
         _value_saved_insight(current, previous),
         _capacity_drop_insight(current, previous, estimated_idle_capacity_revenue_lost),
         _no_show_risk_insight(current, estimated_no_show_revenue_at_risk),

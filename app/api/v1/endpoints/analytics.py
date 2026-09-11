@@ -35,6 +35,7 @@ from app.schemas.analytics import (
     InactivePatientsResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
+    PaymentLagByPlanResponse,
     PlanLossRankingResponse,
     RecallCandidatesResponse,
     SmartInsightsResponse,
@@ -242,6 +243,24 @@ async def get_plan_loss_ranking(
 ) -> PlanLossRankingResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_plan_loss_ranking(start, end)
+
+
+@router.get("/payment-lag-by-plan", response_model=PaymentLagByPlanResponse)
+async def get_payment_lag_by_plan(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PaymentLagByPlanResponse:
+    """
+    PMR (Prazo Médio de Recebimento) por convênio — achado da auditoria
+    "Veredito do Gestor Clínico" (Seção 4, Achado 2): billing.created_at/
+    settled_at sempre existiram no banco, mas nenhum indicador calculava
+    essa diferença. Pior prazo primeiro, pra apontar QUAL operadora está
+    de fato travando o caixa (ver PaymentLagPanel.tsx, frontend).
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_payment_lag_by_plan(start, end)
 
 
 @router.get("/contract-utilization", response_model=ContractUtilizationResponse)

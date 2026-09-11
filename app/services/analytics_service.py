@@ -49,6 +49,8 @@ from app.schemas.analytics import (
     PeriodKPI,
     FinancialHoleBillingItem,
     FinancialHoleBillingsResponse,
+    PaymentLagByPlanItem,
+    PaymentLagByPlanResponse,
     PlanLossItem,
     PlanLossRankingResponse,
     ProfessionalCapacityMetric,
@@ -307,6 +309,11 @@ class AnalyticsService:
         current_utilization = await self._avg_utilization(date_from, date_to)
         previous_utilization = await self._avg_utilization(previous.start, previous.end)
 
+        # PMR (achado da auditoria "Veredito do Gestor Clínico") — ver
+        # DECISÃO completa em AnalyticsRepository.payment_lag_total.
+        current_lag_days, _current_lag_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
+        previous_lag_days, _previous_lag_count = await self.analytics_repo.payment_lag_total(previous.start, previous.end)
+
         appeals_due_soon_count = await self.appeal_repo.count_due_within(
             as_of=date.today(), horizon_days=APPEAL_DEADLINE_ALERT_HORIZON_DAYS
         )
@@ -356,6 +363,44 @@ class AnalyticsService:
             appeals_due_soon_count=appeals_due_soon_count,
             denial_risk_pct=denial_risk_pct,
             denial_at_risk_value=denial_at_risk_value,
+            avg_days_to_receive=(
+                PeriodKPI(
+                    value=current_lag_days,
+                    previous_value=previous_lag_days or 0.0,
+                    delta_pct=_delta_pct(current_lag_days, previous_lag_days or 0.0),
+                )
+                if current_lag_days is not None
+                else None
+            ),
+        )
+
+    async def get_payment_lag_by_plan(self, date_from: date, date_to: date) -> PaymentLagByPlanResponse:
+        """
+        Ranking de PMR por convênio — pior prazo primeiro, pra apontar
+        QUAL operadora está de fato travando o caixa (ver DECISÃO
+        completa em AnalyticsRepository.payment_lag_total/
+        payment_lag_by_plan e "Veredito do Gestor Clínico", achado 2).
+        `avg_days_to_receive`/`billings_settled_count` no topo repetem o
+        agregado do tenant inteiro (mesmo número de
+        ExecutiveSummaryResponse.avg_days_to_receive.value) — os `items`
+        decompõem isso por convênio.
+        """
+        avg_days, settled_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
+        rows = await self.analytics_repo.payment_lag_by_plan(date_from, date_to)
+        return PaymentLagByPlanResponse(
+            period_start=date_from,
+            period_end=date_to,
+            avg_days_to_receive=avg_days,
+            billings_settled_count=settled_count,
+            items=[
+                PaymentLagByPlanItem(
+                    insurance_plan_id=uuid.UUID(row["insurance_plan_id"]),
+                    insurance_plan_name=row["insurance_plan_name"],
+                    avg_days_to_receive=row["avg_days_to_receive"],
+                    billings_settled_count=row["billings_settled_count"],
+                )
+                for row in rows
+            ],
         )
 
     async def get_agenda_metrics(self, date_from: date, date_to: date) -> AgendaMetricsResponse:
@@ -571,6 +616,12 @@ class AnalyticsService:
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         financial_hole = await self.analytics_repo.financial_hole_total(date_from, date_to)
         payment_gap = await self.analytics_repo.payment_gap_total(date_from, date_to)
+        # PMR (achado da auditoria "Veredito do Gestor Clínico") —
+        # chamado uma vez por período (atual e anterior), mesmo padrão de
+        # financial_hole/payment_gap acima: _payment_lag_insight compara
+        # os dois, ao contrário de appeals_due_soon/stale_open_lotes
+        # (estado "AGORA", só o período atual importa).
+        payment_lag_days, payment_lag_settled_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
         avg_utilization = await self._avg_utilization(date_from, date_to)
         denial_findings = await self.analytics_repo.denial_findings_by_plan(date_from, date_to)
         # "Sempre a partir de agora", nunca da janela do dashboard — ver
@@ -656,6 +707,8 @@ class AnalyticsService:
             total_billing_count=total_billing_count,
             stale_open_lotes_count=stale_open_lotes[0],
             oldest_open_lote_age_days=stale_open_lotes[1],
+            avg_days_to_receive=payment_lag_days,
+            payment_lag_settled_count=payment_lag_settled_count,
         )
 
     async def get_smart_insights(
