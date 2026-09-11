@@ -46,6 +46,13 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                 "guia_tipo": item.get("guia_tipo") or None,
                 "guia_numero": item.get("guia_numero") or None,
                 "guia_senha": item.get("guia_senha") or None,
+                # Campos novos, achado do Dicionário de Dados (auditoria
+                # BI/Dados) — mesma chave usada no CSV, também opcionais.
+                "quantidade": item.get("quantidade") or 1,
+                "numero_carteirinha": item.get("numero_carteirinha") or None,
+                "tabela_procedimento": item.get("tabela_procedimento") or None,
+                "tipo_item": item.get("tipo_item") or None,
+                "valor_coparticipacao": item.get("valor_coparticipacao"),
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))

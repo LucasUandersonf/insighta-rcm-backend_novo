@@ -106,6 +106,60 @@ class BillingRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_by_member_card(self, insurance_plan_id: uuid.UUID, member_card_number: str) -> list[Billing]:
+        """Chave de conciliação ALTERNATIVA (achado do Dicionário de
+        Dados, ver DECISÃO em RawDenialRow) usada pelo Template de Glosa
+        quando o demonstrativo não traz guia_numero. Filtra por convênio
+        também: o mesmo número de carteirinha pode se repetir entre
+        convênios diferentes (a numeração é definida por cada operadora,
+        não é um identificador global único)."""
+        stmt = select(Billing).where(
+            Billing.insurance_plan_id == insurance_plan_id, Billing.member_card_number == member_card_number
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_by_member_card_and_procedure_code(
+        self, insurance_plan_id: uuid.UUID, member_card_number: str, procedure_code: str
+    ) -> list[Billing]:
+        """Equivalente a `list_by_guia_and_procedure_code`, mas para a
+        chave alternativa: desambigua quando o mesmo beneficiário tem mais
+        de uma cobrança em aberto no mesmo convênio."""
+        stmt = (
+            select(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(
+                Billing.insurance_plan_id == insurance_plan_id,
+                Billing.member_card_number == member_card_number,
+                Appointment.procedure_code == procedure_code,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_patient_cpf(self, billing_id: uuid.UUID) -> str | None:
+        """Achado 6 da Auditoria de Templates e Insights (médio) —
+        confirmação CRUZADA de identidade na conciliação de Glosa por
+        carteirinha (ver NormalizationService.normalize_glosa_row): sem
+        um segundo sinal além de convênio+carteirinha, um erro de
+        digitação no demonstrativo que por coincidência bater com a
+        carteirinha de OUTRO paciente do mesmo convênio faria o
+        pagamento ser gravado na conta errada, sem gerar alerta nenhum
+        (a busca encontraria exatamente 1 resultado). Devolve None tanto
+        quando o billing não existe quanto quando o paciente não tem CPF
+        cadastrado — os dois casos são "sem sinal para comparar", nunca
+        "sinal de divergência" (só compara quando os dois lados têm
+        dado)."""
+        stmt = (
+            select(Patient.cpf)
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Billing.id == billing_id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def add(self, billing: Billing) -> Billing:
         self.session.add(billing)
         await self.session.flush()  # garante que billing.id exista antes do commit implícito

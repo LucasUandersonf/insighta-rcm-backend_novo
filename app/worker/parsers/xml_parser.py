@@ -48,6 +48,17 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                 "guia_tipo": _text(atendimento, "guiaTipo") or None,
                 "guia_numero": _text(atendimento, "guiaNumero") or None,
                 "guia_senha": _text(atendimento, "guiaSenha") or None,
+                # Campos novos, achado do Dicionário de Dados (auditoria
+                # BI/Dados) — mesmo padrão camelCase, também opcionais.
+                "quantidade": int(_text(atendimento, "quantidade")) if _text(atendimento, "quantidade") else 1,
+                "numero_carteirinha": _text(atendimento, "numeroCarteirinha") or None,
+                "tabela_procedimento": _text(atendimento, "tabelaProcedimento") or None,
+                "tipo_item": _text(atendimento, "tipoItem") or None,
+                "valor_coparticipacao": (
+                    float(_text(atendimento, "valorCoparticipacao").replace(",", "."))
+                    if _text(atendimento, "valorCoparticipacao")
+                    else None
+                ),
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))

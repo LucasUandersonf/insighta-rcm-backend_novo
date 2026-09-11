@@ -17,6 +17,16 @@ from app.worker.schemas import DenialRowParseResult, RawDenialRow
 _EXPECTED_HEADERS = {
     "convenio": "insurance_plan_raw_name",
     "guia_numero": "guia_numero",
+    # Chave de conciliação alternativa (achado do Dicionário de Dados) —
+    # ver DECISÃO em RawDenialRow sobre demonstrativos que não trazem
+    # guia_numero. Mesmo header já usado no Template de Faturamento
+    # (numero_carteirinha), então um convênio que já preenche lá também
+    # sabe preencher aqui.
+    "numero_carteirinha": "numero_carteirinha",
+    # Achado 6 da Auditoria de Templates e Insights (médio) — OPCIONAL,
+    # usado só como confirmação cruzada de identidade quando o
+    # demonstrativo traz (ver DECISÃO em RawDenialRow.patient_cpf).
+    "cpf_beneficiario": "patient_cpf",
     "codigo_procedimento": "procedure_code",
     "valor_pago": "received_value",
     "data_pagamento": "settlement_date",
@@ -24,7 +34,14 @@ _EXPECTED_HEADERS = {
     "descricao_motivo_glosa": "descricao_motivo",
 }
 
-_OPTIONAL_STRING_FIELDS = ("procedure_code", "codigo_motivo", "descricao_motivo")
+_OPTIONAL_STRING_FIELDS = (
+    "guia_numero",
+    "numero_carteirinha",
+    "patient_cpf",
+    "procedure_code",
+    "codigo_motivo",
+    "descricao_motivo",
+)
 
 
 def parse(raw_bytes: bytes) -> list[DenialRowParseResult]:

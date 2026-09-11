@@ -609,6 +609,131 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
+    async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
+        """
+        Equivalente a `weekday_no_show_rate_breakdown`, mas por CANAL de
+        agendamento (`Appointment.booking_channel` — achado do Dicionário
+        de Dados, campo novo do Template de Agenda) em vez de dia da
+        semana. Mesmo filtro `status IN ('completed', 'no_show')`: só
+        atendimentos com desfecho conhecido contam pra taxa. Linhas sem
+        canal informado (upload antigo, ou cliente que não preenche essa
+        coluna) ficam de fora — não dá pra falar "canal X tem taxa alta"
+        de um canal que não existe no dado.
+
+        Retorna {canal: (no_show_count, total_relevante)} — mesma divisão
+        de responsabilidade de sempre: quem decide "amostra suficiente" e
+        "isso é alto" é o motor de insights, não o repositório.
+        """
+        start, end = _bounds(date_from, date_to)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(Appointment.booking_channel, no_show_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show")),
+                Appointment.booking_channel.is_not(None),
+            )
+            .group_by(Appointment.booking_channel)
+        )
+        result = await self.session.execute(stmt)
+        return {channel: (int(no_show), int(total)) for channel, no_show, total in result.all()}
+
+    async def cancellation_reason_breakdown(self, date_from: date, date_to: date) -> tuple[dict[str, int], int]:
+        """
+        Motivo de cancelamento (`Appointment.cancellation_reason` — mesmo
+        achado novo de `booking_channel_no_show_rate_breakdown` acima).
+        Diferente da taxa de falta, aqui NÃO agrupamos por dia/canal: o
+        que importa é se um único motivo concentra grande parte dos
+        cancelamentos do período (ex: "sala em manutenção" respondendo
+        por 70% dos cancelamentos é um problema OPERACIONAL claro e
+        resolvível, diferente de falta sem aviso).
+
+        Devolve (breakdown, total_cancelado) SEPARADOS de propósito: nem
+        todo cancelamento vem com motivo preenchido (campo opcional, ver
+        RawAppointmentRow.motivo_cancelamento), então `sum(breakdown.
+        values())` pode ser MENOR que `total_cancelado` — o motor de
+        insights usa o total real como denominador do percentual, nunca
+        a soma do que tem motivo (isso inflaria artificialmente a
+        concentração quando metade dos cancelamentos não tem motivo
+        algum).
+
+        Agrupamento é por texto EXATO (sem normalização de
+        maiúscula/acento) — mesmo princípio de "nunca adivinhar" do
+        resto do produto: inferir que "Paciente remarcou" e "paciente
+        remarcou" são a mesma coisa seria assumir um significado que
+        ninguém confirmou. Na prática, motivo tende a vir de um campo
+        controlado no sistema de origem do cliente, então o texto já
+        chega consistente.
+        """
+        start, end = _bounds(date_from, date_to)
+        total_stmt = select(func.count()).where(
+            Appointment.scheduled_at >= start, Appointment.scheduled_at <= end, Appointment.status == "cancelled"
+        )
+        total = (await self.session.execute(total_stmt)).scalar_one()
+
+        reason_stmt = (
+            select(Appointment.cancellation_reason, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status == "cancelled",
+                Appointment.cancellation_reason.is_not(None),
+            )
+            .group_by(Appointment.cancellation_reason)
+        )
+        result = await self.session.execute(reason_stmt)
+        breakdown = {reason: int(count) for reason, count in result.all()}
+        return breakdown, int(total)
+
+    async def item_type_charged_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Soma de charged_value por `item_type` (procedimento/material_opme/
+        taxa/diaria/medicamento — ver ITEM_TYPE_VALUES em
+        app/models/billing.py), campo novo do Template de Faturamento
+        (achado do Dicionário de Dados). Alimenta o insight de
+        concentração de OPME (material_opme — órtese/prótese/material
+        especial, item de alto valor e alto escrutínio em faturamento de
+        saúde) — ver smart_insights_engine.py::_opme_concentration_insight.
+
+        Linhas sem item_type preenchido (upload feito antes desta coluna
+        existir) ficam de fora do agrupamento — o motor usa
+        `billing_summary.total_billed` (que inclui essas linhas) como
+        denominador do percentual, nunca a soma deste dict, então não há
+        necessidade de assumir um tipo para quem não informou.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Billing.item_type, func.coalesce(func.sum(Billing.charged_value), 0))
+            .where(Billing.created_at >= start, Billing.created_at <= end, Billing.item_type.is_not(None))
+            .group_by(Billing.item_type)
+        )
+        result = await self.session.execute(stmt)
+        return {item_type: float(total) for item_type, total in result.all()}
+
+    async def coparticipation_summary(self, date_from: date, date_to: date) -> tuple[float, int, int]:
+        """
+        Retorna (valor_total_coparticipacao, contagem_com_coparticipacao,
+        contagem_total_de_billing) do período — achado do Dicionário de
+        Dados (`Billing.coparticipation_value`, campo novo do Template de
+        Faturamento). Esse valor é a parte que o PRÓPRIO PACIENTE paga,
+        distinta do que o convênio cobre (`charged_value`) — antes desta
+        rodada, não existia NENHUMA métrica sobre essa fatia da receita
+        (ver achado "gap de visibilidade de receita" do Raio-X da Sala de
+        Comando). Alimenta o insight de visibilidade em
+        smart_insights_engine.py::_coparticipation_visibility_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        total_stmt = select(func.count()).where(Billing.created_at >= start, Billing.created_at <= end)
+        total_billing_count = (await self.session.execute(total_stmt)).scalar_one()
+
+        copart_stmt = select(
+            func.coalesce(func.sum(Billing.coparticipation_value), 0), func.count()
+        ).where(Billing.created_at >= start, Billing.created_at <= end, Billing.coparticipation_value.is_not(None))
+        copart_total, copart_count = (await self.session.execute(copart_stmt)).one()
+        return float(copart_total), int(copart_count), int(total_billing_count)
+
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/
         'high') faturado no período — alimenta o insight "X% do valor

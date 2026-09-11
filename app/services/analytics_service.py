@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
@@ -167,6 +168,57 @@ def _denial_risk_pct(risk_value_breakdown: dict[str, float]) -> tuple[float | No
     if total <= 0:
         return None, 0.0
     return (at_risk / total) * 100, at_risk
+
+
+def _regroup_text_counts(breakdown: dict[str, int]) -> dict[str, int]:
+    """
+    Achado 3 da Auditoria de Templates e Insights (alto) — `canal_agendamento`/
+    `motivo_cancelamento` são texto livre por decisão documentada (ver
+    RawAppointmentRow, app/worker/schemas.py), sem vocabulário fechado.
+    `AnalyticsRepository.cancellation_reason_breakdown` já agrupa por
+    valor EXATO da coluna no SQL — "WhatsApp", "whatsapp" e "Whats App"
+    do MESMO cliente contariam como 3 motivos/canais diferentes, cada um
+    com amostra menor, escondendo o padrão real em vez de revelá-lo.
+
+    Reagrupa aqui, em Python, por `slugify()` — a MESMA normalização já
+    usada para casar nome de convênio (ver InsurancePlanRepository.resolve)
+    — somando as contagens de cada grafia equivalente e usando a grafia
+    de MAIOR contagem como rótulo de exibição (nunca inventa um rótulo
+    novo, só escolhe entre os que o próprio dado trouxe). Feito em
+    Python, não em SQL: o número de motivos/canais DISTINTOS que chega
+    até aqui já é pequeno (a agregação pesada — por linha de atendimento
+    — already aconteceu no banco), então não há custo de performance em
+    reagrupar um punhado de chaves em memória.
+    """
+    totals: dict[str, int] = {}
+    best_label_count: dict[str, int] = {}
+    best_label: dict[str, str] = {}
+    for raw_label, count in breakdown.items():
+        slug = slugify(raw_label) or raw_label
+        totals[slug] = totals.get(slug, 0) + count
+        if count > best_label_count.get(slug, -1):
+            best_label_count[slug] = count
+            best_label[slug] = raw_label
+    return {best_label[slug]: total for slug, total in totals.items()}
+
+
+def _regroup_text_no_show_counts(breakdown: dict[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
+    """Equivalente a `_regroup_text_counts`, mas para
+    `AnalyticsRepository.booking_channel_no_show_rate_breakdown`, cujo
+    valor é (no_show_count, total_relevante) em vez de uma contagem
+    única — soma os DOIS lados do par por grafia equivalente, mesma
+    DECISÃO de `_regroup_text_counts` acima."""
+    totals: dict[str, tuple[int, int]] = {}
+    best_label_total: dict[str, int] = {}
+    best_label: dict[str, str] = {}
+    for raw_label, (no_show, total) in breakdown.items():
+        slug = slugify(raw_label) or raw_label
+        prev_no_show, prev_total = totals.get(slug, (0, 0))
+        totals[slug] = (prev_no_show + no_show, prev_total + total)
+        if total > best_label_total.get(slug, -1):
+            best_label_total[slug] = total
+            best_label[slug] = raw_label
+    return {best_label[slug]: counts for slug, counts in totals.items()}
 
 
 class AnalyticsService:
@@ -475,7 +527,17 @@ class AnalyticsService:
         annual_goal_context: "_AnnualGoalContext | None" = None,
         upcoming_risk_count_by_weekday: dict[int, int] | None = None,
         professional_utilization_rates: list[tuple[str, str, float]] | None = None,
+        include_agenda_text_breakdowns: bool = True,
     ) -> InsightsPeriodInput:
+        # Achado 8 da Auditoria de Templates e Insights (baixo) —
+        # `booking_channel_no_show_counts`/`cancellation_reason_counts`
+        # só são lidos de `current` por
+        # _booking_channel_no_show_insight/_cancellation_reason_insight
+        # (nunca de `previous`, mesmo raciocínio de appeals_due_soon
+        # acima). `include_agenda_text_breakdowns=False` pula as 2
+        # consultas quando este helper é chamado para o período ANTERIOR
+        # (ver get_smart_insights) — antes rodavam nas duas chamadas,
+        # descartando o resultado da segunda.
         # appeals_due_soon é passado de fora, não recalculado aqui: é um
         # estado "AGORA" (prazo vencendo hoje), não algo que faça sentido
         # perguntar de novo para o "período anterior" — comparar contra
@@ -497,6 +559,36 @@ class AnalyticsService:
         risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
         weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
+        # Achado do Dicionário de Dados: campos novos do Template de
+        # Agenda (booking_channel/cancellation_reason) — ver DECISÃO em
+        # smart_insights_engine.py::_booking_channel_no_show_insight /
+        # _cancellation_reason_insight. Só buscados quando o resultado de
+        # fato vai ser usado (ver Achado 8 acima).
+        booking_channel_no_show_counts: dict[str, tuple[int, int]] = {}
+        cancellation_reason_counts: dict[str, int] = {}
+        total_cancelled_count = 0
+        if include_agenda_text_breakdowns:
+            raw_channel_counts = await self.analytics_repo.booking_channel_no_show_rate_breakdown(date_from, date_to)
+            # Achado 3 da Auditoria (alto) — reagrupa grafias equivalentes
+            # de canal ("WhatsApp"/"whatsapp") antes de expor ao motor de
+            # insights, ver DECISÃO em _regroup_text_no_show_counts.
+            booking_channel_no_show_counts = _regroup_text_no_show_counts(raw_channel_counts)
+            raw_reason_counts, total_cancelled_count = await self.analytics_repo.cancellation_reason_breakdown(
+                date_from, date_to
+            )
+            # Mesma DECISÃO de canal, agora para motivo de cancelamento.
+            cancellation_reason_counts = _regroup_text_counts(raw_reason_counts)
+        # Achado do Dicionário de Dados: campos novos do Template de
+        # Faturamento (item_type/coparticipation_value) — ver DECISÃO em
+        # smart_insights_engine.py::_opme_concentration_insight /
+        # _coparticipation_visibility_insight. Diferente dos 2 acima,
+        # estes SÃO lidos também do período anterior (Achado 4: os dois
+        # insights agora comparam contra o período anterior para evitar
+        # alerta permanente) — sempre buscados, nunca pulados.
+        item_type_charged_value = await self.analytics_repo.item_type_charged_value_breakdown(date_from, date_to)
+        coparticipation_total, coparticipation_billing_count, total_billing_count = (
+            await self.analytics_repo.coparticipation_summary(date_from, date_to)
+        )
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
@@ -529,6 +621,14 @@ class AnalyticsService:
             professional_denial_rates=professional_denial_rates,
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday or {},
             professional_utilization_rates=professional_utilization_rates or [],
+            booking_channel_no_show_counts=booking_channel_no_show_counts,
+            cancellation_reason_counts=cancellation_reason_counts,
+            total_cancelled_count=total_cancelled_count,
+            total_billed=billing["total_billed"],
+            item_type_charged_value=item_type_charged_value,
+            coparticipation_total=coparticipation_total,
+            coparticipation_billing_count=coparticipation_billing_count,
+            total_billing_count=total_billing_count,
         )
 
     async def get_smart_insights(
@@ -593,7 +693,9 @@ class AnalyticsService:
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday,
             professional_utilization_rates=professional_utilization_rates,
         )
-        previous_input = await self._period_insights_input(previous.start, previous.end)
+        previous_input = await self._period_insights_input(
+            previous.start, previous.end, include_agenda_text_breakdowns=False
+        )
         avg_charged = await self.analytics_repo.avg_charged_value(date_from, date_to)
         estimated_revenue_at_risk = current_input.high_risk_no_show_count * avg_charged
 

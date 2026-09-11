@@ -126,6 +126,8 @@ _SCHEMA_FILES = [
     "033_network_contract_price_benchmark.sql",
     "034_health_score_snapshots.sql",
     "035_glosa_ingestion.sql",
+    "036_billing_appointment_extended_fields.sql",
+    "037_billing_glosa_hardening.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

@@ -42,6 +42,12 @@ def parse(raw_bytes: bytes) -> list[AgendaRowParseResult]:
                 "procedure_code": item.get("codigo_procedimento") or None,
                 "cid_code": item.get("cid") or None,
                 "external_id": item.get("codigo_agendamento") or None,
+                # Campos novos, achado do Dicionário de Dados (auditoria
+                # BI/Dados) — mesma chave usada no CSV, também opcionais.
+                "criado_em": item.get("criado_em"),  # pydantic converte ISO datetime sozinho
+                "tipo_consulta": item.get("tipo_consulta") or None,
+                "motivo_cancelamento": item.get("motivo_cancelamento") or None,
+                "canal_agendamento": item.get("canal_agendamento") or None,
             }
             row = RawAppointmentRow.model_validate(mapped)
             results.append(AgendaRowParseResult.ok(row_number, row))

@@ -20,6 +20,13 @@ class BillingCreateRequest(BaseModel):
     # opcional: nem todo fluxo de faturamento manual já tem guia gerada
     # no momento da cobrança.
     guia_id: UUID | None = None
+    # Achado do Dicionário de Dados: multiplica ContractItem.agreed_price
+    # na comparação de risco (ver denial_risk_engine.assess). default=1
+    # cobre o caso comum (uma unidade do procedimento).
+    quantity: int = Field(default=1, gt=0, le=1000)
+    member_card_number: str | None = None
+    item_type: str | None = None
+    coparticipation_value: float | None = Field(default=None, ge=0)
 
     @field_validator("charged_value")
     @classmethod

@@ -63,6 +63,13 @@ EXPECTED_HEADERS = {
     "guia_tipo": "guia_tipo",
     "guia_numero": "guia_numero",
     "guia_senha": "guia_senha",
+    # Colunas novas, achado do Dicionário de Dados (auditoria BI/Dados) —
+    # também todas opcionais.
+    "quantidade": "quantidade",
+    "numero_carteirinha": "numero_carteirinha",
+    "tabela_procedimento": "tabela_procedimento",
+    "tipo_item": "tipo_item",
+    "valor_coparticipacao": "valor_coparticipacao",
 }
 
 _OPTIONAL_STRING_FIELDS = (
@@ -73,6 +80,9 @@ _OPTIONAL_STRING_FIELDS = (
     "guia_tipo",
     "guia_numero",
     "guia_senha",
+    "numero_carteirinha",
+    "tabela_procedimento",
+    "tipo_item",
 )
 
 
@@ -106,6 +116,12 @@ def parse(raw_bytes: bytes, header_aliases: dict[str, str] | None = None) -> lis
                 mapped[field] = mapped[field] or None
             mapped["charged_value"] = _normalize_charged_value(mapped["charged_value"])
             mapped["service_date"] = _parse_br_date(mapped["service_date"])
+            # quantidade: coluna ausente/vazia -> 1 (RawBillingRow.quantidade
+            # não é Optional; o padrão é sempre "1 unidade", nunca "não sei").
+            mapped["quantidade"] = int(mapped["quantidade"]) if mapped["quantidade"] else 1
+            mapped["valor_coparticipacao"] = (
+                float(_normalize_charged_value(mapped["valor_coparticipacao"])) if mapped["valor_coparticipacao"] else None
+            )
 
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))

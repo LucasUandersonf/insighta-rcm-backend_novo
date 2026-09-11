@@ -43,6 +43,11 @@ _EXPECTED_HEADERS = {
     "codigo_procedimento": "procedure_code",
     "cid": "cid_code",
     "codigo_agendamento": "external_id",
+    # Colunas novas, achado do Dicionário de Dados (auditoria BI/Dados) —
+    # também todas opcionais.
+    "tipo_consulta": "tipo_consulta",
+    "motivo_cancelamento": "motivo_cancelamento",
+    "canal_agendamento": "canal_agendamento",
 }
 
 _OPTIONAL_STRING_FIELDS = (
@@ -54,6 +59,9 @@ _OPTIONAL_STRING_FIELDS = (
     "procedure_code",
     "cid_code",
     "external_id",
+    "tipo_consulta",
+    "motivo_cancelamento",
+    "canal_agendamento",
 )
 
 
@@ -79,6 +87,13 @@ def parse(raw_bytes: bytes) -> list[AgendaRowParseResult]:
                 raw_row.get("hora_agendamento", "").strip(),
             )
 
+            # criado_em: data e hora juntas numa coluna só, "dd/mm/aaaa HH:MM"
+            # (diferente de scheduled_at, que separa data/hora em duas
+            # colunas — essa data de marcação é um dado mais raro no export,
+            # não vale duplicar a mesma convenção de coluna).
+            criado_em_raw = raw_row.get("criado_em", "").strip()
+            mapped["criado_em"] = _parse_br_datetime(criado_em_raw) if criado_em_raw else None
+
             row = RawAppointmentRow.model_validate(mapped)
             results.append(AgendaRowParseResult.ok(row_number, row))
         except (ValidationError, ValueError) as exc:
@@ -89,6 +104,15 @@ def parse(raw_bytes: bytes) -> list[AgendaRowParseResult]:
 def _combine_br_date_time(date_str: str, time_str: str) -> datetime:
     parsed_date = _parse_br_date(date_str)
     hour, minute = _parse_br_time(time_str)
+    return datetime(parsed_date.year, parsed_date.month, parsed_date.day, hour, minute)
+
+
+def _parse_br_datetime(value: str) -> datetime:
+    """`criado_em`: data e hora juntas na mesma coluna, "dd/mm/aaaa HH:MM"
+    (aceita também "HH:MM:SS", mesma tolerância de _parse_br_time)."""
+    date_part, _, time_part = value.partition(" ")
+    parsed_date = _parse_br_date(date_part)
+    hour, minute = _parse_br_time(time_part.strip())
     return datetime(parsed_date.year, parsed_date.month, parsed_date.day, hour, minute)
 
 

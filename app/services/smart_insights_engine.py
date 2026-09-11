@@ -92,6 +92,56 @@ _WEEKDAY_NO_SHOW_RATE_WARNING_PP = 10.0
 _ANNUAL_GOAL_BEHIND_WARNING_PCT = 10.0
 _ANNUAL_GOAL_BEHIND_CRITICAL_PCT = 25.0
 
+# Novos insights de Agenda (achado do Dicionário de Dados: booking_channel/
+# cancellation_reason são campos novos do Template de Agenda) — mesmo
+# critério de amostra mínima nomeada do resto do arquivo.
+#
+# Achado 7 da Auditoria de Templates e Insights (baixo) — TODOS os
+# limiares abaixo (e os de OPME/coparticipação, mais adiante neste
+# arquivo) são constantes fixas "no chute", do mesmo jeito que o resto
+# deste motor já fazia antes desta rodada (ex.: _SPIKE_THRESHOLD_PCT).
+# Não calibramos contra distribuição real porque simplesmente não existe
+# volume de produção suficiente ainda para isso — CALIBRAR sem dado real
+# seria só troca um número arbitrário por outro igualmente arbitrário
+# (e mais perigoso: um que parece "baseado em análise" sem estar). Fica
+# registrado aqui como item de revisão explícito: quando houver volume
+# real de uso destes 2 insights (canal/motivo), revisitar estes 4
+# valores olhando a distribuição de verdade, não arbitrando um novo
+# corte às cegas.
+_MIN_CHANNEL_NO_SHOW_SAMPLE = 5  # amostra mínima tanto do canal quanto do total geral
+_CHANNEL_NO_SHOW_RATE_CRITICAL_PP = 20.0  # pontos percentuais acima da média geral
+_CHANNEL_NO_SHOW_RATE_WARNING_PP = 10.0
+_MIN_CANCELLATION_SAMPLE = 5  # mesmo raciocínio: poucos cancelamentos, "70% do mesmo motivo" é ruído
+_CANCELLATION_REASON_CONCENTRATION_CRITICAL_PCT = 60.0
+_CANCELLATION_REASON_CONCENTRATION_WARNING_PCT = 40.0
+
+# Novos insights de Faturamento (achado do Dicionário de Dados: item_type/
+# coparticipation_value são campos novos do Template de Faturamento).
+#
+# Achado 4 da Auditoria de Templates e Insights (médio) — a versão
+# original destes 2 insights disparava sempre que a condição estática
+# fosse satisfeita, sem comparar contra o período anterior. Uma clínica
+# de ortopedia tem proporção de OPME estruturalmente alta — o card
+# apareceria em TODO carregamento do painel, para sempre, virando ruído
+# (o próprio "encher linguiça" que este arquivo já documenta evitar no
+# topo). A correção usa o MESMO padrão já aplicado ao resto do motor:
+# _financial_hole_insight/_payment_gap_insight/_value_saved_insight só
+# destacam quando o número piora ou melhora, não quando é estruturalmente
+# normal para aquela clínica.
+#
+# Achado 7 da Auditoria (baixo) — os 4 números abaixo (piso de OPME,
+# aumento mínimo em pp, amostra mínima de coparticipação) têm a MESMA
+# limitação já registrada no bloco de canal/motivo, mais acima neste
+# arquivo: constantes fixas, não calibradas contra dado real de
+# produção. Mesmo item de revisão futura, não repetido em detalhe aqui.
+_OPME_CONCENTRATION_MIN_PCT = 15.0  # piso: só relevante se já for uma fatia material do faturamento
+_OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs. o período anterior
+# Amostra mínima de billings COM coparticipação preenchida antes de
+# declarar o dado "confiável o bastante pra virar card" — mesmo
+# raciocínio de amostra mínima do resto do arquivo (1-2 linhas isoladas
+# não provam que o cliente já preenche essa coluna de forma consistente).
+_MIN_COPARTICIPATION_SAMPLE = 5
+
 
 def _comparative_phrase(ratio: float) -> str:
     """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
@@ -194,6 +244,36 @@ class InsightsPeriodInput:
     # o pior caso — mantém a mesma divisão de responsabilidade em todo o
     # arquivo. Default [] pelo motivo de sempre.
     professional_utilization_rates: list[tuple[str, str, float]] = field(default_factory=list)
+    # {canal_agendamento: (no_show_count, total_relevante)} — achado do
+    # Dicionário de Dados (campo novo do Template de Agenda). Ver
+    # AnalyticsRepository.booking_channel_no_show_rate_breakdown e
+    # _booking_channel_no_show_insight. Default {} pelo motivo de
+    # sempre: não quebrar chamada/teste que ainda não passa esse dado.
+    booking_channel_no_show_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # {motivo_cancelamento: count} + total de cancelamentos do período
+    # (SEPARADO — nem todo cancelamento tem motivo preenchido, ver
+    # DECISÃO em AnalyticsRepository.cancellation_reason_breakdown).
+    # Default 0/{} pelo motivo de sempre.
+    cancellation_reason_counts: dict[str, int] = field(default_factory=dict)
+    total_cancelled_count: int = 0
+    # Total faturado no período (ReportingRepository.billing_summary),
+    # denominador do % de OPME abaixo — inclui billing SEM item_type
+    # preenchido, de propósito (ver DECISÃO em
+    # AnalyticsRepository.item_type_charged_value_breakdown). Default 0.0
+    # pelo motivo de sempre: não quebrar chamada/teste existente.
+    total_billed: float = 0.0
+    # {item_type: soma de charged_value} — achado do Dicionário de Dados
+    # (campo novo do Template de Faturamento). Só material_opme é lido
+    # hoje (ver _opme_concentration_insight), mas o dict inteiro fica
+    # disponível para insights futuros sobre os outros tipos.
+    item_type_charged_value: dict[str, float] = field(default_factory=dict)
+    # Coparticipação (parte paga pelo PACIENTE, distinta de charged_value
+    # — ver AnalyticsRepository.coparticipation_summary): valor total,
+    # contagem de billings com essa coluna preenchida, e total geral de
+    # billings do período (denominador do "presente em Y% das contas").
+    coparticipation_total: float = 0.0
+    coparticipation_billing_count: int = 0
+    total_billing_count: int = 0
 
 
 @dataclass
@@ -407,6 +487,101 @@ def _value_saved_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
             "fica perdido no caminho."
         ),
         financial_impact=current.total_value_saved,
+    )
+
+
+def _opme_concentration_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    OPME (Órtese/Prótese/Material Especial — `item_type == "material_opme"`
+    em app/models/billing.py, campo novo do Template de Faturamento,
+    achado do Dicionário de Dados) é, na prática do setor de saúde
+    suplementar, o tipo de item com maior escrutínio dos convênios: exige
+    autorização prévia e nota fiscal do fornecedor anexada, e costuma
+    concentrar os maiores valores glosados quando essa documentação falta.
+    Este insight não inventa um score de risco por OPME (o motor de risco
+    em denial_risk_engine.py não olha item_type) — só torna VISÍVEL uma
+    concentração que antes não aparecia em nenhum relatório, com uma
+    recomendação de checagem documental genérica e sempre válida para
+    esse tipo de item.
+
+    Achado 4 da Auditoria (médio) — em vez de um corte estático (que
+    faria este card aparecer TODO carregamento do painel numa clínica de
+    perfil ortopédico, virando ruído permanente), só alerta quando a
+    concentração SOBE de forma material vs. o período anterior — mesmo
+    raciocínio de "só destaca quando piora" já usado em
+    _financial_hole_insight/_payment_gap_insight/_value_saved_insight. O
+    piso (`_OPME_CONCENTRATION_MIN_PCT`) evita alertar sobre uma alta
+    percentual em cima de uma fatia irrelevante do faturamento.
+    """
+    opme_value = current.item_type_charged_value.get("material_opme", 0.0)
+    if opme_value <= 0 or current.total_billed <= 0:
+        return None
+    pct = (opme_value / current.total_billed) * 100
+    if pct < _OPME_CONCENTRATION_MIN_PCT:
+        return None
+    previous_opme_value = previous.item_type_charged_value.get("material_opme", 0.0)
+    previous_pct = (previous_opme_value / previous.total_billed) * 100 if previous.total_billed > 0 else 0.0
+    if pct - previous_pct < _OPME_CONCENTRATION_INCREASE_PP:
+        return None  # concentração estável (ou caindo) — perfil normal desta clínica, não uma mudança recente
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="A fatia de material especial (OPME) no seu faturamento subiu",
+        message=(
+            f"R$ {opme_value:,.2f} ({pct:.0f}% do faturado no período) é órtese, prótese ou material especial "
+            f"(OPME) — {pct - previous_pct:.0f} pontos percentuais acima do período anterior ({previous_pct:.0f}%). "
+            "Esse tipo de item costuma exigir autorização prévia do convênio e nota fiscal do fornecedor "
+            "anexada pra não ser recusado. Vale conferir se essa documentação está completa antes de enviar "
+            "essas guias."
+        ),
+        financial_impact=opme_value,
+        action_label="Ver faturamentos",
+        action_href="/",
+    )
+
+
+def _coparticipation_visibility_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    Coparticipação (`Billing.coparticipation_value`, campo novo do
+    Template de Faturamento) é a parte que o PRÓPRIO PACIENTE paga,
+    distinta do que o convênio cobre (`charged_value`) — achado do
+    Raio-X da Sala de Comando: essa fatia de receita não aparecia em
+    NENHUM relatório antes desta rodada. Diferente dos demais insights
+    de Faturamento (que são alertas), este é "positive" — o objetivo é
+    só confirmar pro cliente que o dado está chegando e já tem volume
+    suficiente pra confiar nele, não sinalizar um problema.
+
+    Achado 4 da Auditoria (médio) — sem gate contra o período anterior,
+    este card apareceria PARA SEMPRE assim que a amostra mínima fosse
+    cruzada uma vez, virando o mesmo ruído permanente do OPME acima. Sem
+    adicionar estado persistido nenhum (não existe uma tabela de "o
+    cliente já viu este aviso"), usa o próprio período anterior como
+    proxy stateless de "primeira vez": só alerta quando o período
+    ANTERIOR ainda não tinha amostra suficiente e o ATUAL passou a ter —
+    ou seja, o momento em que o dado passou a ser confiável. Uma vez que
+    os dois períodos consecutivos já cruzam a amostra mínima, o card para
+    de aparecer sozinho (a condição de "primeira vez" deixa de valer).
+    """
+    if current.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE or current.coparticipation_total <= 0:
+        return None
+    if previous.coparticipation_billing_count >= _MIN_COPARTICIPATION_SAMPLE:
+        return None  # período anterior já tinha amostra confiável — não é mais "a primeira vez", fica calado
+    pct_of_billings = (
+        (current.coparticipation_billing_count / current.total_billing_count) * 100
+        if current.total_billing_count > 0
+        else 0.0
+    )
+    return Insight(
+        severity="positive",
+        category="faturamento",
+        title="Agora você também enxerga o quanto o paciente paga de coparticipação",
+        message=(
+            f"Neste período, R$ {current.coparticipation_total:,.2f} foram registrados como coparticipação — "
+            f"a parte que o PACIENTE paga, separada do que o convênio cobre — presente em {pct_of_billings:.0f}% "
+            "dos seus faturamentos. Esse valor não aparecia em nenhum relatório antes; vale conferir se está "
+            "batendo com o que de fato foi cobrado do paciente na recepção."
+        ),
+        financial_impact=current.coparticipation_total,
     )
 
 
@@ -644,6 +819,92 @@ def _weekday_no_show_rate_insight(current: InsightsPeriodInput) -> Insight | Non
         # filtrada e com a lista de recontato pra esse dia específico.
         action_label="Ver risco de falta",
         action_href=f"#weekday:{weekday}",
+    )
+
+
+def _booking_channel_no_show_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Mesmo raciocínio de `_weekday_no_show_rate_insight` acima, mas por
+    CANAL de agendamento (telefone, WhatsApp, site, presencial...) em vez
+    de dia da semana — achado do Dicionário de Dados: `booking_channel` é
+    campo novo do Template de Agenda, então esse insight só existe pra
+    quem já começou a preencher essa coluna.
+
+    Só o PIOR canal vira card (mesmo motivo de só reportar o pior dia em
+    `_weekday_no_show_rate_insight`: evita empilhar um card quase
+    idêntico por canal). Exige amostra mínima tanto no canal quanto no
+    total geral — com poucos dados, um canal "ruim" pode ser só 1 falta
+    em 2 agendamentos.
+    """
+    counts = current.booking_channel_no_show_counts
+    total_no_show = sum(no_show for no_show, _ in counts.values())
+    total_all = sum(total for _, total in counts.values())
+    if total_all < _MIN_CHANNEL_NO_SHOW_SAMPLE or total_no_show == 0:
+        return None
+    overall_rate = total_no_show / total_all
+
+    worst_channel: str | None = None
+    worst_rate = 0.0
+    for channel, (no_show, total) in counts.items():
+        if total < _MIN_CHANNEL_NO_SHOW_SAMPLE:
+            continue
+        rate = no_show / total
+        if rate > worst_rate:
+            worst_rate = rate
+            worst_channel = channel
+    if worst_channel is None:
+        return None
+
+    gap_pp = (worst_rate - overall_rate) * 100
+    if gap_pp < _CHANNEL_NO_SHOW_RATE_WARNING_PP:
+        return None
+    severity = "critical" if gap_pp >= _CHANNEL_NO_SHOW_RATE_CRITICAL_PP else "warning"
+    comparison = _comparative_phrase(worst_rate / overall_rate) if overall_rate > 0 else "bem mais"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title=f"Quem agenda por {worst_channel} falta mais",
+        message=(
+            f"Consultas agendadas por {worst_channel} têm {worst_rate * 100:.0f}% de falta — {comparison} da "
+            f"média geral da sua clínica ({overall_rate * 100:.0f}%). Vale reforçar a confirmação especialmente "
+            f"pra quem agenda por esse canal, ou repensar como esse canal agenda a consulta."
+        ),
+        action_label="Ver risco de falta",
+        action_href="#agenda-resumo",
+    )
+
+
+def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Responde "por que as pessoas estão cancelando" em vez de só "quantas
+    cancelaram" — achado do Dicionário de Dados: `cancellation_reason` é
+    campo novo do Template de Agenda. Só dispara quando um ÚNICO motivo
+    concentra boa parte dos cancelamentos do período (ver DECISÃO em
+    AnalyticsRepository.cancellation_reason_breakdown sobre o
+    denominador ser o TOTAL cancelado, não a soma dos motivos
+    preenchidos) — um motivo variado (10 motivos diferentes, nenhum
+    dominante) não é um padrão acionável, é operação normal de clínica.
+    """
+    if current.total_cancelled_count < _MIN_CANCELLATION_SAMPLE or not current.cancellation_reason_counts:
+        return None
+
+    top_reason, top_count = max(current.cancellation_reason_counts.items(), key=lambda kv: kv[1])
+    pct = (top_count / current.total_cancelled_count) * 100
+    if pct < _CANCELLATION_REASON_CONCENTRATION_WARNING_PCT:
+        return None
+    severity = "critical" if pct >= _CANCELLATION_REASON_CONCENTRATION_CRITICAL_PCT else "warning"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title=f'A maioria dos cancelamentos é pelo mesmo motivo: "{top_reason}"',
+        message=(
+            f"Das {current.total_cancelled_count} consulta(s) cancelada(s) no período, {top_count} "
+            f"({pct:.0f}%) foram por \"{top_reason}\" — vale investigar se dá pra reduzir esse motivo "
+            "específico (ex: ajustar horário, revisar um processo interno, ou treinar quem agenda pra "
+            "evitar esse cenário)."
+        ),
+        action_label="Ver agenda",
+        action_href="#agenda-resumo",
     )
 
 
@@ -911,6 +1172,10 @@ def generate_insights(
         _capacity_drop_insight(current, previous, estimated_idle_capacity_revenue_lost),
         _no_show_risk_insight(current, estimated_no_show_revenue_at_risk),
         _professional_outlier_insight(current),
+        _booking_channel_no_show_insight(current),
+        _cancellation_reason_insight(current),
+        _opme_concentration_insight(current, previous),
+        _coparticipation_visibility_insight(current, previous),
     ):
         if maybe_insight is not None:
             insights.append(maybe_insight)

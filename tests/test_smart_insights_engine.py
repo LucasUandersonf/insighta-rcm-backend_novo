@@ -488,6 +488,246 @@ def test_weekday_no_show_rate_only_the_worst_day_becomes_a_card_when_several_qua
     assert "segunda-feira" in weekday_titles[0].title.lower()
 
 
+def test_booking_channel_no_show_rate_above_average_is_flagged():
+    """WhatsApp: 6 de 20 (30%) faltaram; telefone: 1 de 20 (5%) — média
+    geral = 7/40 = 17.5%. WhatsApp fica 12.5pp acima (warning; crítico
+    seria >=20pp)."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, booking_channel_no_show_counts={"whatsapp": (6, 20), "telefone": (1, 20)},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    channel_titles = [i for i in insights if "falta mais" in i.title]
+    assert len(channel_titles) == 1
+    assert "whatsapp" in channel_titles[0].title.lower()
+    assert channel_titles[0].severity == "warning"
+    assert channel_titles[0].category == "agenda"
+
+
+def test_booking_channel_no_show_rate_far_above_average_is_critical():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, booking_channel_no_show_counts={"site": (9, 20), "telefone": (1, 20)},  # site 45% vs média 25% -> +20pp
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    channel_titles = [i for i in insights if "falta mais" in i.title]
+    assert len(channel_titles) == 1
+    assert channel_titles[0].severity == "critical"
+
+
+def test_booking_channel_no_show_rate_close_to_average_is_not_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, booking_channel_no_show_counts={"whatsapp": (3, 20), "telefone": (2, 20)},  # 15% vs 10%, média 12.5%
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_booking_channel_no_show_rate_small_sample_is_ignored_as_noise():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, booking_channel_no_show_counts={"whatsapp": (2, 2), "telefone": (1, 20)},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_booking_channel_no_show_rate_only_the_worst_channel_becomes_a_card():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        # whatsapp 60% (12/20), site 45% (9/20), telefone 5% (1/20) —
+        # média geral = 22/60 = 36.7%. Só o pior (whatsapp) vira card.
+        booking_channel_no_show_counts={"whatsapp": (12, 20), "site": (9, 20), "telefone": (1, 20)},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    channel_titles = [i for i in insights if "falta mais" in i.title]
+    assert len(channel_titles) == 1
+    assert "whatsapp" in channel_titles[0].title.lower()
+
+
+def test_cancellation_reason_concentration_is_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_cancelled_count=10,
+        cancellation_reason_counts={"Paciente remarcou": 5, "Sala indisponível": 2},  # 50% -> warning
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    reason_titles = [i for i in insights if "mesmo motivo" in i.title]
+    assert len(reason_titles) == 1
+    assert "Paciente remarcou" in reason_titles[0].title
+    assert "50%" in reason_titles[0].message
+    assert reason_titles[0].severity == "warning"
+    assert reason_titles[0].category == "agenda"
+
+
+def test_cancellation_reason_high_concentration_is_critical():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_cancelled_count=10,
+        cancellation_reason_counts={"Sala em manutenção": 7},  # 70% -> critical
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    reason_titles = [i for i in insights if "mesmo motivo" in i.title]
+    assert len(reason_titles) == 1
+    assert reason_titles[0].severity == "critical"
+
+
+def test_cancellation_reason_uses_total_cancelled_as_denominator_not_sum_of_reasons():
+    """Metade dos cancelamentos não tem motivo preenchido — o
+    denominador é o TOTAL cancelado (20), não a soma dos motivos (10),
+    senão o percentual seria inflado artificialmente (ver DECISÃO em
+    AnalyticsRepository.cancellation_reason_breakdown)."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_cancelled_count=20,
+        cancellation_reason_counts={"Paciente remarcou": 8},  # 8/20 = 40%, não 8/8 = 100%
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    reason_titles = [i for i in insights if "mesmo motivo" in i.title]
+    assert len(reason_titles) == 1
+    assert "40%" in reason_titles[0].message
+    assert "100%" not in reason_titles[0].message
+
+
+def test_cancellation_reason_scattered_reasons_is_not_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_cancelled_count=10,
+        cancellation_reason_counts={"A": 3, "B": 3, "C": 2},  # nenhum motivo domina (máximo 30%)
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_cancellation_reason_small_sample_is_ignored_as_noise():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_cancelled_count=3,
+        cancellation_reason_counts={"Paciente remarcou": 3},  # 100%, mas amostra pequena demais
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_opme_concentration_above_threshold_is_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 2_500.0, "procedimento": 7_500.0},  # 25% -> acima do gatilho (20%)
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    opme_titles = [i for i in insights if "OPME" in i.title]
+    assert len(opme_titles) == 1
+    assert opme_titles[0].severity == "warning"
+    assert opme_titles[0].category == "faturamento"
+    assert opme_titles[0].financial_impact == 2_500.0
+    assert "25%" in opme_titles[0].message
+
+
+def test_opme_concentration_below_threshold_is_not_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 500.0, "procedimento": 9_500.0},  # 5%
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_opme_concentration_absent_without_opme_billing():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, item_type_charged_value={"procedimento": 10_000.0},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_visibility_insight_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=850.0, coparticipation_billing_count=10,
+        total_billing_count=20,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    copart_titles = [i for i in insights if "coparticipação" in i.title.lower()]
+    assert len(copart_titles) == 1
+    assert copart_titles[0].severity == "positive"
+    assert copart_titles[0].category == "faturamento"
+    assert "850" in copart_titles[0].message
+    assert "50%" in copart_titles[0].message
+
+
+def test_coparticipation_visibility_absent_with_small_sample():
+    """Amostra pequena demais (menos de _MIN_COPARTICIPATION_SAMPLE
+    faturamentos com coparticipação preenchida) — não dá pra confiar que
+    o cliente já preenche essa coluna de forma consistente."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=50.0, coparticipation_billing_count=2,
+        total_billing_count=20,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_visibility_absent_without_any_data():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_opme_concentration_stable_across_periods_is_not_flagged():
+    """Achado 4 da Auditoria (médio): uma clínica de perfil ortopédico
+    tem concentração de OPME estruturalmente alta TODO período — sem
+    comparar contra o período anterior, isso alertaria pra sempre. Aqui
+    o período anterior já tinha a MESMA concentração (25%): não é uma
+    mudança recente, é o perfil normal desta clínica."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=8_000.0,
+        item_type_charged_value={"material_opme": 2_000.0, "procedimento": 6_000.0},  # 25%
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 2_500.0, "procedimento": 7_500.0},  # também 25%
+    )
+    assert generate_insights(current, previous) == []
+
+
+def test_opme_concentration_flags_only_when_it_increases_from_previous_period():
+    """Mesma clínica ortopédica do teste acima, mas desta vez a
+    concentração de fato SUBIU (25% -> 40%) — isso é uma mudança real,
+    não o perfil estático da clínica, e deve alertar."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=8_000.0,
+        item_type_charged_value={"material_opme": 2_000.0, "procedimento": 6_000.0},  # 25%
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 4_000.0, "procedimento": 6_000.0},  # 40%
+    )
+    insights = generate_insights(current, previous)
+    opme_titles = [i for i in insights if "OPME" in i.title]
+    assert len(opme_titles) == 1
+    assert "15" in opme_titles[0].message  # +15pp (40% - 25%)
+
+
+def test_coparticipation_visibility_does_not_repeat_once_previous_period_also_has_sample():
+    """Achado 4 da Auditoria (médio): segunda vez consecutiva que a
+    amostra mínima é cruzada — o período ANTERIOR já tinha 8
+    faturamentos com coparticipação (>= amostra mínima 5), então isso já
+    não é 'a primeira vez que o dado passou a existir' — o card não deve
+    reaparecer."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=700.0, coparticipation_billing_count=8,
+        total_billing_count=18,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=850.0, coparticipation_billing_count=10,
+        total_billing_count=20,
+    )
+    assert generate_insights(current, previous) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""

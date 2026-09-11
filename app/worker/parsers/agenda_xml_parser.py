@@ -34,6 +34,12 @@ def parse(raw_bytes: bytes) -> list[AgendaRowParseResult]:
                 "procedure_code": _text(agendamento, "codigoProcedimento") or None,
                 "cid_code": _text(agendamento, "cid") or None,
                 "external_id": _text(agendamento, "codigoAgendamento") or None,
+                # Campos novos, achado do Dicionário de Dados (auditoria
+                # BI/Dados) — mesmo padrão camelCase, também opcionais.
+                "criado_em": _text(agendamento, "criadoEm") or None,
+                "tipo_consulta": _text(agendamento, "tipoConsulta") or None,
+                "motivo_cancelamento": _text(agendamento, "motivoCancelamento") or None,
+                "canal_agendamento": _text(agendamento, "canalAgendamento") or None,
             }
             row = RawAppointmentRow.model_validate(mapped)
             results.append(AgendaRowParseResult.ok(row_number, row))
