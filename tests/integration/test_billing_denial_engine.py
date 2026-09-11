@@ -362,3 +362,74 @@ async def test_manual_billing_normalizes_valid_item_type(client, auth_headers_a,
         result = await conn.execute(text("SELECT item_type FROM core.billing WHERE tenant_id = :t"), {"t": tenant_a})
         row = result.mappings().first()
     assert row["item_type"] == "material_opme"
+
+
+async def test_billing_response_exposes_the_4_new_faturamento_fields(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    campos novos (quantidade/carteirinha/tipo_item/coparticipação) eram
+    validados e gravados corretamente, mas NENHUMA resposta de leitura
+    os devolvia: um gestor não tinha como ver, pela API, qual linha era
+    OPME ou tinha coparticipação. Este teste prova que POST /billing
+    agora devolve os 4 campos (já normalizados, quando aplicável)."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Achado 12"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appt.json()["id"],
+            "insurance_plan_id": plan_id,
+            "charged_value": 150.0,
+            "quantity": 3,
+            "member_card_number": "0012.345.678-90",
+            "item_type": "Material OPME",
+            "coparticipation_value": 25.0,
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["quantity"] == 3
+    assert body["member_card_number"] == "001234567890"  # já normalizado (Achado 10)
+    assert body["item_type"] == "material_opme"  # já normalizado (Achado 11)
+    assert body["coparticipation_value"] == 25.0
+
+
+async def test_appointment_response_exposes_the_4_new_agenda_fields(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 12 (médio) — mesmo raciocínio do teste acima, para os 4
+    campos novos de Agenda. Como o endpoint manual de agendamento não
+    expõe esses campos na ESCRITA (só a ingestão em massa grava — ver
+    Achado da Auditoria), este teste confirma que a resposta ao menos
+    devolve as 4 chaves (com valor None para um agendamento criado
+    manualmente), provando que o schema de saída não as esconde mais."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Achado 12 Agenda"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    for field in ("booked_at", "visit_type", "cancellation_reason", "booking_channel"):
+        assert field in body

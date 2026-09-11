@@ -113,5 +113,15 @@ class AppointmentResponse(BaseModel):
     no_show_risk_level: str | None
     no_show_risk_score: float | None
     created_at: datetime
+    # Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    # campos novos do Dicionário de Dados para Agenda eram validados e
+    # gravados pela ingestão, mas nenhuma resposta de leitura os
+    # devolvia — os insights de canal/motivo de cancelamento apontam o
+    # problema em agregado, mas a tela de destino não tinha como mostrar
+    # QUAL agendamento tem qual canal/motivo.
+    booked_at: datetime | None
+    visit_type: str | None
+    cancellation_reason: str | None
+    booking_channel: str | None
 
     model_config = {"from_attributes": True}

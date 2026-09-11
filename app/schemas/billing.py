@@ -79,6 +79,18 @@ class BillingResponse(BaseModel):
     settled_at: datetime | None
     guia_id: UUID | None
     created_at: datetime
+    # Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    # campos novos do Dicionário de Dados (quantidade/carteirinha/tipo_item/
+    # coparticipação) eram validados e gravados nas duas portas de
+    # entrada (ingestão em massa e este endpoint manual), mas NENHUMA
+    # resposta de leitura os devolvia — um gestor que clicasse em "Ver
+    # faturamentos" a partir do card de OPME não tinha como ver QUAL
+    # linha é OPME sem abrir o banco direto. Fecha o ciclo "insight
+    # aponta o problema -> tela mostra a linha exata".
+    quantity: int
+    member_card_number: str | None
+    item_type: str | None
+    coparticipation_value: float | None
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
@@ -97,6 +109,12 @@ class BillingSearchItem(BaseModel):
     status: str
     denial_risk_level: str
     created_at: datetime
+    # Achado 12 da Auditoria (médio) — mesmo motivo de BillingResponse
+    # acima: sem isso, a tela que os insights de OPME/coparticipação
+    # linkam não tinha como distinguir uma linha da outra por esses
+    # campos.
+    item_type: str | None
+    member_card_number: str | None
 
 
 class BillingSettleRequest(BaseModel):
