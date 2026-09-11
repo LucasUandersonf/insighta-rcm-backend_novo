@@ -185,6 +185,8 @@ async def get_financial_hole_billings(
     db: DbSession,
     date_from: date | None = None,
     date_to: date | None = None,
+    limit: int = 15,
+    offset: int = 0,
     current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
 ) -> FinancialHoleBillingsResponse:
     """
@@ -194,9 +196,13 @@ async def get_financial_hole_billings(
     AnalyticsService.get_financial_hole_billings) — mesmo período do
     resto da Sala de Comando (não é um estado "AGORA" como
     inactive-patients/recall-candidates).
+
+    `limit`/`offset` (achado do usuário, direto na tela): a lista era
+    fixa em 15 linhas, sem paginação — quando havia mais que isso, o
+    resto simplesmente não tinha como ser visto.
     """
     start, end = _default_period(date_from, date_to)
-    return await _build_service(db).get_financial_hole_billings(start, end)
+    return await _build_service(db).get_financial_hole_billings(start, end, limit=limit, offset=offset)
 
 
 @router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)

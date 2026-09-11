@@ -945,7 +945,9 @@ class AnalyticsService:
             professional_name=professional_name,
         )
 
-    async def get_financial_hole_billings(self, date_from: date, date_to: date) -> FinancialHoleBillingsResponse:
+    async def get_financial_hole_billings(
+        self, date_from: date, date_to: date, *, limit: int = 15, offset: int = 0
+    ) -> FinancialHoleBillingsResponse:
         """
         Lista real por trás do insight "Você está cobrando menos do que
         devia de alguns convênios" (ver DECISÃO em
@@ -954,11 +956,16 @@ class AnalyticsService:
         usuário: o card dizia QUANTO no total, mas não QUAIS contas
         corrigir. `total_hole_value` reaproveita financial_hole_total
         (mesma query-base do agregado) em vez de somar `items` na mão —
-        os dois precisam bater mesmo quando a lista é truncada.
+        os dois precisam bater mesmo quando a lista está paginada.
+
+        Segundo achado do usuário, direto na tela: `limit`/`offset` são
+        novos — antes esta lista só devolvia as 15 piores, sem jeito de
+        ver o resto quando `total_count` era maior. `limit=15` continua
+        o default (primeira página igual a antes).
         """
         total_count = await self.analytics_repo.count_financial_hole_billings(date_from, date_to)
         total_hole_value = await self.analytics_repo.financial_hole_total(date_from, date_to)
-        rows = await self.analytics_repo.list_financial_hole_billings(date_from, date_to)
+        rows = await self.analytics_repo.list_financial_hole_billings(date_from, date_to, limit=limit, offset=offset)
         return FinancialHoleBillingsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -976,4 +983,6 @@ class AnalyticsService:
             ],
             total_count=total_count,
             total_hole_value=total_hole_value,
+            limit=limit,
+            offset=offset,
         )

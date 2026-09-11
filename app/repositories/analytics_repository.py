@@ -193,15 +193,25 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return int(result.scalar_one())
 
-    async def list_financial_hole_billings(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+    async def list_financial_hole_billings(
+        self, date_from: date, date_to: date, *, limit: int = 15, offset: int = 0
+    ) -> list[dict]:
         """
         As contas reais por trás do "Divergência de Cobrança" — o insight
         de cobrança abaixo do contrato (smart_insights_engine.py::
         _financial_hole_insight) diz QUANTO no total, esta lista diz
         QUAIS contas, pra quem cuida do faturamento revisar e corrigir
-        uma a uma. Só as piores (`hole_value` maior) primeiro — mesmo
-        espírito de "lista curta e acionável" de list_inactive_patients/
-        list_recall_candidates, não uma tela de auditoria completa.
+        uma a uma. Piores (`hole_value` maior) primeiro.
+
+        Achado do usuário direto na tela: a versão original desta lista
+        (limit=15, sem `offset`) mostrava só as piores e nunca dizia como
+        ver o resto — uma clínica com 30 contas nessa situação via
+        literalmente a metade, sem scroll nem paginação. Agora é uma
+        lista paginável de verdade (mesmo padrão de
+        AppointmentRepository.list_by_date_range_paginated) — o `limit`
+        default continua 15 (mesmo tamanho de página de sempre, primeira
+        página idêntica ao comportamento anterior), só ganhou `offset`
+        pra alcançar as demais.
         """
         start, end = _bounds(date_from, date_to)
         stmt = text(
@@ -210,10 +220,10 @@ class AnalyticsRepository:
                    ip.display_name, b.charged_value, ci.agreed_price, (ci.agreed_price - b.charged_value) AS hole_value
             {self._FINANCIAL_HOLE_BILLINGS_FROM}
             ORDER BY hole_value DESC
-            LIMIT :limit
+            LIMIT :limit OFFSET :offset
             """
         )
-        result = await self.session.execute(stmt, {"start": start, "end": end, "limit": limit})
+        result = await self.session.execute(stmt, {"start": start, "end": end, "limit": limit, "offset": offset})
         return [
             {
                 "billing_id": str(row[0]),

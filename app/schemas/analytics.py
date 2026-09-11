@@ -426,10 +426,20 @@ class FinancialHoleBillingsResponse(BaseModel):
     trás do insight "Você está cobrando menos do que devia de alguns
     convênios" (ver DECISÃO em smart_insights_engine.py::_financial_hole_insight).
     `total_hole_value` é o mesmo número que o insight cita (ver
-    AnalyticsRepository.financial_hole_total) — os dois precisam bater."""
+    AnalyticsRepository.financial_hole_total) — os dois precisam bater,
+    e é sobre TODAS as contas do período, não só as da página atual.
+
+    `limit`/`offset` (achado do usuário: a lista antes mostrava só as
+    piores 15, sem jeito de ver o resto quando havia mais) — mesmo
+    formato de PaginatedResponse (app/schemas/pagination.py), repetido
+    aqui em vez de reaproveitado porque esta resposta já carrega
+    period_start/period_end/total_hole_value, que PaginatedResponse
+    genérico não tem espaço para."""
 
     period_start: date
     period_end: date
     items: list[FinancialHoleBillingItem]
     total_count: int
     total_hole_value: float
+    limit: int
+    offset: int

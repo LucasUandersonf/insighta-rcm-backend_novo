@@ -194,6 +194,110 @@ async def test_financial_hole_billings_isolates_between_tenants(client, admin_en
     assert response_b.json()["total_count"] == 0
 
 
+# Achado do usuário direto na tela ("Contas abaixo do combinado", Sala
+# de Comando): a lista era fixa em 15 linhas, sem paginação — se
+# houvesse mais contas do que isso, o resto simplesmente não tinha como
+# ser visto. Os 2 testes abaixo provam que a paginação real (limit/
+# offset, mesmo padrão de GET /appointments) funciona contra Postgres
+# real: total_count sempre reflete TODAS as contas, não só a página
+# atual, e a ordenação (pior hole_value primeiro) se mantém entre
+# páginas.
+
+
+async def _seed_revenue_leak_line(admin_engine, tenant_id, plan_id, contract_id, client, headers, *, tuss_code, agreed_value, charged_value):
+    """Uma linha adicional de vazamento de receita no MESMO
+    convênio+contrato — diferente de _seed_revenue_leak_billing (que
+    cria um convênio novo a cada chamada e colidiria com a constraint
+    UNIQUE (tenant_id, normalized_key) se chamada 2x para o mesmo
+    tenant), esta variante reaproveita plan_id/contract_id e só varia o
+    tuss_code, pra testar MÚLTIPLAS linhas do mesmo tenant."""
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.contract_items (tenant_id, contract_id, tuss_code, agreed_price) VALUES (:t, :c, :code, :value)"),
+            {"t": tenant_id, "c": contract_id, "code": tuss_code, "value": agreed_value},
+        )
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": f"Paciente {tuss_code}"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": tuss_code,
+        },
+        headers=headers,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_financial_hole_billings_paginates_worst_first(client, admin_engine, tenant_a, auth_headers_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    contract_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status) VALUES (:id, :t, :plan, '2026-01-01', 'homologado')"),
+            {"id": contract_id, "t": tenant_a, "plan": plan_id},
+        )
+
+    # 5 linhas com hole_value 10/20/30/40/50 (agreed_value fixo em 200,
+    # charged_value variando) — pior primeiro é hole_value 50.
+    for i, hole in enumerate((10.0, 20.0, 30.0, 40.0, 50.0)):
+        await _seed_revenue_leak_line(
+            admin_engine, tenant_a, plan_id, contract_id, client, auth_headers_a,
+            tuss_code=f"HOLE{i}", agreed_value=200.0, charged_value=200.0 - hole,
+        )
+
+    date_from, date_to = _window()
+
+    first_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=0",
+        headers=auth_headers_a,
+    )
+    assert first_page.status_code == 200
+    body = first_page.json()
+    assert body["total_count"] == 5  # sempre TODAS, não só a página atual
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+    assert [item["hole_value"] for item in body["items"]] == [50.0, 40.0]
+
+    second_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=2",
+        headers=auth_headers_a,
+    )
+    body2 = second_page.json()
+    assert body2["total_count"] == 5
+    assert [item["hole_value"] for item in body2["items"]] == [30.0, 20.0]
+
+    last_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=4",
+        headers=auth_headers_a,
+    )
+    body3 = last_page.json()
+    assert body3["total_count"] == 5
+    assert [item["hole_value"] for item in body3["items"]] == [10.0]  # última página, só 1 sobra
+
+
+async def test_financial_hole_billings_defaults_to_first_15_when_unpaginated(client, admin_engine, tenant_a, auth_headers_a):
+    """Sem `limit`/`offset` na URL, o comportamento é IDÊNTICO ao de
+    antes desta correção (15 primeiras, pior primeiro) — a paginação é
+    aditiva, não uma mudança de contrato pra quem já consumia o
+    endpoint sem esses parâmetros."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["limit"] == 15
+    assert body["offset"] == 0
+
+
 async def test_agenda_metrics_returns_peak_hours_and_professionals(client, auth_headers_a, admin_engine, tenant_a):
     professional_resp = await client.post(
         "/api/v1/professionals",
