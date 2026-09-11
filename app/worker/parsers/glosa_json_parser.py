@@ -27,7 +27,10 @@ def parse(raw_bytes: bytes) -> list[DenialRowParseResult]:
         try:
             mapped = {
                 "insurance_plan_raw_name": item.get("convenio", ""),
-                "guia_numero": item.get("guia_numero", ""),
+                "guia_numero": item.get("guia_numero") or None,
+                # Chave de conciliação alternativa (achado do Dicionário
+                # de Dados) — ver DECISÃO em RawDenialRow.
+                "numero_carteirinha": item.get("numero_carteirinha") or None,
                 "procedure_code": item.get("codigo_procedimento") or None,
                 "received_value": item.get("valor_pago"),
                 "settlement_date": item.get("data_pagamento"),  # pydantic converte "aaaa-mm-dd" sozinho

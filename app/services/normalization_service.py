@@ -199,6 +199,10 @@ class NormalizationService:
                 tipo=row.guia_tipo,
                 numero=row.guia_numero,
                 senha=row.guia_senha,
+                # Achado do Dicionário de Dados: Guia.tabela_procedimento já
+                # existia no modelo, mas nenhum template de ingestão a
+                # alimentava até agora.
+                tabela_procedimento=row.tabela_procedimento,
             )
         )
 
@@ -247,9 +251,12 @@ class NormalizationService:
         )
 
         # Mesmo motor de risco de glosa que os endpoints da API usam —
-        # nenhuma lógica de scoring duplicada aqui.
+        # nenhuma lógica de scoring duplicada aqui. `quantity` multiplica
+        # ContractItem.agreed_price na comparação de valor (achado do
+        # Dicionário de Dados) — default 1 preserva o comportamento de
+        # sempre para toda linha que não informar essa coluna.
         contract_item = await self.contract_item_repo.find_agreed_price(plan.id, row.procedure_code)
-        risk = assess(appointment, contract_item, row.charged_value)
+        risk = assess(appointment, contract_item, row.charged_value, quantity=row.quantidade)
 
         await self.billing_repo.add(
             Billing(
@@ -263,6 +270,10 @@ class NormalizationService:
                 denial_risk_level=risk.level,
                 denial_reasons=risk.reasons,
                 value_saved_by_correction=float(risk.value_saved_by_correction),
+                quantity=row.quantidade,
+                member_card_number=row.numero_carteirinha,
+                item_type=row.tipo_item,
+                coparticipation_value=row.valor_coparticipacao,
             )
         )
 
@@ -359,6 +370,17 @@ class NormalizationService:
             existing.cid_code = row.cid_code
             existing.no_show_risk_level = risk.risk_level
             existing.no_show_risk_score = risk.score
+            # Campos novos, achado do Dicionário de Dados (auditoria
+            # BI/Dados) — atualiza também no UPSERT: uma reimportação pode
+            # trazer `motivo_cancelamento`/`canal_agendamento` que não
+            # existiam na primeira exportação (ex.: status mudou de
+            # "agendado" para "cancelado" entre um arquivo e outro).
+            # `booked_at` e `visit_type` também são atualizados por
+            # simetria — não há motivo para tratá-los como imutáveis.
+            existing.booked_at = row.criado_em
+            existing.visit_type = row.tipo_consulta
+            existing.cancellation_reason = row.motivo_cancelamento
+            existing.booking_channel = row.canal_agendamento
             return await self.appointment_repo.save(existing)
 
         return await self.appointment_repo.add(
@@ -379,6 +401,14 @@ class NormalizationService:
                 no_show_risk_level=risk.risk_level,
                 no_show_risk_score=risk.score,
                 created_by=None,  # sem usuário humano por trás — veio de importação automática
+                # Campos novos, achado do Dicionário de Dados — ver
+                # DECISÃO em 036_billing_appointment_extended_fields.sql
+                # sobre por que `booking_channel` NÃO reaproveita
+                # `Patient.acquisition_source`.
+                booked_at=row.criado_em,
+                visit_type=row.tipo_consulta,
+                cancellation_reason=row.motivo_cancelamento,
+                booking_channel=row.canal_agendamento,
             )
         )
 
@@ -455,12 +485,14 @@ class NormalizationService:
         Equivalente a `normalize_row`, mas para o Template de Integração
         "Glosa" (ver docstring de RawDenialRow em app/worker/schemas.py):
         NUNCA cria Appointment/Patient — CASA com um Billing que já existe
-        (via convênio + Guia.numero, desambiguado por procedure_code
-        quando a guia agrupa mais de uma linha), registra o resultado real
-        do pagamento nele (settle) e, quando pago < cobrado, cria a Glosa
-        correspondente em core.glosas. Motivos de rejeição próprios deste
-        template (`guia_not_found`, `billing_not_found`,
-        `ambiguous_guia_multiple_billings`) — nenhum deles é
+        (via convênio + Guia.numero OU convênio + numero_carteirinha —
+        ver DECISÃO de chave alternativa em RawDenialRow —, desambiguado
+        por procedure_code quando a chave agrupa mais de uma linha),
+        registra o resultado real do pagamento nele (settle) e, quando
+        pago < cobrado, cria a Glosa correspondente em core.glosas.
+        Motivos de rejeição próprios deste template (`guia_not_found`,
+        `billing_not_found`, `ambiguous_guia_multiple_billings` e seus
+        equivalentes por carteirinha) — nenhum deles é
         "unknown_insurance_plan", que continua tratado exatamente como
         nos outros dois templates (linha fica pendente de resolução
         manual na tela de Setup).
@@ -477,32 +509,51 @@ class NormalizationService:
             raw_row.validation_errors = {"reason": "unknown_insurance_plan", "raw_value": row.insurance_plan_raw_name}
             return False
 
-        guia = await self.guia_repo.get_by_numero(plan.id, row.guia_numero)
-        if guia is None:
-            raw_row.status = "rejected"
-            raw_row.validation_errors = {"reason": "guia_not_found", "raw_value": row.guia_numero}
-            return False
+        # guia_numero é a chave PRIMÁRIA quando presente (mais específica
+        # — já aponta para UMA guia); numero_carteirinha só entra quando
+        # o demonstrativo não trouxe guia_numero (ver DECISÃO em
+        # RawDenialRow). RawDenialRow.check_has_reconciliation_key já
+        # garante que ao menos um dos dois vem preenchido.
+        if row.guia_numero:
+            guia = await self.guia_repo.get_by_numero(plan.id, row.guia_numero)
+            if guia is None:
+                raw_row.status = "rejected"
+                raw_row.validation_errors = {"reason": "guia_not_found", "raw_value": row.guia_numero}
+                return False
 
-        if row.procedure_code:
-            billings = await self.billing_repo.list_by_guia_and_procedure_code(guia.id, row.procedure_code)
-            not_found_reason = "billing_not_found_for_procedure"
+            if row.procedure_code:
+                billings = await self.billing_repo.list_by_guia_and_procedure_code(guia.id, row.procedure_code)
+                not_found_reason = "billing_not_found_for_procedure"
+            else:
+                billings = await self.billing_repo.list_by_guia(guia.id)
+                not_found_reason = "billing_not_found"
+            match_key = row.guia_numero
+            ambiguous_reason = "ambiguous_guia_multiple_billings"
         else:
-            billings = await self.billing_repo.list_by_guia(guia.id)
-            not_found_reason = "billing_not_found"
+            if row.procedure_code:
+                billings = await self.billing_repo.list_by_member_card_and_procedure_code(
+                    plan.id, row.numero_carteirinha, row.procedure_code
+                )
+                not_found_reason = "billing_not_found_for_procedure"
+            else:
+                billings = await self.billing_repo.list_by_member_card(plan.id, row.numero_carteirinha)
+                not_found_reason = "billing_not_found"
+            match_key = row.numero_carteirinha
+            ambiguous_reason = "ambiguous_member_card_multiple_billings"
 
         if not billings:
             raw_row.status = "rejected"
-            raw_row.validation_errors = {"reason": not_found_reason, "raw_value": row.guia_numero}
+            raw_row.validation_errors = {"reason": not_found_reason, "raw_value": match_key}
             return False
         if len(billings) > 1:
-            # Guia com mais de um item e o demonstrativo não trouxe
-            # procedure_code para desambiguar — melhor rejeitar
+            # Mais de um billing casa com a chave e o demonstrativo não
+            # trouxe procedure_code para desambiguar — melhor rejeitar
             # explicitamente do que liquidar a linha errada (mesmo
             # princípio de "nunca adivinhar" de todo o resto do pipeline).
             raw_row.status = "rejected"
             raw_row.validation_errors = {
-                "reason": "ambiguous_guia_multiple_billings",
-                "raw_value": row.guia_numero,
+                "reason": ambiguous_reason,
+                "raw_value": match_key,
             }
             return False
 

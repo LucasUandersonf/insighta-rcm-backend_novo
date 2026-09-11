@@ -93,7 +93,11 @@ class BillingService:
                 tuss_code=appointment.procedure_code,
             )
 
-        risk = assess(appointment, contract_item, data.charged_value)
+        # quantity entra no motor de regras (ver DECISÃO em
+        # denial_risk_engine.assess) para multiplicar o preço de tabela —
+        # sem isso, lançamento manual de quantidade > 1 sofreria o mesmo
+        # falso positivo já corrigido na ingestão em lote.
+        risk = assess(appointment, contract_item, data.charged_value, quantity=data.quantity)
 
         billing = Billing(
             id=uuid.uuid4(),
@@ -108,6 +112,10 @@ class BillingService:
             denial_risk_level=risk.level,
             denial_reasons=risk.reasons,
             value_saved_by_correction=float(risk.value_saved_by_correction),
+            quantity=data.quantity,
+            member_card_number=data.member_card_number,
+            item_type=data.item_type,
+            coparticipation_value=data.coparticipation_value,
         )
         saved = await self.billing_repo.add(billing)
         # Sem `diff` — ver DECISÃO em AuditLogRepository.record. O

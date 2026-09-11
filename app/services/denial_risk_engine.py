@@ -61,20 +61,26 @@ class RiskAssessment:
         return self.level == "high"
 
 
-def _rule_missing_cid(appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal) -> RiskFinding | None:
+def _rule_missing_cid(
+    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+) -> RiskFinding | None:
     """CID ausente é o exemplo canônico citado no briefing do produto."""
     if not appointment.cid_code:
         return RiskFinding(reason_code="missing_cid", severity="high")
     return None
 
 
-def _rule_missing_procedure_code(appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal) -> RiskFinding | None:
+def _rule_missing_procedure_code(
+    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+) -> RiskFinding | None:
     if not appointment.procedure_code:
         return RiskFinding(reason_code="missing_procedure_code", severity="high")
     return None
 
 
-def _rule_no_contract_reference(appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal) -> RiskFinding | None:
+def _rule_no_contract_reference(
+    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+) -> RiskFinding | None:
     if contract_item is None:
         # Sem tabela de repasse cadastrada para este convênio+procedimento
         # não dá para validar o valor cobrado. Não bloqueia sozinho (é
@@ -84,10 +90,18 @@ def _rule_no_contract_reference(appointment: Appointment, contract_item: Contrac
     return None
 
 
-def _rule_value_mismatch(appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal) -> RiskFinding | None:
+def _rule_value_mismatch(
+    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+) -> RiskFinding | None:
     if contract_item is None:
         return None  # já coberto por _rule_no_contract_reference
-    agreed = Decimal(str(contract_item.agreed_price))
+    # `quantity` multiplica o valor de tabela — achado do Dicionário de
+    # Dados: sem isso, uma linha com quantidade > 1 (ex.: 3 sessões do
+    # mesmo procedimento) comparava o valor cobrado TOTAL contra o preço
+    # de UMA unidade, disparando "cobrança acima do contrato" por engano.
+    # default=1 preserva o comportamento de sempre para toda linha que
+    # não informar essa coluna.
+    agreed = Decimal(str(contract_item.agreed_price)) * quantity
     diff = charged_value - agreed
     if abs(diff) <= _VALUE_TOLERANCE:
         return None
@@ -112,9 +126,15 @@ _RULES = (
 )
 
 
-def assess(appointment: Appointment, contract_item: ContractItem | None, charged_value: float) -> RiskAssessment:
+def assess(
+    appointment: Appointment, contract_item: ContractItem | None, charged_value: float, *, quantity: int = 1
+) -> RiskAssessment:
+    """`quantity` (achado do Dicionário de Dados): unidades do mesmo
+    procedimento cobradas na linha, multiplica ContractItem.agreed_price
+    em _rule_value_mismatch. default=1 preserva o comportamento de sempre
+    para todo chamador que ainda não passa isso (ver DECISÃO lá)."""
     charged = Decimal(str(charged_value))
-    findings = [result for rule in _RULES if (result := rule(appointment, contract_item, charged)) is not None]
+    findings = [result for rule in _RULES if (result := rule(appointment, contract_item, charged, quantity)) is not None]
 
     if not findings:
         return RiskAssessment(level="low")

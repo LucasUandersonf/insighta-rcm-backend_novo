@@ -72,6 +72,12 @@ CANONICAL_FIELD_LABELS = {
     "guia_tipo": "Tipo de guia",
     "guia_numero": "Número da guia",
     "guia_senha": "Senha da guia",
+    # Campos novos, achado do Dicionário de Dados (auditoria BI/Dados).
+    "quantidade": "Quantidade",
+    "numero_carteirinha": "Número da carteirinha",
+    "tabela_procedimento": "Tabela do procedimento",
+    "tipo_item": "Tipo de item",
+    "valor_coparticipacao": "Valor de coparticipação",
 }
 
 # Todo campo canônico que o template de Faturamento reconhece (obrigatório

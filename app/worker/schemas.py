@@ -36,7 +36,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from app.models.appointment import TIPO_PACIENTE_VALUES
+from app.models.appointment import TIPO_PACIENTE_VALUES, VISIT_TYPE_VALUES
+from app.models.billing import ITEM_TYPE_VALUES
 from app.models.guia import GUIA_TIPOS
 
 
@@ -183,12 +184,46 @@ class RawBillingRow(BaseModel):
     guia_numero: str | None = None
     guia_senha: str | None = None
 
+    # --- Campos novos, achado do Dicionário de Dados (auditoria BI/Dados
+    # desta rodada) — mesmo critério de opcionalidade dos demais. ---
+    # Unidades do mesmo procedimento nesta linha. default=1 (não None):
+    # um arquivo sem essa coluna significa "1 unidade", nunca "não sei" —
+    # é exatamente o comportamento implícito que o sistema sempre teve.
+    quantidade: int = Field(default=1, gt=0, le=1000)
+    numero_carteirinha: str | None = None
+    # Tabela do procedimento (padrão TISS: 18=CBHPM, 19/20=tabela própria,
+    # 22=TUSS) — mesma coluna que já existe em Guia.tabela_procedimento
+    # (app/models/guia.py), nunca antes alimentada por nenhum template de
+    # ingestão. Sem validação de enum fechado aqui de propósito: o modelo
+    # Guia também não valida (String livre) — convênios às vezes usam
+    # código de tabela própria fora da lista pública.
+    tabela_procedimento: str | None = None
+    tipo_item: str | None = None
+    # ge=0 (não gt=0): 0 é um valor real (procedimento sem coparticipação
+    # nesta linha específica, mas o campo foi informado mesmo assim).
+    valor_coparticipacao: float | None = Field(default=None, ge=0, le=500_000)
+
     @field_validator("patient_cpf")
     @classmethod
     def sanitize_cpf(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
         return _sanitize_cpf_value(v)
+
+    @field_validator("numero_carteirinha", "tabela_procedimento")
+    @classmethod
+    def blank_optional_to_none(cls, v: str | None) -> str | None:
+        return v or None
+
+    @field_validator("tipo_item")
+    @classmethod
+    def normalize_tipo_item(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        normalized = _strip_accents_lower(v).replace(" ", "_").replace("-", "_")
+        if normalized not in ITEM_TYPE_VALUES:
+            raise ValueError(f"tipo_item '{v}' não reconhecido — use um de: {', '.join(ITEM_TYPE_VALUES)}")
+        return normalized
 
     @field_validator("tipo_paciente")
     @classmethod
@@ -252,6 +287,18 @@ class RawAppointmentRow(BaseModel):
     # ProfessionalRepository.get_by_name sem registro profissional).
     external_id: str | None = None
 
+    # --- Campos novos, achado do Dicionário de Dados (auditoria BI/Dados
+    # desta rodada) — mesmo critério de opcionalidade dos demais. ---
+    # Quando o agendamento foi de fato MARCADO no ERP (≠ scheduled_at, que
+    # é a data/hora da CONSULTA em si) — habilita medir tempo de espera.
+    criado_em: datetime | None = None
+    tipo_consulta: str | None = None
+    motivo_cancelamento: str | None = None
+    # Canal por onde este agendamento foi marcado — texto livre de
+    # propósito (telefone/whatsapp/site/presencial são os mais comuns,
+    # mas não um vocabulário fechado universal como status/tipo_paciente).
+    canal_agendamento: str | None = None
+
     @field_validator("patient_cpf")
     @classmethod
     def sanitize_cpf(cls, v: str | None) -> str | None:
@@ -265,6 +312,23 @@ class RawAppointmentRow(BaseModel):
         if v is None or v == "":
             return None
         return _normalize_tipo_paciente_value(v)
+
+    @field_validator("motivo_cancelamento", "canal_agendamento")
+    @classmethod
+    def blank_optional_to_none(cls, v: str | None) -> str | None:
+        return v or None
+
+    @field_validator("tipo_consulta")
+    @classmethod
+    def normalize_tipo_consulta(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        normalized = _strip_accents_lower(v).replace(" ", "_").replace("-", "_")
+        aliases = {"primeira_consulta": "primeira_consulta", "primeira": "primeira_consulta", "1a_consulta": "primeira_consulta", "retorno": "retorno"}
+        resolved = aliases.get(normalized)
+        if resolved is None:
+            raise ValueError(f"tipo_consulta '{v}' não reconhecido — use um de: {', '.join(VISIT_TYPE_VALUES)}")
+        return resolved
 
     @field_validator("status")
     @classmethod
@@ -299,6 +363,25 @@ class RawDenialRow(BaseModel):
     o pagamento se refere (mesmo princípio de "nunca inventar" de todo o
     motor de risco).
 
+    DECISÃO — chave de conciliação ALTERNATIVA por número da carteirinha
+    (achado do Dicionário de Dados)
+    -------------------------------------------------------------------------
+    Nem todo demonstrativo de operadora devolve o número da guia (alguns
+    conciliam só por beneficiário + procedimento + competência). Exigir
+    guia_numero sempre rejeitaria 100% das linhas desses convênios, mesmo
+    quando a guia foi corretamente registrada no Faturamento. `numero_carteirinha`
+    é uma alternativa real: o Faturamento já grava esse dado por linha (ver
+    RawBillingRow.numero_carteirinha / Billing.member_card_number,
+    achado desta mesma auditoria), então ele já existe no banco quando o
+    demonstrativo chega. Exatamente UM dos dois (`guia_numero` ou
+    `numero_carteirinha`) precisa vir preenchido — nunca os dois vazios
+    (linha sem qualquer chave de casamento é rejeitada, nunca "adivinhada"
+    por outro critério como nome/data). Quando `guia_numero` vem
+    preenchido, ele é a chave PRIMÁRIA (mais específica: já aponta para
+    UMA guia); `numero_carteirinha` só é usado quando `guia_numero` está
+    ausente. `procedure_code` desambigua os dois caminhos do mesmo jeito
+    (uma carteirinha pode ter várias cobranças abertas no mesmo convênio).
+
     DECISÃO — motivo de glosa NÃO entra em Billing.denial_reasons, entra
     em core.glosas (Glosa REAL — já existe, ver app/models/glosa.py)
     -------------------------------------------------------------------------
@@ -318,7 +401,11 @@ class RawDenialRow(BaseModel):
     """
 
     insurance_plan_raw_name: str = Field(min_length=1, max_length=255)
-    guia_numero: str = Field(min_length=1, max_length=50)
+    # Nenhum dos dois é obrigatório isoladamente — ver DECISÃO acima sobre
+    # chave de conciliação alternativa. `check_has_reconciliation_key`
+    # garante que ao menos um venha preenchido.
+    guia_numero: str | None = Field(default=None, max_length=50)
+    numero_carteirinha: str | None = Field(default=None, max_length=50)
     procedure_code: str | None = None
     # ge=0 (não gt=0, diferente de charged_value): 0 é um valor real e
     # esperado aqui — glosa total, a operadora pagou zero pelo item.
@@ -331,10 +418,19 @@ class RawDenialRow(BaseModel):
     codigo_motivo: str | None = None
     descricao_motivo: str | None = None
 
-    @field_validator("procedure_code", "codigo_motivo", "descricao_motivo")
+    @field_validator("guia_numero", "numero_carteirinha", "procedure_code", "codigo_motivo", "descricao_motivo")
     @classmethod
     def blank_to_none(cls, v: str | None) -> str | None:
         return v or None
+
+    @model_validator(mode="after")
+    def check_has_reconciliation_key(self) -> "RawDenialRow":
+        if not self.guia_numero and not self.numero_carteirinha:
+            raise ValueError(
+                "informe guia_numero ou numero_carteirinha — sem nenhuma das duas chaves não há como "
+                "casar esta linha com um faturamento existente."
+            )
+        return self
 
 
 class DenialRowParseResult(BaseModel):

@@ -246,6 +246,12 @@ _POST_UPGRADE_SQL_FILES = [
     # CONSTRAINT IF EXISTS + ADD — auto-idempotente, roda em todo deploy,
     # sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "035_glosa_ingestion.sql",
+    # Campos novos do Dicionário de Dados (achado da auditoria BI/Dados):
+    # coparticipação/carteirinha/tipo_item/quantidade em Billing,
+    # booked_at/tipo_consulta/motivo_cancelamento/canal em Appointment.
+    # ADD COLUMN IF NOT EXISTS + DROP/ADD CONSTRAINT — auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "036_billing_appointment_extended_fields.sql",
 ]
 
 _ROLES_SQL = """

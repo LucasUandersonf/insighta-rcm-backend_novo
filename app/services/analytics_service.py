@@ -497,6 +497,22 @@ class AnalyticsService:
         risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
         weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
+        # Achado do Dicionário de Dados: campos novos do Template de
+        # Agenda (booking_channel/cancellation_reason) — ver DECISÃO em
+        # smart_insights_engine.py::_booking_channel_no_show_insight /
+        # _cancellation_reason_insight.
+        booking_channel_no_show_counts = await self.analytics_repo.booking_channel_no_show_rate_breakdown(date_from, date_to)
+        cancellation_reason_counts, total_cancelled_count = await self.analytics_repo.cancellation_reason_breakdown(
+            date_from, date_to
+        )
+        # Achado do Dicionário de Dados: campos novos do Template de
+        # Faturamento (item_type/coparticipation_value) — ver DECISÃO em
+        # smart_insights_engine.py::_opme_concentration_insight /
+        # _coparticipation_visibility_insight.
+        item_type_charged_value = await self.analytics_repo.item_type_charged_value_breakdown(date_from, date_to)
+        coparticipation_total, coparticipation_billing_count, total_billing_count = (
+            await self.analytics_repo.coparticipation_summary(date_from, date_to)
+        )
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
@@ -529,6 +545,14 @@ class AnalyticsService:
             professional_denial_rates=professional_denial_rates,
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday or {},
             professional_utilization_rates=professional_utilization_rates or [],
+            booking_channel_no_show_counts=booking_channel_no_show_counts,
+            cancellation_reason_counts=cancellation_reason_counts,
+            total_cancelled_count=total_cancelled_count,
+            total_billed=billing["total_billed"],
+            item_type_charged_value=item_type_charged_value,
+            coparticipation_total=coparticipation_total,
+            coparticipation_billing_count=coparticipation_billing_count,
+            total_billing_count=total_billing_count,
         )
 
     async def get_smart_insights(
