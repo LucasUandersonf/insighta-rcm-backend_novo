@@ -36,8 +36,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
+from app.core.text_utils import normalize_item_type, sanitize_member_card_value
 from app.models.appointment import TIPO_PACIENTE_VALUES, VISIT_TYPE_VALUES
-from app.models.billing import ITEM_TYPE_VALUES
 from app.models.guia import GUIA_TIPOS
 
 
@@ -139,21 +139,6 @@ def _sanitize_cpf_value(v: str) -> str | None:
     return digits or None
 
 
-def _sanitize_member_card_value(v: str) -> str | None:
-    """Achado 1 da Auditoria de Templates e Insights (crítico) — mesmo
-    raciocínio de `_sanitize_cpf_value`: Faturamento e o demonstrativo de
-    Glosa vêm de DOIS sistemas diferentes (ERP da clínica vs. sistema da
-    operadora), quase nunca formatando o mesmo número de carteirinha do
-    mesmo jeito ("0012.345678.90-1" vs "001234567890 1"). Sem isso, a
-    chave de conciliação alternativa por carteirinha (ver DECISÃO em
-    RawDenialRow) comparava string exata e falhava silenciosamente
-    exatamente no cenário que ela foi criada para resolver. Mantém só
-    caracteres alfanuméricos, em caixa alta (operadoras raramente usam
-    letra na carteirinha, mas normalizar caixa também não custa nada)."""
-    cleaned = "".join(ch for ch in v if ch.isalnum()).upper()
-    return cleaned or None
-
-
 class RawBillingRow(BaseModel):
     patient_cpf: str | None = None
     patient_name: str = Field(min_length=1, max_length=255)
@@ -230,7 +215,7 @@ class RawBillingRow(BaseModel):
     def sanitize_member_card(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
-        return _sanitize_member_card_value(v)
+        return sanitize_member_card_value(v)
 
     @field_validator("tabela_procedimento")
     @classmethod
@@ -240,12 +225,12 @@ class RawBillingRow(BaseModel):
     @field_validator("tipo_item")
     @classmethod
     def normalize_tipo_item(cls, v: str | None) -> str | None:
-        if v is None or v == "":
-            return None
-        normalized = _strip_accents_lower(v).replace(" ", "_").replace("-", "_")
-        if normalized not in ITEM_TYPE_VALUES:
-            raise ValueError(f"tipo_item '{v}' não reconhecido — use um de: {', '.join(ITEM_TYPE_VALUES)}")
-        return normalized
+        # Achado 11 da Auditoria (baixo): reaproveita normalize_item_type
+        # (app/core/text_utils.py) — o MESMO vocabulário fechado que o
+        # endpoint manual de faturamento (BillingCreateRequest.item_type,
+        # app/schemas/billing.py) agora também valida. Uma função só,
+        # nunca duas listas de valores que podem divergir com o tempo.
+        return normalize_item_type(v)
 
     @field_validator("tipo_paciente")
     @classmethod
@@ -462,10 +447,10 @@ class RawDenialRow(BaseModel):
         # Faturamento (RawBillingRow.sanitize_member_card), senão os dois
         # lados nunca bateriam por pura diferença de formatação entre os
         # dois documentos de origem (ver DECISÃO em
-        # _sanitize_member_card_value).
+        # sanitize_member_card_value, app/core/text_utils.py).
         if v is None or v == "":
             return None
-        return _sanitize_member_card_value(v)
+        return sanitize_member_card_value(v)
 
     @field_validator("patient_cpf")
     @classmethod
