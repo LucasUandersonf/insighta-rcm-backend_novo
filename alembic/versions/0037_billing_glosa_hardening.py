@@ -1,7 +1,7 @@
 """baseline: correções da Auditoria de Templates e Insights (índice member_card_number)
 
 Revision ID: 0037_billing_glosa_hardening
-Revises: 0036_billing_appointment_extended_fields
+Revises: 0036_billing_appt_ext_fields
 Create Date: 2026-09-11
 
 Mesmo padrão de 0001-0036: DDL revisado manualmente em app/sql/, marcado
@@ -18,7 +18,7 @@ completa em app/sql/037_billing_glosa_hardening.sql.
 from collections.abc import Sequence
 
 revision: str = "0037_billing_glosa_hardening"
-down_revision: str | None = "0036_billing_appointment_extended_fields"
+down_revision: str | None = "0036_billing_appt_ext_fields"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
