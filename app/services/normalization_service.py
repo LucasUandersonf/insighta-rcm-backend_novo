@@ -558,6 +558,25 @@ class NormalizationService:
             return False
 
         billing = billings[0]
+
+        # Achado 6 da Auditoria de Templates e Insights (médio) —
+        # confirmação CRUZADA de identidade, só quando o demonstrativo
+        # traz CPF do beneficiário (ver DECISÃO em
+        # RawDenialRow.patient_cpf). NUNCA bloqueia quando o dado não
+        # existe de um dos dois lados (arquivo sem CPF, ou paciente sem
+        # CPF cadastrado) — só rejeita quando os DOIS lados têm CPF e
+        # eles DIVERGEM, o único cenário onde há sinal real de que a
+        # linha pode estar casando com o paciente errado.
+        if row.patient_cpf:
+            actual_cpf = await self.billing_repo.get_patient_cpf(billing.id)
+            if actual_cpf is not None and actual_cpf != row.patient_cpf:
+                raw_row.status = "rejected"
+                raw_row.validation_errors = {
+                    "reason": "member_card_patient_mismatch",
+                    "raw_value": match_key,
+                }
+                return False
+
         settled_at = (
             datetime.combine(row.settlement_date, time.min, tzinfo=timezone.utc)
             if row.settlement_date is not None

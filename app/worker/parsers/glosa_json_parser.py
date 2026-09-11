@@ -31,6 +31,9 @@ def parse(raw_bytes: bytes) -> list[DenialRowParseResult]:
                 # Chave de conciliação alternativa (achado do Dicionário
                 # de Dados) — ver DECISÃO em RawDenialRow.
                 "numero_carteirinha": item.get("numero_carteirinha") or None,
+                # Achado 6 da Auditoria (médio) — confirmação cruzada de
+                # identidade, opcional (ver DECISÃO em RawDenialRow.patient_cpf).
+                "patient_cpf": item.get("cpf_beneficiario") or None,
                 "procedure_code": item.get("codigo_procedimento") or None,
                 "received_value": item.get("valor_pago"),
                 "settlement_date": item.get("data_pagamento"),  # pydantic converte "aaaa-mm-dd" sozinho

@@ -859,3 +859,147 @@ async def test_smart_insights_has_no_comparativo_when_cohort_is_insufficient(cli
     assert response.status_code == 200
     insights = response.json()["insights"]
     assert not any(i["severity"] == "comparativo" for i in insights)
+
+
+# Achado 5 da Auditoria de Templates e Insights (médio): os 4 insights
+# novos (canal de agendamento, motivo de cancelamento, concentração de
+# OPME, visibilidade de coparticipação) tinham cobertura de UNIDADE
+# excelente (tests/test_smart_insights_engine.py, sem banco), mas
+# NENHUMA cobertura de integração contra Postgres real — diferente do
+# padrão já estabelecido para os demais insights neste mesmo arquivo. Os
+# 4 testes abaixo fecham essa lacuna: provam que a agregação SQL de cada
+# um (GROUP BY, filtro de status, JOIN com Appointment) de fato funciona
+# contra um banco real, não só que a lógica pura do motor está certa.
+
+
+async def _create_appointment_direct(admin_engine, tenant_id, patient_id, scheduled_at, **extra_columns):
+    """Insere um Appointment direto via SQL — usado quando o campo que o
+    teste precisa (booking_channel/cancellation_reason) não é exposto
+    pelo endpoint manual POST /appointments (só a ingestão em massa do
+    Template de Agenda grava esses campos hoje, ver
+    NormalizationService._get_or_create_or_update_appointment_from_agenda).
+    Mesmo padrão já usado em test_agenda_metrics_reports_no_show_rate_per_weekday
+    acima para status='no_show'/'completed'."""
+    columns = ["tenant_id", "patient_id", "scheduled_at", *extra_columns.keys()]
+    placeholders = ", ".join(f":{c}" for c in columns)
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(f"INSERT INTO core.appointments ({', '.join(columns)}) VALUES ({placeholders})"),
+            {"tenant_id": tenant_id, "patient_id": patient_id, "scheduled_at": scheduled_at, **extra_columns},
+        )
+
+
+async def test_smart_insights_flags_booking_channel_no_show_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Canal"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
+
+    # whatsapp: 6 de 10 faltaram (60%); telefone: 1 de 10 (10%) — média
+    # geral 35%, whatsapp fica 25pp acima (crítico, >= 20pp).
+    for _ in range(6):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="no_show", booking_channel="whatsapp"
+        )
+    for _ in range(4):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="completed", booking_channel="whatsapp"
+        )
+    for _ in range(1):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="no_show", booking_channel="telefone"
+        )
+    for _ in range(9):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="completed", booking_channel="telefone"
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert any("falta mais" in t and "whatsapp" in t.lower() for t in titles)
+
+
+async def test_smart_insights_flags_cancellation_reason_concentration_from_real_data(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Cancelamento"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
+
+    # 7 de 10 cancelamentos pelo MESMO motivo (70% -> crítico, >= 60%).
+    for _ in range(7):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="cancelled", cancellation_reason="Sala em manutenção"
+        )
+    for _ in range(3):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, scheduled_at, status="cancelled", cancellation_reason="Paciente remarcou"
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert any("mesmo motivo" in t and "Sala em manutenção" in t for t in titles)
+
+
+async def _create_billing_with_item_type(client, auth_headers, plan_id, *, charged_value, item_type=None, coparticipation_value=None):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Faturamento"}, headers=auth_headers)
+    patient_id = patient_resp.json()["id"]
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers,
+    )
+    appointment_id = appointment_resp.json()["id"]
+    payload = {"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": charged_value}
+    if item_type is not None:
+        payload["item_type"] = item_type
+    if coparticipation_value is not None:
+        payload["coparticipation_value"] = coparticipation_value
+    resp = await client.post("/api/v1/billing", json=payload, headers=auth_headers)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def test_smart_insights_flags_opme_concentration_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # OPME = 3000, procedimento = 7000 -> 30% do total, bem acima do piso
+    # (15%) e do período anterior vazio (delta = 30pp >= 5pp).
+    await _create_billing_with_item_type(client, auth_headers_a, plan_id, charged_value=3000.0, item_type="material_opme")
+    await _create_billing_with_item_type(client, auth_headers_a, plan_id, charged_value=7000.0, item_type="procedimento")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert any("OPME" in t for t in titles)
+
+
+async def test_smart_insights_flags_coparticipation_visibility_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # 5 faturamentos com coparticipação preenchida (amostra mínima) —
+    # período anterior vazio, então é "a primeira vez" (dispara).
+    for _ in range(5):
+        await _create_billing_with_item_type(client, auth_headers_a, plan_id, charged_value=200.0, coparticipation_value=30.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert any("coparticipação" in t.lower() for t in titles)

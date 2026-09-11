@@ -28,6 +28,9 @@ def parse(raw_bytes: bytes) -> list[DenialRowParseResult]:
                 # Chave de conciliação alternativa (achado do Dicionário
                 # de Dados) — ver DECISÃO em RawDenialRow.
                 "numero_carteirinha": _text(pagamento, "numeroCarteirinha") or None,
+                # Achado 6 da Auditoria (médio) — confirmação cruzada de
+                # identidade, opcional (ver DECISÃO em RawDenialRow.patient_cpf).
+                "patient_cpf": _text(pagamento, "cpfBeneficiario") or None,
                 "procedure_code": _text(pagamento, "codigoProcedimento") or None,
                 "received_value": _text(pagamento, "valorPago").replace(",", "."),
                 "settlement_date": _parse_iso_date(settlement_raw) if settlement_raw else None,

@@ -137,6 +137,29 @@ class BillingRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_patient_cpf(self, billing_id: uuid.UUID) -> str | None:
+        """Achado 6 da Auditoria de Templates e Insights (médio) —
+        confirmação CRUZADA de identidade na conciliação de Glosa por
+        carteirinha (ver NormalizationService.normalize_glosa_row): sem
+        um segundo sinal além de convênio+carteirinha, um erro de
+        digitação no demonstrativo que por coincidência bater com a
+        carteirinha de OUTRO paciente do mesmo convênio faria o
+        pagamento ser gravado na conta errada, sem gerar alerta nenhum
+        (a busca encontraria exatamente 1 resultado). Devolve None tanto
+        quando o billing não existe quanto quando o paciente não tem CPF
+        cadastrado — os dois casos são "sem sinal para comparar", nunca
+        "sinal de divergência" (só compara quando os dois lados têm
+        dado)."""
+        stmt = (
+            select(Patient.cpf)
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Billing.id == billing_id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def add(self, billing: Billing) -> Billing:
         self.session.add(billing)
         await self.session.flush()  # garante que billing.id exista antes do commit implícito

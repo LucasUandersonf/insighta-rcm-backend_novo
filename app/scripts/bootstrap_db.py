@@ -252,6 +252,11 @@ _POST_UPGRADE_SQL_FILES = [
     # ADD COLUMN IF NOT EXISTS + DROP/ADD CONSTRAINT — auto-idempotente,
     # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "036_billing_appointment_extended_fields.sql",
+    # Achado 2 da Auditoria de Templates e Insights (alto): índice para a
+    # chave de conciliação alternativa de Glosa por carteirinha. CREATE
+    # INDEX IF NOT EXISTS — auto-idempotente, roda em todo deploy, sem
+    # entrar em _POST_UPGRADE_MARKER_TABLE.
+    "037_billing_glosa_hardening.sql",
 ]
 
 _ROLES_SQL = """

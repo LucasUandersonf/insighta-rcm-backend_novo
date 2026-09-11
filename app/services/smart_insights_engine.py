@@ -95,6 +95,19 @@ _ANNUAL_GOAL_BEHIND_CRITICAL_PCT = 25.0
 # Novos insights de Agenda (achado do Dicionário de Dados: booking_channel/
 # cancellation_reason são campos novos do Template de Agenda) — mesmo
 # critério de amostra mínima nomeada do resto do arquivo.
+#
+# Achado 7 da Auditoria de Templates e Insights (baixo) — TODOS os
+# limiares abaixo (e os de OPME/coparticipação, mais adiante neste
+# arquivo) são constantes fixas "no chute", do mesmo jeito que o resto
+# deste motor já fazia antes desta rodada (ex.: _SPIKE_THRESHOLD_PCT).
+# Não calibramos contra distribuição real porque simplesmente não existe
+# volume de produção suficiente ainda para isso — CALIBRAR sem dado real
+# seria só troca um número arbitrário por outro igualmente arbitrário
+# (e mais perigoso: um que parece "baseado em análise" sem estar). Fica
+# registrado aqui como item de revisão explícito: quando houver volume
+# real de uso destes 2 insights (canal/motivo), revisitar estes 4
+# valores olhando a distribuição de verdade, não arbitrando um novo
+# corte às cegas.
 _MIN_CHANNEL_NO_SHOW_SAMPLE = 5  # amostra mínima tanto do canal quanto do total geral
 _CHANNEL_NO_SHOW_RATE_CRITICAL_PP = 20.0  # pontos percentuais acima da média geral
 _CHANNEL_NO_SHOW_RATE_WARNING_PP = 10.0
@@ -104,7 +117,25 @@ _CANCELLATION_REASON_CONCENTRATION_WARNING_PCT = 40.0
 
 # Novos insights de Faturamento (achado do Dicionário de Dados: item_type/
 # coparticipation_value são campos novos do Template de Faturamento).
-_OPME_CONCENTRATION_WARNING_PCT = 20.0
+#
+# Achado 4 da Auditoria de Templates e Insights (médio) — a versão
+# original destes 2 insights disparava sempre que a condição estática
+# fosse satisfeita, sem comparar contra o período anterior. Uma clínica
+# de ortopedia tem proporção de OPME estruturalmente alta — o card
+# apareceria em TODO carregamento do painel, para sempre, virando ruído
+# (o próprio "encher linguiça" que este arquivo já documenta evitar no
+# topo). A correção usa o MESMO padrão já aplicado ao resto do motor:
+# _financial_hole_insight/_payment_gap_insight/_value_saved_insight só
+# destacam quando o número piora ou melhora, não quando é estruturalmente
+# normal para aquela clínica.
+#
+# Achado 7 da Auditoria (baixo) — os 4 números abaixo (piso de OPME,
+# aumento mínimo em pp, amostra mínima de coparticipação) têm a MESMA
+# limitação já registrada no bloco de canal/motivo, mais acima neste
+# arquivo: constantes fixas, não calibradas contra dado real de
+# produção. Mesmo item de revisão futura, não repetido em detalhe aqui.
+_OPME_CONCENTRATION_MIN_PCT = 15.0  # piso: só relevante se já for uma fatia material do faturamento
+_OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs. o período anterior
 # Amostra mínima de billings COM coparticipação preenchida antes de
 # declarar o dado "confiável o bastante pra virar card" — mesmo
 # raciocínio de amostra mínima do resto do arquivo (1-2 linhas isoladas
@@ -459,7 +490,7 @@ def _value_saved_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
     )
 
 
-def _opme_concentration_insight(current: InsightsPeriodInput) -> Insight | None:
+def _opme_concentration_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
     """
     OPME (Órtese/Prótese/Material Especial — `item_type == "material_opme"`
     em app/models/billing.py, campo novo do Template de Faturamento,
@@ -472,22 +503,36 @@ def _opme_concentration_insight(current: InsightsPeriodInput) -> Insight | None:
     concentração que antes não aparecia em nenhum relatório, com uma
     recomendação de checagem documental genérica e sempre válida para
     esse tipo de item.
+
+    Achado 4 da Auditoria (médio) — em vez de um corte estático (que
+    faria este card aparecer TODO carregamento do painel numa clínica de
+    perfil ortopédico, virando ruído permanente), só alerta quando a
+    concentração SOBE de forma material vs. o período anterior — mesmo
+    raciocínio de "só destaca quando piora" já usado em
+    _financial_hole_insight/_payment_gap_insight/_value_saved_insight. O
+    piso (`_OPME_CONCENTRATION_MIN_PCT`) evita alertar sobre uma alta
+    percentual em cima de uma fatia irrelevante do faturamento.
     """
     opme_value = current.item_type_charged_value.get("material_opme", 0.0)
     if opme_value <= 0 or current.total_billed <= 0:
         return None
     pct = (opme_value / current.total_billed) * 100
-    if pct < _OPME_CONCENTRATION_WARNING_PCT:
+    if pct < _OPME_CONCENTRATION_MIN_PCT:
         return None
+    previous_opme_value = previous.item_type_charged_value.get("material_opme", 0.0)
+    previous_pct = (previous_opme_value / previous.total_billed) * 100 if previous.total_billed > 0 else 0.0
+    if pct - previous_pct < _OPME_CONCENTRATION_INCREASE_PP:
+        return None  # concentração estável (ou caindo) — perfil normal desta clínica, não uma mudança recente
     return Insight(
         severity="warning",
         category="faturamento",
-        title="Boa parte do que você faturou é material especial (OPME)",
+        title="A fatia de material especial (OPME) no seu faturamento subiu",
         message=(
             f"R$ {opme_value:,.2f} ({pct:.0f}% do faturado no período) é órtese, prótese ou material especial "
-            "(OPME) — esse tipo de item costuma exigir autorização prévia do convênio e nota fiscal do "
-            "fornecedor anexada pra não ser recusado. Vale conferir se essa documentação está completa antes "
-            "de enviar essas guias."
+            f"(OPME) — {pct - previous_pct:.0f} pontos percentuais acima do período anterior ({previous_pct:.0f}%). "
+            "Esse tipo de item costuma exigir autorização prévia do convênio e nota fiscal do fornecedor "
+            "anexada pra não ser recusado. Vale conferir se essa documentação está completa antes de enviar "
+            "essas guias."
         ),
         financial_impact=opme_value,
         action_label="Ver faturamentos",
@@ -495,7 +540,7 @@ def _opme_concentration_insight(current: InsightsPeriodInput) -> Insight | None:
     )
 
 
-def _coparticipation_visibility_insight(current: InsightsPeriodInput) -> Insight | None:
+def _coparticipation_visibility_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
     """
     Coparticipação (`Billing.coparticipation_value`, campo novo do
     Template de Faturamento) é a parte que o PRÓPRIO PACIENTE paga,
@@ -505,9 +550,22 @@ def _coparticipation_visibility_insight(current: InsightsPeriodInput) -> Insight
     de Faturamento (que são alertas), este é "positive" — o objetivo é
     só confirmar pro cliente que o dado está chegando e já tem volume
     suficiente pra confiar nele, não sinalizar um problema.
+
+    Achado 4 da Auditoria (médio) — sem gate contra o período anterior,
+    este card apareceria PARA SEMPRE assim que a amostra mínima fosse
+    cruzada uma vez, virando o mesmo ruído permanente do OPME acima. Sem
+    adicionar estado persistido nenhum (não existe uma tabela de "o
+    cliente já viu este aviso"), usa o próprio período anterior como
+    proxy stateless de "primeira vez": só alerta quando o período
+    ANTERIOR ainda não tinha amostra suficiente e o ATUAL passou a ter —
+    ou seja, o momento em que o dado passou a ser confiável. Uma vez que
+    os dois períodos consecutivos já cruzam a amostra mínima, o card para
+    de aparecer sozinho (a condição de "primeira vez" deixa de valer).
     """
     if current.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE or current.coparticipation_total <= 0:
         return None
+    if previous.coparticipation_billing_count >= _MIN_COPARTICIPATION_SAMPLE:
+        return None  # período anterior já tinha amostra confiável — não é mais "a primeira vez", fica calado
     pct_of_billings = (
         (current.coparticipation_billing_count / current.total_billing_count) * 100
         if current.total_billing_count > 0
@@ -1116,8 +1174,8 @@ def generate_insights(
         _professional_outlier_insight(current),
         _booking_channel_no_show_insight(current),
         _cancellation_reason_insight(current),
-        _opme_concentration_insight(current),
-        _coparticipation_visibility_insight(current),
+        _opme_concentration_insight(current, previous),
+        _coparticipation_visibility_insight(current, previous),
     ):
         if maybe_insight is not None:
             insights.append(maybe_insight)

@@ -51,6 +51,13 @@ _GLOSA_HEADER = "convenio;guia_numero;codigo_procedimento;valor_pago;data_pagame
 _GLOSA_HEADER_CARTEIRINHA = (
     "convenio;numero_carteirinha;codigo_procedimento;valor_pago;data_pagamento;codigo_motivo_glosa;descricao_motivo_glosa"
 )
+# Variante com cpf_beneficiario, usada pelos testes de confirmação
+# cruzada de identidade (Achado 6 da Auditoria de Templates e Insights) —
+# ver DECISÃO em RawDenialRow.patient_cpf.
+_GLOSA_HEADER_CARTEIRINHA_COM_CPF = (
+    "convenio;numero_carteirinha;cpf_beneficiario;codigo_procedimento;valor_pago;data_pagamento;"
+    "codigo_motivo_glosa;descricao_motivo_glosa"
+)
 
 
 async def _create_insurance_plan(admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional") -> str:
@@ -96,6 +103,12 @@ async def _upload_glosa(client, auth_headers, *rows: str, filename: str = "glosa
 
 async def _upload_glosa_por_carteirinha(client, auth_headers, *rows: str, filename: str = "glosa.csv"):
     body = (_GLOSA_HEADER_CARTEIRINHA + "\r\n" + "\r\n".join(rows) + "\r\n").encode("utf-8-sig")
+    files = {"file": (filename, io.BytesIO(body), "text/csv")}
+    return await client.post("/api/v1/ingestion/upload", files=files, data={"data_type": "glosa"}, headers=auth_headers)
+
+
+async def _upload_glosa_por_carteirinha_com_cpf(client, auth_headers, *rows: str, filename: str = "glosa.csv"):
+    body = (_GLOSA_HEADER_CARTEIRINHA_COM_CPF + "\r\n" + "\r\n".join(rows) + "\r\n").encode("utf-8-sig")
     files = {"file": (filename, io.BytesIO(body), "text/csv")}
     return await client.post("/api/v1/ingestion/upload", files=files, data={"data_type": "glosa"}, headers=auth_headers)
 
@@ -397,3 +410,85 @@ async def test_glosa_guia_numero_takes_precedence_over_member_card_when_both_pre
 
     billing = await _fetch_one(admin_engine, "SELECT * FROM core.billing WHERE tenant_id = :t", t=tenant_a)
     assert float(billing["received_value"]) == 350.0
+
+
+# Achado 1 da Auditoria de Templates e Insights (crítico): normalização
+# de numero_carteirinha — Faturamento e o demonstrativo de Glosa vêm de
+# sistemas DIFERENTES e quase nunca formatam a carteirinha do mesmo
+# jeito. Sem sanitização, a chave de conciliação alternativa falharia
+# silenciosamente exatamente no cenário em que foi criada para ajudar.
+
+
+async def test_glosa_matches_member_card_despite_different_formatting(client, auth_headers_a, admin_engine, tenant_a):
+    """Faturamento grava a carteirinha com pontuação ("0012.345.678-90");
+    o demonstrativo de Glosa traz a MESMA carteirinha sem pontuação e com
+    espaço interno ("0012 345 678 90"). Antes da normalização, a busca
+    por string exata não encontraria nada."""
+    await _create_insurance_plan(admin_engine, tenant_a)
+    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;0012.345.678-90"
+    fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
+    assert fat.status_code == 201, fat.text
+    assert fat.json()["error_row_count"] == 0
+
+    glosa_row = "Unimed Nacional;0012 345 678 90;10101012;350,00;25/08/2026;;"
+    resp = await _upload_glosa_por_carteirinha(client, auth_headers_a, glosa_row)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["error_row_count"] == 0
+
+    billing = await _fetch_one(admin_engine, "SELECT * FROM core.billing WHERE tenant_id = :t", t=tenant_a)
+    assert float(billing["received_value"]) == 350.0
+    assert billing["member_card_number"] == "001234567890"  # normalizado: só alfanumérico, caixa alta
+
+
+# Achado 6 da Auditoria de Templates e Insights (médio): confirmação
+# cruzada de identidade — só entra em jogo quando o demonstrativo traz
+# CPF do beneficiário.
+
+
+async def test_glosa_member_card_with_matching_cpf_settles_normally(client, auth_headers_a, admin_engine, tenant_a):
+    await _create_insurance_plan(admin_engine, tenant_a)
+    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-1"
+    fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
+    assert fat.status_code == 201, fat.text
+
+    glosa_row = "Unimed Nacional;CART-CPF-1;123.456.789-00;10101012;350,00;25/08/2026;;"
+    resp = await _upload_glosa_por_carteirinha_com_cpf(client, auth_headers_a, glosa_row)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["error_row_count"] == 0
+
+    billing = await _fetch_one(admin_engine, "SELECT * FROM core.billing WHERE tenant_id = :t", t=tenant_a)
+    assert float(billing["received_value"]) == 350.0
+
+
+async def test_glosa_member_card_with_mismatched_cpf_is_rejected(client, auth_headers_a, admin_engine, tenant_a):
+    """A carteirinha bateu, mas o CPF do demonstrativo é de OUTRA pessoa
+    — sinal real de que a linha pode estar casando com o paciente
+    errado (erro de digitação na carteirinha, por exemplo). Rejeita em
+    vez de liquidar às cegas."""
+    await _create_insurance_plan(admin_engine, tenant_a)
+    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-2"
+    fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
+    assert fat.status_code == 201, fat.text
+
+    glosa_row = "Unimed Nacional;CART-CPF-2;999.999.999-99;10101012;350,00;25/08/2026;;"
+    resp = await _upload_glosa_por_carteirinha_com_cpf(client, auth_headers_a, glosa_row)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["error_row_count"] == 1
+
+    billing = await _fetch_one(admin_engine, "SELECT * FROM core.billing WHERE tenant_id = :t", t=tenant_a)
+    assert billing["received_value"] is None  # NÃO foi liquidado
+
+
+async def test_glosa_member_card_without_cpf_in_file_settles_normally(client, auth_headers_a, admin_engine, tenant_a):
+    """Sem CPF nenhum no demonstrativo (arquivo antigo, ou operadora que
+    não envia isso) — a confirmação cruzada é opcional, nunca bloqueia
+    quem simplesmente não manda esse dado."""
+    await _create_insurance_plan(admin_engine, tenant_a)
+    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-3"
+    fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
+    assert fat.status_code == 201, fat.text
+
+    glosa_row = "Unimed Nacional;CART-CPF-3;10101012;350,00;25/08/2026;;"
+    resp = await _upload_glosa_por_carteirinha(client, auth_headers_a, glosa_row)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["error_row_count"] == 0

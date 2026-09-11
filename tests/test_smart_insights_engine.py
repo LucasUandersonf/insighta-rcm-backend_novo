@@ -670,6 +670,64 @@ def test_coparticipation_visibility_absent_without_any_data():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
 
 
+def test_opme_concentration_stable_across_periods_is_not_flagged():
+    """Achado 4 da Auditoria (médio): uma clínica de perfil ortopédico
+    tem concentração de OPME estruturalmente alta TODO período — sem
+    comparar contra o período anterior, isso alertaria pra sempre. Aqui
+    o período anterior já tinha a MESMA concentração (25%): não é uma
+    mudança recente, é o perfil normal desta clínica."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=8_000.0,
+        item_type_charged_value={"material_opme": 2_000.0, "procedimento": 6_000.0},  # 25%
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 2_500.0, "procedimento": 7_500.0},  # também 25%
+    )
+    assert generate_insights(current, previous) == []
+
+
+def test_opme_concentration_flags_only_when_it_increases_from_previous_period():
+    """Mesma clínica ortopédica do teste acima, mas desta vez a
+    concentração de fato SUBIU (25% -> 40%) — isso é uma mudança real,
+    não o perfil estático da clínica, e deve alertar."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=8_000.0,
+        item_type_charged_value={"material_opme": 2_000.0, "procedimento": 6_000.0},  # 25%
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        item_type_charged_value={"material_opme": 4_000.0, "procedimento": 6_000.0},  # 40%
+    )
+    insights = generate_insights(current, previous)
+    opme_titles = [i for i in insights if "OPME" in i.title]
+    assert len(opme_titles) == 1
+    assert "15" in opme_titles[0].message  # +15pp (40% - 25%)
+
+
+def test_coparticipation_visibility_does_not_repeat_once_previous_period_also_has_sample():
+    """Achado 4 da Auditoria (médio): segunda vez consecutiva que a
+    amostra mínima é cruzada — o período ANTERIOR já tinha 8
+    faturamentos com coparticipação (>= amostra mínima 5), então isso já
+    não é 'a primeira vez que o dado passou a existir' — o card não deve
+    reaparecer."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=700.0, coparticipation_billing_count=8,
+        total_billing_count=18,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, coparticipation_total=850.0, coparticipation_billing_count=10,
+        total_billing_count=20,
+    )
+    assert generate_insights(current, previous) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""

@@ -139,6 +139,21 @@ def _sanitize_cpf_value(v: str) -> str | None:
     return digits or None
 
 
+def _sanitize_member_card_value(v: str) -> str | None:
+    """Achado 1 da Auditoria de Templates e Insights (crítico) — mesmo
+    raciocínio de `_sanitize_cpf_value`: Faturamento e o demonstrativo de
+    Glosa vêm de DOIS sistemas diferentes (ERP da clínica vs. sistema da
+    operadora), quase nunca formatando o mesmo número de carteirinha do
+    mesmo jeito ("0012.345678.90-1" vs "001234567890 1"). Sem isso, a
+    chave de conciliação alternativa por carteirinha (ver DECISÃO em
+    RawDenialRow) comparava string exata e falhava silenciosamente
+    exatamente no cenário que ela foi criada para resolver. Mantém só
+    caracteres alfanuméricos, em caixa alta (operadoras raramente usam
+    letra na carteirinha, mas normalizar caixa também não custa nada)."""
+    cleaned = "".join(ch for ch in v if ch.isalnum()).upper()
+    return cleaned or None
+
+
 class RawBillingRow(BaseModel):
     patient_cpf: str | None = None
     patient_name: str = Field(min_length=1, max_length=255)
@@ -210,7 +225,14 @@ class RawBillingRow(BaseModel):
             return None
         return _sanitize_cpf_value(v)
 
-    @field_validator("numero_carteirinha", "tabela_procedimento")
+    @field_validator("numero_carteirinha")
+    @classmethod
+    def sanitize_member_card(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return _sanitize_member_card_value(v)
+
+    @field_validator("tabela_procedimento")
     @classmethod
     def blank_optional_to_none(cls, v: str | None) -> str | None:
         return v or None
@@ -407,6 +429,16 @@ class RawDenialRow(BaseModel):
     guia_numero: str | None = Field(default=None, max_length=50)
     numero_carteirinha: str | None = Field(default=None, max_length=50)
     procedure_code: str | None = None
+    # Achado 6 da Auditoria de Templates e Insights (médio) — OPCIONAL de
+    # propósito: nem todo demonstrativo de operadora traz CPF do
+    # beneficiário. Quando vem preenchido, é usado como confirmação
+    # CRUZADA de identidade contra o paciente do billing encontrado (ver
+    # NormalizationService.normalize_glosa_row) — sem essa checagem, um
+    # erro de digitação na carteirinha que por coincidência bater com a
+    # carteirinha de OUTRO paciente do mesmo convênio faria settle_billing
+    # gravar o pagamento na conta errada, sem gerar alerta nenhum (a busca
+    # encontraria exatamente 1 resultado, "sucesso" aparente).
+    patient_cpf: str | None = None
     # ge=0 (não gt=0, diferente de charged_value): 0 é um valor real e
     # esperado aqui — glosa total, a operadora pagou zero pelo item.
     received_value: float = Field(ge=0, le=500_000)
@@ -418,10 +450,29 @@ class RawDenialRow(BaseModel):
     codigo_motivo: str | None = None
     descricao_motivo: str | None = None
 
-    @field_validator("guia_numero", "numero_carteirinha", "procedure_code", "codigo_motivo", "descricao_motivo")
+    @field_validator("guia_numero", "procedure_code", "codigo_motivo", "descricao_motivo")
     @classmethod
     def blank_to_none(cls, v: str | None) -> str | None:
         return v or None
+
+    @field_validator("numero_carteirinha")
+    @classmethod
+    def sanitize_member_card(cls, v: str | None) -> str | None:
+        # Achado 1 da Auditoria (crítico) — mesma sanitização do lado do
+        # Faturamento (RawBillingRow.sanitize_member_card), senão os dois
+        # lados nunca bateriam por pura diferença de formatação entre os
+        # dois documentos de origem (ver DECISÃO em
+        # _sanitize_member_card_value).
+        if v is None or v == "":
+            return None
+        return _sanitize_member_card_value(v)
+
+    @field_validator("patient_cpf")
+    @classmethod
+    def sanitize_patient_cpf(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return _sanitize_cpf_value(v)
 
     @model_validator(mode="after")
     def check_has_reconciliation_key(self) -> "RawDenialRow":
