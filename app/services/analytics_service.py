@@ -26,6 +26,7 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -96,6 +97,22 @@ _INACTIVE_PATIENT_AFTER_DAYS = 365
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
 # um número fixo e nomeado em vez de mágico espalhado pelo código.
 APPEAL_DEADLINE_ALERT_HORIZON_DAYS = 5
+
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Mesmo motivo de o corte viver AQUI (e não
+# em smart_insights_engine.py, junto dos outros limiares) que
+# APPEAL_DEADLINE_ALERT_HORIZON_DAYS acima: o corte precisa chegar até a
+# query SQL (LoteRepository.stale_open_lotes_summary), não é aplicado
+# sobre um dado já bruto que o motor filtra depois — o motor
+# (_stale_open_lotes_insight) só decide "mostra ou não", já recebe a
+# contagem pronta. 30 dias é um chute razoável (ciclo de fechamento
+# mensal de lote é comum no mercado — mesmos 3 ERPs pesquisados pra
+# Guia/Lote), não calibrado com dado real — mesma limitação já
+# documentada no Achado 7 da Auditoria para os demais limiares deste
+# motor: revisitar quando houver volume real de uso.
+_STALE_LOTE_AFTER_DAYS = 30
 
 # "Lista vermelha" de pacientes (Painel → Agenda) — mesmo raciocínio de
 # amostra mínima de no_show_risk_engine.MIN_SPECIFIC_SAMPLES: exige pelo
@@ -232,6 +249,7 @@ class AnalyticsService:
         appeal_repo: DenialAppealRepository,
         tenant_repo: TenantRepository,
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
+        lote_repo: LoteRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -240,6 +258,7 @@ class AnalyticsService:
         self.tenant_repo = tenant_repo
         self.availability_repo = availability_repo
         self.health_score_snapshot_repo = health_score_snapshot_repo
+        self.lote_repo = lote_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -528,6 +547,7 @@ class AnalyticsService:
         upcoming_risk_count_by_weekday: dict[int, int] | None = None,
         professional_utilization_rates: list[tuple[str, str, float]] | None = None,
         include_agenda_text_breakdowns: bool = True,
+        stale_open_lotes: tuple[int, int | None] = (0, None),
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -542,7 +562,12 @@ class AnalyticsService:
         # estado "AGORA" (prazo vencendo hoje), não algo que faça sentido
         # perguntar de novo para o "período anterior" — comparar contra
         # si mesmo sempre daria delta zero. Só o período ATUAL recebe o
-        # valor real; o anterior fica no default 0 do dataclass.
+        # valor real; o anterior fica no default 0 do dataclass. Mesmo
+        # raciocínio para stale_open_lotes (lotes abertos há muito tempo,
+        # ver LoteRepository.stale_open_lotes_summary/
+        # _stale_open_lotes_insight) — "O que resta em aberto" da
+        # Auditoria de Templates e Insights, próxima peça do mesmo padrão
+        # que Guia/coparticipação já fecharam.
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         financial_hole = await self.analytics_repo.financial_hole_total(date_from, date_to)
         payment_gap = await self.analytics_repo.payment_gap_total(date_from, date_to)
@@ -629,6 +654,8 @@ class AnalyticsService:
             coparticipation_total=coparticipation_total,
             coparticipation_billing_count=coparticipation_billing_count,
             total_billing_count=total_billing_count,
+            stale_open_lotes_count=stale_open_lotes[0],
+            oldest_open_lote_age_days=stale_open_lotes[1],
         )
 
     async def get_smart_insights(
@@ -642,6 +669,12 @@ class AnalyticsService:
         previous = _previous_period(date_from, date_to)
         appeals_due_soon = await self.appeal_repo.count_due_within(
             as_of=date.today(), horizon_days=APPEAL_DEADLINE_ALERT_HORIZON_DAYS
+        )
+        # "O que resta em aberto" da Auditoria de Templates e Insights:
+        # estado "AGORA" (mesmo raciocínio de appeals_due_soon acima) —
+        # ver LoteRepository.stale_open_lotes_summary/_STALE_LOTE_AFTER_DAYS.
+        stale_open_lotes = await self.lote_repo.stale_open_lotes_summary(
+            as_of=datetime.now(timezone.utc), stale_after_days=_STALE_LOTE_AFTER_DAYS
         )
 
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
@@ -692,6 +725,7 @@ class AnalyticsService:
             annual_goal_context=annual_goal_context,
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday,
             professional_utilization_rates=professional_utilization_rates,
+            stale_open_lotes=stale_open_lotes,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False

@@ -1003,3 +1003,78 @@ async def test_smart_insights_flags_coparticipation_visibility_from_real_data(cl
     assert response.status_code == 200
     titles = [i["title"] for i in response.json()["insights"]]
     assert any("coparticipação" in t.lower() for t in titles)
+
+
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Mesmo espírito dos 4 testes acima (Achado
+# 5): prova que a agregação SQL (LoteRepository.stale_open_lotes_summary)
+# de fato funciona contra um banco real, não só que o motor puro está
+# certo (já coberto em test_smart_insights_engine.py).
+
+
+async def _create_lote_direct(admin_engine, tenant_id, plan_id, *, created_at, status="aberto", tipo="consulta") -> str:
+    """Insere um Lote direto via SQL, com created_at controlado — mesmo
+    motivo de _create_appointment_direct acima: o endpoint manual
+    (POST /lotes) sempre grava created_at = now() do banco (server_default,
+    ver app/models/lote.py), sem jeito de simular "criado há 45 dias"
+    através da API."""
+    lote_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.lotes (id, tenant_id, insurance_plan_id, tipo, status, created_at) "
+                "VALUES (:id, :t, :plan, :tipo, :status, :created_at)"
+            ),
+            {"id": lote_id, "t": tenant_id, "plan": plan_id, "tipo": tipo, "status": status, "created_at": created_at},
+        )
+    return lote_id
+
+
+async def test_smart_insights_flags_stale_open_lotes_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    now = datetime.now(timezone.utc)
+
+    # 2 lotes abertos há 45 dias (> corte de 30) — devem contar; o de 50
+    # dias é o mais antigo (idade reportada no insight).
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=45))
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=50))
+    # Lote aberto há só 5 dias — dentro do corte, não deveria contar.
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=5))
+    # Lote FECHADO há 90 dias — status != 'aberto', nunca deveria contar
+    # (um lote fechado não está "parado", já virou fatura ou está pronto
+    # pra virar).
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=90), status="fechado")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    lote_insight = next((i for i in insights if "lote" in i["title"].lower()), None)
+    assert lote_insight is not None
+    assert lote_insight["severity"] == "warning"
+    assert lote_insight["category"] == "faturamento"
+    assert "2 lotes" in lote_insight["message"]
+    assert "50 dias" in lote_insight["message"]
+    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
+    assert lote_insight["action_href"] is None
+
+
+async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    now = datetime.now(timezone.utc)
+    # Aberto há só 5 dias (dentro do corte) e um fechado há bastante
+    # tempo — nenhum dos dois deveria disparar o insight.
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=5))
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=90), status="fechado")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert not any("lote" in t.lower() for t in titles)

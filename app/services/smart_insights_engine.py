@@ -142,6 +142,18 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Sem constante de limiar de dias AQUI, de
+# propósito — diferente do resto deste arquivo, o corte "há quantos dias
+# conta como parado" precisa chegar até a query SQL (mesmo motivo de
+# APPEAL_DEADLINE_ALERT_HORIZON_DAYS viver em analytics_service.py, não
+# aqui): quem decide isso é AnalyticsService._STALE_LOTE_AFTER_DAYS, que
+# alimenta LoteRepository.stale_open_lotes_summary já filtrado — este
+# motor só recebe a contagem pronta (ver _stale_open_lotes_insight
+# abaixo) e decide "mostra ou não", nunca reaplica o corte.
+
 
 def _comparative_phrase(ratio: float) -> str:
     """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
@@ -274,6 +286,15 @@ class InsightsPeriodInput:
     coparticipation_total: float = 0.0
     coparticipation_billing_count: int = 0
     total_billing_count: int = 0
+    # Lotes de faturamento (core.lotes) com status='aberto' há mais de
+    # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
+    # — ver AnalyticsService._period_insights_input e
+    # LoteRepository.stale_open_lotes_summary. Estado "AGORA", mesmo
+    # raciocínio de appeals_due_soon_count: só o período atual recebe o
+    # valor real, o anterior fica no default (não existe "lotes abertos
+    # do período anterior" — comparar contra si mesmo não faz sentido).
+    stale_open_lotes_count: int = 0
+    oldest_open_lote_age_days: int | None = None
 
 
 @dataclass
@@ -1016,6 +1037,46 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     )
 
 
+def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    "O que resta em aberto" da Auditoria de Templates e Insights: peça
+    natural do mesmo padrão que Guia/coparticipação já fecharam — dado
+    real já modelado (core.lotes.status/closed_at, Fase 2), só faltava
+    um insight consumindo.
+
+    Mesmo raciocínio de _appeals_due_soon_insight (alerta de estado
+    PRESENTE, não comparação com período anterior — um lote aberto há
+    muito tempo não fica "menos preocupante" por não ter mudado desde
+    ontem), mas 'warning', não 'critical': diferente de um recurso de
+    glosa vencendo, não há prazo LEGAL correndo aqui — o risco é
+    operacional (guias dentro do lote ficam paradas, sem virar fatura,
+    atrasando o recebimento), não uma perda irreversível de direito.
+
+    Sem botão de ação, DE PROPÓSITO: ainda não existe nenhuma tela de
+    Lotes no frontend (só o endpoint /lotes, hoje consumido só por
+    FaturaService.create_from_lotes internamente) — "nunca inventa
+    destino" (ver DECISÃO na dataclass Insight acima).
+    """
+    if current.stale_open_lotes_count <= 0:
+        return None
+    plural = "s" if current.stale_open_lotes_count != 1 else ""
+    age_note = (
+        f" O mais antigo está aberto há {current.oldest_open_lote_age_days} dias."
+        if current.oldest_open_lote_age_days is not None
+        else ""
+    )
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem lote de faturamento aberto há muito tempo",
+        message=(
+            f"Tem {current.stale_open_lotes_count} lote{plural} de faturamento aberto há muito tempo sem "
+            f"fechar.{age_note} As guias dentro desses lotes ficam paradas — não avançam para fatura enquanto "
+            "o lote não é fechado."
+        ),
+    )
+
+
 # Radar de Profissional Fora do Padrão — limiares de v1, mesmo espírito
 # de "chute razoável" documentado em no_show_risk_engine.py: exige a
 # taxa do profissional ser pelo menos o DOBRO da média da própria
@@ -1164,6 +1225,7 @@ def generate_insights(
         _weekday_drop_insight(current, previous),
         _weekday_no_show_rate_insight(current),
         _appeals_due_soon_insight(current),
+        _stale_open_lotes_insight(current),
         _denial_risk_pct_insight(current),
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
