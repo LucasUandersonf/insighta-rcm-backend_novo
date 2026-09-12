@@ -33,6 +33,7 @@ from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
     DenialRiskDistributionItem,
@@ -1039,3 +1040,20 @@ class AnalyticsService:
             limit=limit,
             offset=offset,
         )
+
+    async def get_agenda_revenue_forecast(self, date_from: date, date_to: date) -> AgendaRevenueForecastResponse:
+        """
+        Previsão de receita futura da agenda — pedido direto do usuário:
+        "a receita da agenda... conseguimos tirar metade do faturamento
+        futuro da clínica". Ver DECISÃO completa em
+        AnalyticsRepository.agenda_revenue_forecast: 3 baldes separados
+        (risco conhecido/ajustado, sem histórico ainda/sem ajuste, sem
+        preço de contrato/fora da conta), nunca um único número que
+        esconderia a incerteza real do dado.
+
+        Diferente de todo o resto deste service (que olha para trás,
+        `date_from`/`date_to` como janela PASSADA), aqui o período é
+        FUTURO — ver `_default_future_period` no endpoint.
+        """
+        data = await self.analytics_repo.agenda_revenue_forecast(date_from, date_to)
+        return AgendaRevenueForecastResponse(period_start=date_from, period_end=date_to, **data)

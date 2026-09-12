@@ -27,6 +27,7 @@ from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    AgendaRevenueForecastResponse,
     ContractUtilizationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
@@ -54,6 +55,20 @@ def _default_period(date_from: date | None, date_to: date | None) -> tuple[date,
     dos cartões de variação percentual)."""
     resolved_end = date_to or date.today()
     resolved_start = date_from or (resolved_end - timedelta(days=6))
+    if resolved_start > resolved_end:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_from deve ser <= date_to.")
+    return resolved_start, resolved_end
+
+
+def _default_future_period(date_from: date | None, date_to: date | None) -> tuple[date, date]:
+    """Sem filtro explícito -> hoje + 13 dias (próximas 2 semanas de
+    agenda) — o INVERSO de `_default_period` acima. Todo o resto de
+    /analytics olha pra trás (janela fechada terminando "hoje"); a
+    previsão de receita da agenda (ver AnalyticsService.
+    get_agenda_revenue_forecast) precisa olhar pra FRENTE, sobre
+    agendamentos ainda não realizados (status 'scheduled')."""
+    resolved_start = date_from or date.today()
+    resolved_end = date_to or (resolved_start + timedelta(days=13))
     if resolved_start > resolved_end:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_from deve ser <= date_to.")
     return resolved_start, resolved_end
@@ -283,3 +298,20 @@ async def get_denial_risk_distribution(
 ) -> DenialRiskDistributionResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_denial_risk_distribution(start, end)
+
+
+@router.get("/agenda-revenue-forecast", response_model=AgendaRevenueForecastResponse)
+async def get_agenda_revenue_forecast(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AgendaRevenueForecastResponse:
+    """
+    Previsão de receita futura da agenda (Sala de Comando) — pedido
+    direto do usuário: "a receita da agenda... conseguimos tirar metade
+    do faturamento futuro da clínica". Período FUTURO por padrão (ver
+    `_default_future_period`), diferente de todo o resto deste arquivo.
+    """
+    start, end = _default_future_period(date_from, date_to)
+    return await _build_service(db).get_agenda_revenue_forecast(start, end)

@@ -1284,3 +1284,132 @@ async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_
     assert response.status_code == 200
     titles = [i["title"] for i in response.json()["insights"]]
     assert not any("lote" in t.lower() for t in titles)
+
+
+# Previsão de receita futura da agenda — pedido direto do usuário: "a
+# receita da agenda... conseguimos tirar metade do faturamento futuro da
+# clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.
+
+
+async def _create_scheduled_appointment(
+    client, admin_engine, tenant_id, headers, plan_id, *, procedure_code=None, no_show_risk_score=None, days_ahead=1
+):
+    """Cria um agendamento FUTURO (status 'scheduled', o default da API)
+    via HTTP e, opcionalmente, sobrescreve no_show_risk_score via SQL
+    direto — a API sempre calcula esse campo sozinha a partir do
+    histórico do paciente (ver no_show_risk_engine.py), sem jeito de
+    "forçar" um valor específico por parâmetro de request. Um paciente
+    novo (sem histórico algum) já nasce com score None (indeterminado)
+    calculado pelo próprio motor, sem precisar de nenhum override — só
+    sobrescrevemos quando o teste precisa de um valor CONHECIDO
+    específico (mesmo padrão de `_create_settled_billing_direct`)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Previsão"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat(),
+            **({"procedure_code": procedure_code} if procedure_code else {}),
+        },
+        headers=headers,
+    )
+    assert appointment_resp.status_code == 201
+    appointment_id = appointment_resp.json()["id"]
+    if no_show_risk_score is not None:
+        async with admin_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE core.appointments SET no_show_risk_score = :score WHERE id = :id"),
+                {"score": no_show_risk_score, "id": appointment_id},
+            )
+    return appointment_id
+
+
+def _forecast_window() -> tuple[str, str]:
+    """Janela [hoje, hoje+5] — cobre os agendamentos de amanhã que
+    `_create_scheduled_appointment` cria por padrão (days_ahead=1)."""
+    today = date.today()
+    return today.isoformat(), (today + timedelta(days=5)).isoformat()
+
+
+async def test_agenda_revenue_forecast_splits_known_risk_from_unrated_and_unpriced(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # 1) Preço encontrado + risco calculado (20% de chance de falta) ->
+    # known_risk_value=200, expected_value=200*(1-0.20)=160.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012", no_show_risk_score=0.20
+    )
+    # 2) Preço encontrado, mas paciente novo -> score None (indeterminado
+    # de verdade, calculado pelo próprio motor, sem override) ->
+    # unrated_value=200, NUNCA entra em expected_value.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012"
+    )
+    # 3) Sem contrato vigente para este procedimento -> unpriced_count,
+    # fora de qualquer soma de valor.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="99999999"
+    )
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 3
+    assert body["total_scheduled_value"] == 400.0  # só os 2 com preço encontrado
+    assert body["known_risk_count"] == 1
+    assert body["known_risk_value"] == 200.0
+    assert body["expected_value"] == 160.0  # 200 * (1 - 0.20)
+    assert body["unrated_count"] == 1
+    assert body["unrated_value"] == 200.0
+    assert body["unpriced_count"] == 1
+
+
+async def test_agenda_revenue_forecast_ignores_appointments_no_longer_scheduled(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Achado do usuário: a previsão é sobre o que AINDA vai acontecer —
+    um agendamento já concluído (ou cancelado) não é mais "receita
+    futura da agenda", já virou (ou deixou de ser) faturamento real."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=300.0)
+
+    appointment_id = await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012", no_show_risk_score=0.10
+    )
+    async with admin_engine.begin() as conn:
+        await conn.execute(text("UPDATE core.appointments SET status = 'completed' WHERE id = :id"), {"id": appointment_id})
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 0
+    assert body["total_scheduled_value"] == 0.0
+
+
+async def test_agenda_revenue_forecast_isolates_between_tenants(
+    client, admin_engine, tenant_a, auth_headers_a, auth_headers_b
+):
+    plan_a = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_a, procedure_code="10101012", agreed_value=500.0)
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_a, procedure_code="10101012", no_show_risk_score=0.0
+    )
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_b
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 0
+    assert body["total_scheduled_value"] == 0.0

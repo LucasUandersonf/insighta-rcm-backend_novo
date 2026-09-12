@@ -73,6 +73,37 @@ class PaymentLagByPlanResponse(BaseModel):
     items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
 
 
+class AgendaRevenueForecastResponse(BaseModel):
+    """GET /api/v1/analytics/agenda-revenue-forecast — Sala de Comando.
+    Previsão de receita a partir dos agendamentos FUTUROS (status
+    'scheduled') no período — diferente do resto de /analytics, que olha
+    pra trás por padrão. Ver DECISÃO completa em
+    AnalyticsRepository.agenda_revenue_forecast: nunca finge confiança
+    que o dado não tem — 3 baldes separados, nunca um "valor esperado"
+    único que esconde a incerteza.
+
+    `total_scheduled_value` é bruto (soma de agreed_price de todo
+    agendamento com preço de contrato encontrado). `expected_value` é
+    só sobre o subset com no_show_risk_score CALCULADO
+    (`known_risk_count`/`known_risk_value`), ajustado por (1 - risco de
+    falta). `unrated_value`/`unrated_count` são agendamentos com preço
+    encontrado mas paciente "indeterminado" (sem histórico ainda) — de
+    propósito FORA do ajuste de risco. `unpriced_count` é o que nem
+    entra em `total_scheduled_value` (sem convênio/procedimento
+    definido ainda, ou sem contrato vigente)."""
+
+    period_start: date
+    period_end: date
+    total_scheduled_count: int
+    total_scheduled_value: float
+    known_risk_count: int
+    known_risk_value: float
+    expected_value: float
+    unrated_count: int
+    unrated_value: float
+    unpriced_count: int
+
+
 class ProfessionalCapacityMetric(BaseModel):
     professional_id: UUID
     full_name: str

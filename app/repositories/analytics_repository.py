@@ -565,6 +565,78 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"as_of": as_of, "levels": ["medio", "alto"]})
         return {int(weekday): int(count) for weekday, count in result.all()}
 
+    async def agenda_revenue_forecast(self, date_from: date, date_to: date) -> dict:
+        """
+        Previsão de receita futura da agenda — achado do usuário direto:
+        "a receita da agenda... conseguimos tirar metade do faturamento
+        futuro da clínica". Olha agendamentos FUTUROS (status
+        'scheduled', diferente do resto deste arquivo que olha o
+        passado) e projeta quanto a clínica deve faturar, cruzando
+        `ContractItem.agreed_price` (mesmo LATERAL JOIN de
+        `financial_hole_total`) com `Appointment.no_show_risk_score`
+        (já calculado por `no_show_risk_engine.py` na criação do
+        agendamento — nenhum dado novo).
+
+        DECISÃO — nunca finge confiança que o dado não tem: 3 baldes,
+        nunca um número só
+        -------------------------------------------------------------
+        Um agendamento cai em exatamente um destes:
+          1) `agreed_price` encontrado E `no_show_risk_score` calculado
+             -> entra em `known_risk_value` (bruto) e `expected_value`
+             (ajustado por 1 - risco de falta).
+          2) `agreed_price` encontrado, mas `no_show_risk_score` NULL
+             (paciente "indeterminado" — sem histórico, ver
+             no_show_risk_engine.py) -> `unrated_value`, DE FORA do
+             ajuste de risco (mesmo princípio de "indeterminado nunca
+             vira baixo risco por omissão" do motor de no-show).
+          3) `agreed_price` não encontrado (sem convênio/procedimento
+             definido ainda, ou sem contrato vigente) -> `unpriced_count`,
+             fora de qualquer estimativa de valor.
+        Somar os 3 num único "valor esperado" esconderia exatamente a
+        incerteza que o resto do produto já se recusa a esconder.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT
+                COUNT(*) AS total_scheduled_count,
+                COALESCE(SUM(ci.agreed_price), 0) AS total_scheduled_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NOT NULL) AS known_risk_count,
+                COALESCE(SUM(ci.agreed_price) FILTER (WHERE a.no_show_risk_score IS NOT NULL), 0) AS known_risk_value,
+                COALESCE(SUM(ci.agreed_price * (1 - a.no_show_risk_score)) FILTER (WHERE a.no_show_risk_score IS NOT NULL), 0) AS expected_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NULL) AS unrated_count,
+                COALESCE(SUM(ci.agreed_price) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NULL), 0) AS unrated_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NULL) AS unpriced_count
+            FROM core.appointments a
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = a.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= a.scheduled_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= a.scheduled_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :start AND a.scheduled_at <= :end
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        row = result.one()
+        return {
+            "total_scheduled_count": int(row.total_scheduled_count),
+            "total_scheduled_value": float(row.total_scheduled_value),
+            "known_risk_count": int(row.known_risk_count),
+            "known_risk_value": float(row.known_risk_value),
+            "expected_value": float(row.expected_value),
+            "unrated_count": int(row.unrated_count),
+            "unrated_value": float(row.unrated_value),
+            "unpriced_count": int(row.unpriced_count),
+        }
+
     async def avg_charged_value(self, date_from: date, date_to: date) -> float:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(
