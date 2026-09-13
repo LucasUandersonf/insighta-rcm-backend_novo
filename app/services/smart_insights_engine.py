@@ -204,6 +204,17 @@ _REVENUE_CONCENTRATION_CRITICAL_PCT = 80.0
 _MIN_MARKETING_SPEND_FOR_INSIGHT = 200.0
 _MARKETING_ROI_CRITICAL_RATIO = -0.50  # receita atribuída menor que metade do gasto
 
+# Raio-X da Receita, frente "Prevendo movimentos" — sazonalidade de
+# agenda (comparação ANO contra ano, não semana contra semana como
+# _weekday_drop_insight). Amostra mínima no ano passado: uma clínica com
+# menos de 1 ano de uso (ou um período do ano passado com poucochíssimo
+# volume) tornaria qualquer variação percentual ruído, não um padrão
+# sazonal real. 20%/35% são o mesmo "chute razoável" documentado no
+# resto do arquivo.
+_YOY_MIN_LAST_YEAR_SAMPLE = 10
+_YOY_DROP_WARNING_PCT = 20.0
+_YOY_DROP_CRITICAL_PCT = 35.0
+
 
 def _comparative_phrase(ratio: float) -> str:
     """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
@@ -393,6 +404,13 @@ class InsightsPeriodInput:
     # período atual recebe o valor real.
     payment_gap_without_appeal_count: int = 0
     payment_gap_without_appeal_value: float = 0.0
+    # Raio-X da Receita, frente "Prevendo movimentos" — total de
+    # agendamentos no MESMO período, um ano antes (ver
+    # AnalyticsService._year_ago_period e _yoy_seasonality_insight). Só
+    # existe em `current` (comparar "ano passado" do período ANTERIOR
+    # não faz sentido — o insight já compara current contra isso). None
+    # = não calculado (chamador antigo/teste que não passa esse dado).
+    yoy_last_year_appointment_count: int | None = None
 
 
 @dataclass
@@ -884,6 +902,50 @@ def _weekday_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriod
         # gráfico de volume na mesma seção.
         action_label=f"Ver quem costumava vir {label}",
         action_href=f"#weekday:{weekday}",
+    )
+
+
+def _yoy_seasonality_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos": `_weekday_drop_insight`
+    já compara contra a SEMANA anterior, mas uma queda sazonal normal
+    (ex: dezembro sempre esfria, ou uma especialidade sempre cai no
+    início do ano) dispararia esse insight TODO ano na mesma época,
+    mesmo sendo o padrão normal da própria clínica — ruído recorrente,
+    não um alerta de verdade. Comparar contra o MESMO período do ANO
+    passado responde uma pergunta diferente: "isso é pior do que era
+    nessa mesma época, historicamente?" — se sim, é sinal de queda real
+    (perda de pacientes, concorrência, problema pontual), não só o ciclo
+    natural do negócio.
+
+    Só alerta em QUEDA (mesmo raciocínio do resto do motor: crescimento
+    não é alarme, já aparece como número positivo em qualquer relatório).
+    """
+    if (
+        current.yoy_last_year_appointment_count is None
+        or current.yoy_last_year_appointment_count < _YOY_MIN_LAST_YEAR_SAMPLE
+    ):
+        return None
+    current_total = sum(current.weekday_appointment_counts.values())
+    drop_pct = (
+        (current.yoy_last_year_appointment_count - current_total) / current.yoy_last_year_appointment_count
+    ) * 100
+    if drop_pct < _YOY_DROP_WARNING_PCT:
+        return None
+    severity = "critical" if drop_pct >= _YOY_DROP_CRITICAL_PCT else "warning"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title="Sua agenda está bem mais fraca do que no mesmo período do ano passado",
+        message=(
+            f"Nesses mesmos dias, no ano passado, sua clínica teve {current.yoy_last_year_appointment_count} "
+            f"consulta(s) marcada(s) — agora são {current_total}, uma queda de {drop_pct:.0f}%. Isso já é "
+            "mais do que uma variação normal de semana a semana: vale entender se foi sazonalidade do seu "
+            "setor, perda de pacientes pra concorrência, ou algo pontual (férias de um profissional, por "
+            "exemplo)."
+        ),
+        action_label="Ver resumo de agenda",
+        action_href="#agenda-resumo",
     )
 
 
@@ -1536,6 +1598,7 @@ def generate_insights(
 
     for maybe_insight in (
         _weekday_drop_insight(current, previous),
+        _yoy_seasonality_insight(current),
         _weekday_no_show_rate_insight(current),
         _appeals_due_soon_insight(current),
         _payment_gap_without_appeal_insight(current),

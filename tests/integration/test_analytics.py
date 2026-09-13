@@ -1535,6 +1535,59 @@ async def test_smart_insights_ignores_payment_gap_once_an_appeal_is_open(client,
     assert not any("ninguém contestou" in t.lower() for t in titles)
 
 
+# Raio-X da Receita — sazonalidade de agenda, ano contra ano (ver
+# AnalyticsService._year_ago_period e smart_insights_engine.py::
+# _yoy_seasonality_insight). Usa `_create_appointment_direct`, definido
+# mais abaixo neste arquivo (nome resolvido em tempo de execução do
+# teste, não importa a ordem textual no módulo).
+
+
+async def test_smart_insights_flags_yoy_seasonality_drop_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Sazonalidade"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    date_from, date_to = _window()
+    current_scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
+    year_ago_scheduled_at = current_scheduled_at - timedelta(days=364)
+
+    # 4 consultas nesta janela, 20 na mesma janela do ano passado -> queda
+    # de 80%, bem acima do piso crítico (35%) e da amostra mínima (10).
+    for _ in range(4):
+        await _create_appointment_direct(admin_engine, tenant_a, patient_id, current_scheduled_at)
+    for _ in range(20):
+        await _create_appointment_direct(admin_engine, tenant_a, patient_id, year_ago_scheduled_at)
+
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    yoy_insight = next((i for i in insights if "mesmo período do ano passado" in i["title"].lower()), None)
+    assert yoy_insight is not None
+    assert yoy_insight["severity"] == "critical"
+    assert "20 consulta" in yoy_insight["message"]
+
+
+async def test_smart_insights_absent_when_last_year_sample_is_too_small(client, auth_headers_a, admin_engine, tenant_a):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Clínica Nova"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    date_from, date_to = _window()
+    current_scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
+    year_ago_scheduled_at = current_scheduled_at - timedelta(days=364)
+
+    # Só 2 consultas no mesmo período do ano passado (< amostra mínima
+    # de 10) — qualquer variação percentual aqui seria ruído.
+    await _create_appointment_direct(admin_engine, tenant_a, patient_id, current_scheduled_at)
+    for _ in range(2):
+        await _create_appointment_direct(admin_engine, tenant_a, patient_id, year_ago_scheduled_at)
+
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert not any("mesmo período do ano passado" in t.lower() for t in titles)
+
+
 # Previsão de receita futura da agenda — pedido direto do usuário: "a
 # receita da agenda... conseguimos tirar metade do faturamento futuro da
 # clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.

@@ -1437,3 +1437,63 @@ def test_payment_gap_without_appeal_insight_is_current_period_state_never_from_p
     )
     insights = generate_insights(_EMPTY_PERIOD, previous)
     assert [i for i in insights if "ninguém contestou" in i.title.lower()] == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — sazonalidade de agenda (ano contra ano)
+# ---------------------------------------------------------------------
+
+def test_yoy_seasonality_insight_fires_above_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 40}, yoy_last_year_appointment_count=60,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mesmo período do ano passado" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "agenda"
+    assert "60 consulta" in titles[0].message
+    assert "agora são 40" in titles[0].message
+    assert "33%" in titles[0].message
+
+
+def test_yoy_seasonality_insight_is_critical_above_critical_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 30}, yoy_last_year_appointment_count=100,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mesmo período do ano passado" in i.title.lower()]
+    assert titles[0].severity == "critical"
+
+
+def test_yoy_seasonality_insight_absent_below_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 90}, yoy_last_year_appointment_count=100,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_when_current_grew_vs_last_year():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 150}, yoy_last_year_appointment_count=100,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_with_small_last_year_sample():
+    """Amostra pequena no ano passado (clínica nova, ou período de baixo
+    volume histórico) — qualquer variação percentual seria ruído, mesmo
+    raciocínio de amostra mínima do resto do arquivo."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 1}, yoy_last_year_appointment_count=5,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_without_last_year_data():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []

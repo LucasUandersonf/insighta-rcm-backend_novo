@@ -174,6 +174,18 @@ def _previous_period(date_from: date, date_to: date) -> _PeriodRange:
     return _PeriodRange(previous_start, previous_end)
 
 
+def _year_ago_period(date_from: date, date_to: date) -> _PeriodRange:
+    """Raio-X da Receita, frente "Prevendo movimentos" — mesma janela,
+    exatamente 364 dias antes (52 semanas, não 1 ano de calendário).
+    Preserva o dia da semana de cada data (uma segunda-feira continua
+    caindo numa segunda-feira um ano antes) — importa numa clínica com
+    padrão semanal forte (ver _weekday_drop_insight): subtrair 1 ano de
+    calendário (365 ou 366 dias) deslocaria o dia da semana em 1-2 dias,
+    comparando a segunda-feira de hoje com uma terça-feira do ano
+    passado, uma comparação sutilmente errada."""
+    return _PeriodRange(date_from - timedelta(days=364), date_to - timedelta(days=364))
+
+
 def _delta_pct(current: float, previous: float) -> float | None:
     # Mesma lógica de compute_roi_pct em report_calculations.py: variação
     # percentual contra base ZERO é indefinida, não "infinita" nem "0%" —
@@ -619,6 +631,7 @@ class AnalyticsService:
         stale_open_lotes: tuple[int, int | None] = (0, None),
         expiring_contracts: tuple[int, str | None, int | None] = (0, None, None),
         payment_gap_without_appeal: tuple[int, float] = (0, 0.0),
+        yoy_last_year_appointment_count: int | None = None,
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -758,6 +771,7 @@ class AnalyticsService:
             marketing_revenue_attributed=marketing_revenue_attributed,
             payment_gap_without_appeal_count=payment_gap_without_appeal[0],
             payment_gap_without_appeal_value=payment_gap_without_appeal[1],
+            yoy_last_year_appointment_count=yoy_last_year_appointment_count,
         )
 
     async def get_smart_insights(
@@ -799,6 +813,16 @@ class AnalyticsService:
         # mesmo raciocínio de appeals_due_soon acima — ver
         # AnalyticsRepository.payment_gap_without_appeal_summary.
         payment_gap_without_appeal = await self.analytics_repo.payment_gap_without_appeal_summary()
+
+        # Raio-X da Receita, frente "Prevendo movimentos": mesmo período,
+        # um ano antes — ver _year_ago_period e
+        # smart_insights_engine.py::_yoy_seasonality_insight. Reaproveita
+        # appointment_weekday_histogram (mesma query de weekday_histogram
+        # do período atual/anterior), só somando os 7 baldes — o insight
+        # só precisa do TOTAL, não da distribuição por dia.
+        year_ago = _year_ago_period(date_from, date_to)
+        year_ago_histogram = await self.analytics_repo.appointment_weekday_histogram(year_ago.start, year_ago.end)
+        yoy_last_year_appointment_count = sum(year_ago_histogram.values())
 
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
         # redesenho) — só calculado para o período ATUAL, nunca para o
@@ -850,6 +874,7 @@ class AnalyticsService:
             stale_open_lotes=stale_open_lotes,
             expiring_contracts=expiring_contracts,
             payment_gap_without_appeal=payment_gap_without_appeal,
+            yoy_last_year_appointment_count=yoy_last_year_appointment_count,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False
