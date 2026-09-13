@@ -1767,6 +1767,98 @@ async def test_profitability_ranks_procedures_by_revenue_and_reports_share(clien
     assert body["by_procedure"][0]["procedure_code"] == "80808080"
 
 
+# Raio-X da Receita — CAC e LTV por canal/campanha de marketing (ver
+# ReportingRepository.marketing_performance_by_campaign e
+# AnalyticsService.get_marketing_channels).
+
+
+async def test_marketing_channels_computes_cac_and_lifetime_revenue_per_campaign(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Campanha Saúde", normalized_key="campanha_saude")
+    today = date.today()
+
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.marketing_spend (id, tenant_id, source, campaign_id, campaign_name, spend_date, amount_spent) "
+                "VALUES (:id, :t, 'meta_ads', 'campanha-primavera', 'Campanha de Primavera', :spend_date, 400.0)"
+            ),
+            {"id": str(uuid.uuid4()), "t": tenant_a, "spend_date": today},
+        )
+
+    # 2 pacientes NOVOS no período, atribuídos à campanha -> CAC = 400/2 = 200.
+    patient_ids = []
+    for _ in range(2):
+        patient_resp = await client.post(
+            "/api/v1/patients",
+            json={"full_name": "Paciente Campanha Primavera", "acquisition_source": "meta_ads", "acquisition_campaign_id": "campanha-primavera"},
+            headers=auth_headers_a,
+        )
+        assert patient_resp.status_code == 201
+        patient_ids.append(patient_resp.json()["id"])
+
+    # Receita histórica de cada um (proxy de LTV): 300 + 500 = 800 / 2 pacientes = 400.
+    for patient_id, value in zip(patient_ids, (300.0, 500.0)):
+        appointment_resp = await client.post(
+            "/api/v1/appointments",
+            json={
+                "patient_id": patient_id,
+                "insurance_plan_id": plan_id,
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            },
+            headers=auth_headers_a,
+        )
+        await client.post(
+            "/api/v1/billing",
+            json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": value},
+            headers=auth_headers_a,
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/marketing-channels?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_spend"] == 400.0
+    item = next(i for i in body["items"] if i["campaign_id"] == "campanha-primavera")
+    assert item["source"] == "meta_ads"
+    assert item["campaign_name"] == "Campanha de Primavera"
+    assert item["patients_acquired"] == 2
+    assert item["cac"] == 200.0
+    assert item["lifetime_patients"] == 2
+    assert item["lifetime_revenue"] == 800.0
+    assert item["avg_revenue_per_patient"] == 400.0
+
+
+async def test_marketing_channels_cac_is_none_without_any_patient_acquired_in_period(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Campanha com gasto no período mas nenhum paciente NOVO atribuído
+    (ex: campanha só começou a rodar, ainda sem conversão) — CAC
+    indefinido, nunca uma divisão por zero disfarçada de 0."""
+    today = date.today()
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.marketing_spend (id, tenant_id, source, campaign_id, spend_date, amount_spent) "
+                "VALUES (:id, :t, 'google_ads', 'campanha-sem-conversao', :spend_date, 150.0)"
+            ),
+            {"id": str(uuid.uuid4()), "t": tenant_a, "spend_date": today},
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/marketing-channels?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["campaign_id"] == "campanha-sem-conversao")
+    assert item["patients_acquired"] == 0
+    assert item["cac"] is None
+    assert item["campaign_name"] is None
+
+
 # Previsão de receita futura da agenda — pedido direto do usuário: "a
 # receita da agenda... conseguimos tirar metade do faturamento futuro da
 # clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.

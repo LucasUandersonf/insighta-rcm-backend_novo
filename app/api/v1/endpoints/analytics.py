@@ -37,6 +37,7 @@ from app.schemas.analytics import (
     HealthScoreResponse,
     EarlyChurnRiskResponse,
     InactivePatientsResponse,
+    MarketingChannelsResponse,
     ProfitabilityResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
@@ -200,6 +201,22 @@ async def get_profitability(
     """
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_profitability(start, end)
+
+
+@router.get("/marketing-channels", response_model=MarketingChannelsResponse)
+async def get_marketing_channels(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> MarketingChannelsResponse:
+    """
+    Raio-X da Receita, frente "Gestão eficiente" — CAC e receita média
+    por paciente (proxy de LTV), abertos por campanha/canal de
+    marketing.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_marketing_channels(start, end)
 
 
 @router.get("/recall-candidates", response_model=RecallCandidatesResponse)

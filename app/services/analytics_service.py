@@ -44,6 +44,8 @@ from app.schemas.analytics import (
     EarlyChurnRiskItem,
     EarlyChurnRiskResponse,
     ExecutiveSummaryResponse,
+    MarketingChannelItem,
+    MarketingChannelsResponse,
     ProcedureProfitabilityItem,
     ProfessionalProfitabilityItem,
     ProfitabilityResponse,
@@ -1177,6 +1179,22 @@ class AnalyticsService:
             total_billed=total_billed,
             by_professional=by_professional,
             by_procedure=by_procedure,
+        )
+
+    async def get_marketing_channels(self, date_from: date, date_to: date) -> MarketingChannelsResponse:
+        """
+        Raio-X da Receita, frente "Gestão eficiente": ROI de marketing
+        existia só AGREGADO até esta rodada (gasto total vs. receita
+        total atribuída, ver ReportDataService/_marketing_roi_insight)
+        — um canal ótimo escondido atrás de um ruim nunca aparecia. Ver
+        DECISÃO completa em ReportingRepository.marketing_performance_by_campaign.
+        """
+        rows = await self.reporting_repo.marketing_performance_by_campaign(date_from, date_to)
+        return MarketingChannelsResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_spend=sum(row["spend"] for row in rows),
+            items=[MarketingChannelItem(**row) for row in rows],
         )
 
     async def get_recall_candidates(

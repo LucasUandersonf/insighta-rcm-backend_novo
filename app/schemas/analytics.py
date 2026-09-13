@@ -613,3 +613,34 @@ class ProfitabilityResponse(BaseModel):
     total_billed: float
     by_professional: list[ProfessionalProfitabilityItem]
     by_procedure: list[ProcedureProfitabilityItem]
+
+
+class MarketingChannelItem(BaseModel):
+    """Uma linha de desempenho de campanha — Raio-X da Receita, frente
+    "Gestão eficiente" (ver DECISÃO completa em
+    ReportingRepository.marketing_performance_by_campaign). `cac` usa o
+    período do dashboard; `avg_revenue_per_patient` (proxy de LTV) usa o
+    histórico TOTAL dos pacientes atribuídos a esta campanha, não só o
+    período — os dois denominadores são propositalmente diferentes."""
+
+    source: str
+    campaign_id: str
+    campaign_name: str | None
+    spend: float
+    patients_acquired: int  # pacientes NOVOS no período
+    cac: float | None  # spend / patients_acquired; None quando patients_acquired == 0
+    lifetime_patients: int  # total histórico de pacientes já atribuídos a esta campanha
+    lifetime_revenue: float  # receita histórica TOTAL desses pacientes
+    avg_revenue_per_patient: float | None  # proxy de LTV; None quando lifetime_patients == 0
+
+
+class MarketingChannelsResponse(BaseModel):
+    """GET /api/v1/analytics/marketing-channels — Raio-X da Receita,
+    frente "Gestão eficiente": ROI de marketing existia só AGREGADO até
+    esta rodada (ver ReportDataService); esta resposta abre por
+    campanha/canal, ordenado por gasto (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_spend: float
+    items: list[MarketingChannelItem]
