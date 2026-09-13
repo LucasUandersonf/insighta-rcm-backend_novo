@@ -257,6 +257,11 @@ _POST_UPGRADE_SQL_FILES = [
     # INDEX IF NOT EXISTS — auto-idempotente, roda em todo deploy, sem
     # entrar em _POST_UPGRADE_MARKER_TABLE.
     "037_billing_glosa_hardening.sql",
+    # Resumo executivo narrado por IA — core.executive_narratives (RLS
+    # normal, dado da clínica — ver DECISÃO no próprio .sql). CREATE
+    # TABLE sem IF NOT EXISTS — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE).
+    "038_executive_narratives.sql",
 ]
 
 _ROLES_SQL = """
@@ -428,6 +433,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "028_webhook_delivery_queue.sql": "webhook_delivery_queue",
     "029_platform_users.sql": "platform_users",
     "034_health_score_snapshots.sql": "health_score_snapshots",
+    "038_executive_narratives.sql": "executive_narratives",
 }
 
 

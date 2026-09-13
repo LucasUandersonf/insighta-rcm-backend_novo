@@ -18,6 +18,7 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
@@ -31,6 +32,7 @@ from app.schemas.analytics import (
     ContractUtilizationResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
+    ExecutiveNarrativeResponse,
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
     HealthScoreResponse,
@@ -88,6 +90,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         TenantRepository(db),
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
+        ExecutiveNarrativeRepository(db),
     )
 
 
@@ -316,6 +319,22 @@ async def get_agenda_revenue_forecast(
     """
     start, end = _default_future_period(date_from, date_to)
     return await _build_service(db).get_agenda_revenue_forecast(start, end)
+
+
+@router.get("/executive-narrative", response_model=ExecutiveNarrativeResponse)
+async def get_executive_narrative(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ExecutiveNarrativeResponse:
+    """
+    Resumo executivo narrado por IA (Sala de Comando) — "o Jarvis pegando
+    os cálculos e transformando em texto explicativo", pedido direto do
+    usuário. Sem date_from/date_to: janela sempre fixa de 7 dias (ver
+    DECISÃO em AnalyticsService.get_executive_narrative), cache 1x/dia.
+    `narrative` vem `None` quando a IA não está configurada ou a geração
+    falhou — nunca quebra a tela por causa disso.
+    """
+    return await _build_service(db).get_executive_narrative(current_user.tenant_id)
 
 
 @router.get("/denial-reason-confirmation", response_model=DenialReasonConfirmationResponse)

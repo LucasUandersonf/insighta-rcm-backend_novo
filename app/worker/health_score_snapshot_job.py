@@ -34,6 +34,7 @@ from app.models.tenant import Tenant
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -72,6 +73,7 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             TenantRepository(session),
             HealthScoreSnapshotRepository(session),
             LoteRepository(session),
+            ExecutiveNarrativeRepository(session),
         )
         health_score = await service.get_health_score()
         await HealthScoreSnapshotRepository(session).upsert_snapshot(

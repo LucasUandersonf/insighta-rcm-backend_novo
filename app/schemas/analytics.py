@@ -541,3 +541,23 @@ class FinancialHoleBillingsResponse(BaseModel):
     total_hole_value: float
     limit: int
     offset: int
+
+
+class ExecutiveNarrativeResponse(BaseModel):
+    """GET /api/v1/analytics/executive-narrative — Sala de Comando: o
+    resumo dos KPIs/insights do período em prosa, escrito por IA (ver
+    DECISÃO completa em app/services/executive_narrative_service.py).
+
+    `narrative` é `None` quando a IA não está configurada
+    (ANTHROPIC_API_KEY ausente) ou a geração falhou — degradação
+    graciosa, nunca quebra a Sala de Comando por causa disso (mesmo
+    princípio de SENTRY_DSN/SMTP ausentes no resto do produto).
+    `period_start`/`period_end` são sempre os últimos 7 dias fechados
+    (ver DECISÃO no service — fixo, independente do seletor de período
+    da tela, mesmo espírito de health-score), presentes mesmo quando
+    `narrative` é `None` para a UI poder dizer "sobre qual janela"."""
+
+    period_start: date
+    period_end: date
+    narrative: str | None
+    generated_at: datetime | None

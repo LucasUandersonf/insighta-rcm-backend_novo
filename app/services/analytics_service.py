@@ -17,14 +17,17 @@ os N dias imediatamente anteriores ao período pedido (N = duração do
 período atual) generaliza a mesma ideia sem assumir semana fixa — se o
 usuário pedir 7 dias, o resultado JÁ é "semana vs. semana anterior".
 """
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from app.core.config import get_settings
 from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -40,6 +43,7 @@ from app.schemas.analytics import (
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
+    ExecutiveNarrativeResponse,
     ExecutiveSummaryResponse,
     HealthScoreComponentResponse,
     HealthScoreResponse,
@@ -66,6 +70,12 @@ from app.schemas.analytics import (
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
+from app.services.executive_narrative_service import (
+    AnthropicNarrativeGenerator,
+    NarrativeFacts,
+    NarrativeGenerationError,
+    build_narrative_prompt,
+)
 from app.services.health_score_engine import compute_health_score
 from app.services.smart_insights_engine import (
     DenialReasonCount,
@@ -85,6 +95,16 @@ from app.services.smart_insights_engine import (
 # real (mesma limitação já registrada no Achado 7 da Auditoria para os
 # demais limiares deste produto).
 DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
+
+settings = get_settings()
+logger = logging.getLogger("analytics_service")
+
+# Janela do resumo executivo narrado por IA (ver
+# AnalyticsService.get_executive_narrative) — fixa em 7 dias, mesmo
+# raciocínio de _HEALTH_SCORE_WINDOW_DAYS logo abaixo: independente do
+# seletor de período da tela, pra narrativa não mudar de assunto toda
+# vez que o gestor troca o filtro.
+_EXECUTIVE_NARRATIVE_WINDOW_DAYS = 7
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -264,6 +284,7 @@ class AnalyticsService:
         tenant_repo: TenantRepository,
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
+        narrative_repo: ExecutiveNarrativeRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -273,6 +294,7 @@ class AnalyticsService:
         self.availability_repo = availability_repo
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
+        self.narrative_repo = narrative_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -1100,4 +1122,68 @@ class AnalyticsService:
             baseline_denial_rate=baseline_rate,
             items=items,
             min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
+        )
+
+    async def get_executive_narrative(self, tenant_id: str) -> ExecutiveNarrativeResponse:
+        """
+        Resumo executivo narrado por IA — ver DECISÃO completa em
+        executive_narrative_service.py. Janela FIXA de 7 dias fechados
+        (mesmo espírito de get_health_score: independente do seletor de
+        período da tela, pra não ficar recalculando/reescrevendo a
+        narrativa toda vez que o gestor troca o filtro).
+
+        Cache diário (ExecutiveNarrativeRepository, chave (tenant_id,
+        hoje)) — só chama a IA de verdade na PRIMEIRA visita do dia.
+        Nunca lança: sem ANTHROPIC_API_KEY configurada, ou qualquer falha
+        na chamada de IA, devolve `narrative=None` (degradação graciosa,
+        mesmo princípio de SENTRY_DSN/SMTP ausentes) — a Sala de Comando
+        continua funcionando normalmente sem o resumo.
+        """
+        today = date.today()
+        period_end = today
+        period_start = today - timedelta(days=_EXECUTIVE_NARRATIVE_WINDOW_DAYS - 1)
+
+        cached = await self.narrative_repo.get_for_date(today)
+        if cached is not None:
+            return ExecutiveNarrativeResponse(
+                period_start=cached.period_start,
+                period_end=cached.period_end,
+                narrative=cached.narrative_text,
+                generated_at=None,
+            )
+
+        try:
+            summary = await self.get_executive_summary(period_start, period_end)
+            insights = await self.get_smart_insights(period_start, period_end, tenant_id=tenant_id)
+            facts = NarrativeFacts(
+                period_start=period_start,
+                period_end=period_end,
+                total_billed=summary.total_billed.value,
+                financial_hole=summary.financial_hole.value,
+                payment_gap=summary.payment_gap.value,
+                denial_at_risk_value=summary.denial_at_risk_value,
+                avg_days_to_receive=summary.avg_days_to_receive.value if summary.avg_days_to_receive else None,
+                insight_lines=[f"{i.title}: {i.message}" for i in insights.insights],
+            )
+            generator = AnthropicNarrativeGenerator()
+            narrative_text = await generator.generate(build_narrative_prompt(facts))
+        except NarrativeGenerationError as exc:
+            logger.warning("Resumo executivo narrado indisponível para tenant %s: %s", tenant_id, exc)
+            return ExecutiveNarrativeResponse(
+                period_start=period_start, period_end=period_end, narrative=None, generated_at=None
+            )
+
+        await self.narrative_repo.upsert(
+            uuid.UUID(tenant_id),
+            digest_date=today,
+            period_start=period_start,
+            period_end=period_end,
+            narrative_text=narrative_text,
+            model=settings.EXECUTIVE_NARRATIVE_MODEL,
+        )
+        return ExecutiveNarrativeResponse(
+            period_start=period_start,
+            period_end=period_end,
+            narrative=narrative_text,
+            generated_at=datetime.now(timezone.utc),
         )
