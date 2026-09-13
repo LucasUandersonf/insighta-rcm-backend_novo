@@ -1497,3 +1497,44 @@ def test_yoy_seasonality_insight_absent_with_small_last_year_sample():
 
 def test_yoy_seasonality_insight_absent_without_last_year_data():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — churn antecipado de paciente
+# ---------------------------------------------------------------------
+
+def test_early_churn_insight_fires_with_count():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=4,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "sumindo do próprio padrão" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "agenda"
+    assert "4 pacientes" in titles[0].message
+    assert titles[0].action_href == "#carteira-inativa"
+
+
+def test_early_churn_insight_singular_wording():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=1,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "sumindo do próprio padrão" in i.title.lower()]
+    assert "1 paciente já" in titles[0].message
+
+
+def test_early_churn_insight_absent_without_any_risk():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_early_churn_insight_is_current_period_state_never_from_previous():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=9,
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "sumindo do próprio padrão" in i.title.lower()] == []

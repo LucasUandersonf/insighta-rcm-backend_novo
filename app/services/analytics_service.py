@@ -41,6 +41,8 @@ from app.schemas.analytics import (
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
+    EarlyChurnRiskItem,
+    EarlyChurnRiskResponse,
     ExecutiveSummaryResponse,
     HealthScoreComponentResponse,
     HealthScoreResponse,
@@ -107,6 +109,17 @@ _HEALTH_SCORE_TREND_REFERENCE_DAYS = 90
 # insight de meta anual e a lista de get_inactive_patients) precisam
 # sempre bater no mesmo piso.
 _INACTIVE_PATIENT_AFTER_DAYS = 365
+
+# Raio-X da Receita, frente "Prevendo movimentos" — risco de abandono
+# ANTECIPADO (ver AnalyticsRepository.list_early_churn_risk_patients e
+# get_early_churn_risk acima). 3 consultas é o mesmo piso de amostra
+# mínima documentado em MIN_SPECIFIC_SAMPLES (no_show_risk_engine.py) —
+# com menos, "intervalo médio entre consultas" é estatisticamente vazio.
+# 2x é um "chute razoável" de v1 (mesma limitação de sempre): dobrar o
+# próprio ritmo sem voltar já é um desvio grande o bastante pra não ser
+# ruído normal de agenda.
+_EARLY_CHURN_MIN_VISITS = 3
+_EARLY_CHURN_GAP_MULTIPLIER = 2.0
 
 # Janela de alerta de prazo de recurso: "vencendo em breve" — mesmo
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
@@ -632,6 +645,7 @@ class AnalyticsService:
         expiring_contracts: tuple[int, str | None, int | None] = (0, None, None),
         payment_gap_without_appeal: tuple[int, float] = (0, 0.0),
         yoy_last_year_appointment_count: int | None = None,
+        early_churn_risk_count: int = 0,
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -772,6 +786,7 @@ class AnalyticsService:
             payment_gap_without_appeal_count=payment_gap_without_appeal[0],
             payment_gap_without_appeal_value=payment_gap_without_appeal[1],
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
+            early_churn_risk_count=early_churn_risk_count,
         )
 
     async def get_smart_insights(
@@ -824,6 +839,14 @@ class AnalyticsService:
         year_ago_histogram = await self.analytics_repo.appointment_weekday_histogram(year_ago.start, year_ago.end)
         yoy_last_year_appointment_count = sum(year_ago_histogram.values())
 
+        # Raio-X da Receita, frente "Prevendo movimentos": estado "AGORA",
+        # mesmo raciocínio de appeals_due_soon acima — ver
+        # AnalyticsRepository.count_early_churn_risk_patients.
+        early_churn_risk_count = await self.analytics_repo.count_early_churn_risk_patients(
+            today, min_visits=_EARLY_CHURN_MIN_VISITS, gap_multiplier=_EARLY_CHURN_GAP_MULTIPLIER,
+            inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
         # redesenho) — só calculado para o período ATUAL, nunca para o
         # anterior (não existe "meta do período anterior", ver
@@ -875,6 +898,7 @@ class AnalyticsService:
             expiring_contracts=expiring_contracts,
             payment_gap_without_appeal=payment_gap_without_appeal,
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
+            early_churn_risk_count=early_churn_risk_count,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False
@@ -1049,6 +1073,42 @@ class AnalyticsService:
                 for patient_id, full_name, last_appointment_at in rows
             ],
             total_count=total_count,
+            inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
+    async def get_early_churn_risk(self) -> EarlyChurnRiskResponse:
+        """
+        Raio-X da Receita, frente "Prevendo movimentos" — alerta
+        ANTECIPADO de abandono, antes do paciente completar o piso fixo
+        de 1 ano que o vira "inativo" de verdade (ver get_inactive_patients
+        acima e DECISÃO completa em
+        AnalyticsRepository.list_early_churn_risk_patients). Sem
+        date_from/date_to de propósito (mesmo espírito de
+        get_inactive_patients/get_health_score): é sempre "a partir de
+        hoje", não uma janela de período.
+        """
+        today = date.today()
+        total_count = await self.analytics_repo.count_early_churn_risk_patients(
+            today, min_visits=_EARLY_CHURN_MIN_VISITS, gap_multiplier=_EARLY_CHURN_GAP_MULTIPLIER,
+            inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+        rows = await self.analytics_repo.list_early_churn_risk_patients(
+            today, min_visits=_EARLY_CHURN_MIN_VISITS, gap_multiplier=_EARLY_CHURN_GAP_MULTIPLIER,
+            inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+        return EarlyChurnRiskResponse(
+            items=[
+                EarlyChurnRiskItem(
+                    patient_id=uuid.UUID(row["patient_id"]),
+                    full_name=row["patient_name"],
+                    last_appointment_at=row["last_appointment_at"],
+                    avg_interval_days=row["avg_interval_days"],
+                    days_since_last=row["days_since_last"],
+                )
+                for row in rows
+            ],
+            total_count=total_count,
+            gap_multiplier=_EARLY_CHURN_GAP_MULTIPLIER,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 

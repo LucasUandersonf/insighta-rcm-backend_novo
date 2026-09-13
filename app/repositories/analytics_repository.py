@@ -1149,6 +1149,108 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
 
+    # Raio-X da Receita, frente "Prevendo movimentos": `inactive_patients_count`
+    # acima só avisa quem sumiu há mais de 1 ano — um alerta TARDIO, depois
+    # que o paciente já foi embora de verdade. Este bloco calcula, por
+    # paciente, o intervalo MÉDIO entre as próprias consultas (histórico de
+    # pelo menos `min_visits` atendimentos não cancelados) via LAG() e
+    # sinaliza quem já está `gap_multiplier`x esse intervalo sem voltar —
+    # MAS ainda não completou `inactive_after_days` (senão já é "inativo",
+    # outra categoria, sem sobreposição). Mesmo raciocínio de risco de
+    # falta (no_show_risk_engine.py): compara contra o PRÓPRIO padrão do
+    # paciente, nunca um corte genérico igual pra todo mundo — um paciente
+    # que sempre volta a cada 30 dias e já está há 70 sem aparecer é um
+    # sinal muito mais cedo do que esperar 1 ano inteiro de silêncio.
+    _EARLY_CHURN_CTE = """
+        WITH visits AS (
+            SELECT patient_id, scheduled_at,
+                   LAG(scheduled_at) OVER (PARTITION BY patient_id ORDER BY scheduled_at) AS prev_at
+            FROM core.appointments
+            WHERE status != 'cancelled'
+        ),
+        patient_stats AS (
+            SELECT
+                patient_id,
+                MAX(scheduled_at) AS last_appointment_at,
+                COUNT(*) AS visit_count,
+                AVG(EXTRACT(EPOCH FROM (scheduled_at - prev_at)) / 86400.0)
+                    FILTER (WHERE prev_at IS NOT NULL) AS avg_interval_days
+            FROM visits
+            GROUP BY patient_id
+        ),
+        at_risk AS (
+            SELECT patient_id, last_appointment_at, avg_interval_days,
+                   EXTRACT(EPOCH FROM (:as_of_ts - last_appointment_at)) / 86400.0 AS days_since_last
+            FROM patient_stats
+            WHERE visit_count >= :min_visits
+              AND avg_interval_days IS NOT NULL
+              AND avg_interval_days > 0
+              AND last_appointment_at >= :cutoff_inactive
+              AND last_appointment_at <= :as_of_ts - (avg_interval_days * :gap_multiplier) * INTERVAL '1 day'
+        )
+    """
+
+    def _early_churn_params(
+        self, as_of: date, *, min_visits: int, gap_multiplier: float, inactive_after_days: int
+    ) -> dict:
+        return {
+            "as_of_ts": datetime.combine(as_of, time.max, tzinfo=timezone.utc),
+            "min_visits": min_visits,
+            "gap_multiplier": gap_multiplier,
+            "cutoff_inactive": datetime.combine(as_of - timedelta(days=inactive_after_days), time.min, tzinfo=timezone.utc),
+        }
+
+    async def count_early_churn_risk_patients(
+        self, as_of: date, *, min_visits: int = 3, gap_multiplier: float = 2.0, inactive_after_days: int = 365
+    ) -> int:
+        stmt = text(self._EARLY_CHURN_CTE + "SELECT COUNT(*) FROM at_risk")
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        return int((await self.session.execute(stmt, params)).scalar_one())
+
+    async def list_early_churn_risk_patients(
+        self,
+        as_of: date,
+        *,
+        min_visits: int = 3,
+        gap_multiplier: float = 2.0,
+        inactive_after_days: int = 365,
+        limit: int = 15,
+    ) -> list[dict]:
+        """Mesmo critério de `count_early_churn_risk_patients`, devolvendo
+        QUEM são — ordenado por quantas vezes o intervalo próprio do
+        paciente já foi ultrapassado (days_since_last / avg_interval_days),
+        maior primeiro: quem já está mais fora do próprio padrão vem no
+        topo, não necessariamente quem está há mais dias em termos
+        absolutos (um paciente que sempre volta a cada 10 dias e já está
+        há 40 sem aparecer — 4x o próprio ritmo — é mais urgente do que
+        um que volta a cada 90 e está há 100, só 1.1x)."""
+        stmt = text(
+            self._EARLY_CHURN_CTE
+            + """
+            SELECT p.id, p.full_name, ar.last_appointment_at, ar.avg_interval_days, ar.days_since_last
+            FROM at_risk ar
+            JOIN core.patients p ON p.id = ar.patient_id
+            ORDER BY (ar.days_since_last / ar.avg_interval_days) DESC
+            LIMIT :limit
+            """
+        )
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        rows = (await self.session.execute(stmt, {**params, "limit": limit})).all()
+        return [
+            {
+                "patient_id": str(row.id),
+                "patient_name": row.full_name,
+                "last_appointment_at": row.last_appointment_at,
+                "avg_interval_days": float(row.avg_interval_days),
+                "days_since_last": float(row.days_since_last),
+            }
+            for row in rows
+        ]
+
     def _recall_candidates_last_appointment(self, as_of: datetime, weekday: int | None, professional_id: uuid.UUID | None):
         """
         Base compartilhada de list_recall_candidates/count_recall_candidates

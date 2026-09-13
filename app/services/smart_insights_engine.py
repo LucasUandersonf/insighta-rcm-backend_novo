@@ -411,6 +411,12 @@ class InsightsPeriodInput:
     # não faz sentido — o insight já compara current contra isso). None
     # = não calculado (chamador antigo/teste que não passa esse dado).
     yoy_last_year_appointment_count: int | None = None
+    # Raio-X da Receita, frente "Prevendo movimentos" — pacientes em
+    # risco de abandono ANTECIPADO (ver AnalyticsRepository.
+    # count_early_churn_risk_patients e _early_churn_insight). Estado
+    # "AGORA" (mesmo raciocínio de appeals_due_soon_count): só o período
+    # atual recebe o valor real.
+    early_churn_risk_count: int = 0
 
 
 @dataclass
@@ -946,6 +952,38 @@ def _yoy_seasonality_insight(current: InsightsPeriodInput) -> Insight | None:
         ),
         action_label="Ver resumo de agenda",
         action_href="#agenda-resumo",
+    )
+
+
+def _early_churn_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos": `_annual_goal_insight`
+    já recomenda "reativar quem não voltou" citando pacientes INATIVOS
+    (piso fixo de 1 ano) — um alerta tardio, depois que o paciente já foi
+    embora de verdade. Este insight é o alarme ANTECIPADO: pacientes que
+    já estão bem além do PRÓPRIO ritmo histórico de retorno, mas ainda
+    não completaram 1 ano de ausência (ver AnalyticsRepository.
+    count_early_churn_risk_patients) — quanto mais cedo a clínica liga,
+    maior a chance de reverter antes que vire uma perda definitiva.
+
+    Estado "AGORA" (mesmo raciocínio de appeals_due_soon_count): sempre
+    calculado a partir de hoje, não escopado pelo período do dashboard.
+    """
+    if current.early_churn_risk_count <= 0:
+        return None
+    plural = "s" if current.early_churn_risk_count != 1 else ""
+    return Insight(
+        severity="warning",
+        category="agenda",
+        title="Tem paciente sumindo do próprio padrão, mesmo sem completar 1 ano fora",
+        message=(
+            f"{current.early_churn_risk_count} paciente{plural} já está bem além do próprio ritmo de retorno — "
+            "comparado ao intervalo que cada um costuma esperar entre consultas, não a um prazo genérico — mas "
+            "ainda não chegou a 1 ano de ausência. Ligar agora, enquanto o vínculo ainda está fresco, costuma "
+            "funcionar melhor do que esperar completar 1 ano pra tentar recuperar."
+        ),
+        action_label="Ver quem está sumindo",
+        action_href="#carteira-inativa",
     )
 
 
@@ -1599,6 +1637,7 @@ def generate_insights(
     for maybe_insight in (
         _weekday_drop_insight(current, previous),
         _yoy_seasonality_insight(current),
+        _early_churn_insight(current),
         _weekday_no_show_rate_insight(current),
         _appeals_due_soon_insight(current),
         _payment_gap_without_appeal_insight(current),

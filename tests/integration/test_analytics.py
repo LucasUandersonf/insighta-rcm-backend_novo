@@ -1588,6 +1588,96 @@ async def test_smart_insights_absent_when_last_year_sample_is_too_small(client, 
     assert not any("mesmo período do ano passado" in t.lower() for t in titles)
 
 
+# Raio-X da Receita — churn antecipado de paciente (ver
+# AnalyticsRepository.list_early_churn_risk_patients/
+# count_early_churn_risk_patients e smart_insights_engine.py::
+# _early_churn_insight). Usa `_create_appointment_direct`, definido mais
+# abaixo neste arquivo.
+
+
+async def test_early_churn_risk_endpoint_flags_patient_well_past_their_own_rhythm(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Ritmo Quebrado"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    today = datetime.now(timezone.utc)
+    # 4 consultas a cada 20 dias -> intervalo médio de 20 dias; a última
+    # foi há 100 dias (5x o próprio ritmo, bem acima do piso de 2x) mas
+    # ainda dentro de 1 ano (não é "inativo" ainda).
+    for days_ago in (160, 140, 120, 100):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, today - timedelta(days=days_ago), status="completed"
+        )
+
+    response = await client.get("/api/v1/analytics/early-churn-risk", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_count"] == 1
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["patient_id"] == patient_id
+    assert abs(item["avg_interval_days"] - 20.0) < 0.1
+    assert abs(item["days_since_last"] - 100.0) < 1.0
+
+
+async def test_early_churn_risk_excludes_patient_within_their_own_normal_rhythm(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Ritmo Normal"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    today = datetime.now(timezone.utc)
+    # Mesmo intervalo de 20 dias, mas a última consulta foi há só 15 dias
+    # — dentro do próprio ritmo, não deveria entrar na lista.
+    for days_ago in (55, 35, 15):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, today - timedelta(days=days_ago), status="completed"
+        )
+
+    response = await client.get("/api/v1/analytics/early-churn-risk", headers=auth_headers_a)
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 0
+
+
+async def test_early_churn_risk_excludes_patients_already_formally_inactive(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Quem já passou de 1 ano sem aparecer é 'inativo' de verdade (ver
+    InactivePatientsResponse) — categoria diferente, não deveria
+    duplicar no alerta de risco ANTECIPADO."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Já Inativo"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    today = datetime.now(timezone.utc)
+    for days_ago in (500, 480, 460, 440):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, today - timedelta(days=days_ago), status="completed"
+        )
+
+    response = await client.get("/api/v1/analytics/early-churn-risk", headers=auth_headers_a)
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 0
+
+
+async def test_smart_insights_flags_early_churn_risk_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Sumindo"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    today = datetime.now(timezone.utc)
+    for days_ago in (160, 140, 120, 100):
+        await _create_appointment_direct(
+            admin_engine, tenant_a, patient_id, today - timedelta(days=days_ago), status="completed"
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    churn_insight = next((i for i in insights if "sumindo do próprio padrão" in i["title"].lower()), None)
+    assert churn_insight is not None
+    assert churn_insight["severity"] == "warning"
+    assert churn_insight["action_href"] == "#carteira-inativa"
+
+
 # Previsão de receita futura da agenda — pedido direto do usuário: "a
 # receita da agenda... conseguimos tirar metade do faturamento futuro da
 # clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.

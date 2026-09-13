@@ -35,6 +35,7 @@ from app.schemas.analytics import (
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
     HealthScoreResponse,
+    EarlyChurnRiskResponse,
     InactivePatientsResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
@@ -168,6 +169,20 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/early-churn-risk", response_model=EarlyChurnRiskResponse)
+async def get_early_churn_risk(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> EarlyChurnRiskResponse:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos" — alerta ANTECIPADO
+    de abandono, antes do paciente completar o piso fixo de 1 ano que já
+    vira "inativo" de verdade (ver get_inactive_patients acima). Sem
+    date_from/date_to pelo mesmo motivo: é sempre "a partir de hoje".
+    """
+    return await _build_service(db).get_early_churn_risk()
 
 
 @router.get("/recall-candidates", response_model=RecallCandidatesResponse)

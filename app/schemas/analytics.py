@@ -470,6 +470,36 @@ class InactivePatientsResponse(BaseModel):
     inactive_after_days: int
 
 
+class EarlyChurnRiskItem(BaseModel):
+    """Uma linha de "risco de abandono antecipado" — Raio-X da Receita,
+    frente "Prevendo movimentos" (ver DECISÃO completa em
+    AnalyticsRepository.list_early_churn_risk_patients). Diferente de
+    InactivePatientItem (piso fixo de 1 ano igual pra todo mundo), aqui o
+    limiar é o PRÓPRIO ritmo do paciente: `avg_interval_days` é o
+    intervalo médio histórico entre as consultas dele, `days_since_last`
+    já ultrapassa esse intervalo em pelo menos `gap_multiplier`x (ver
+    EarlyChurnRiskResponse)."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    avg_interval_days: float
+    days_since_last: float
+
+
+class EarlyChurnRiskResponse(BaseModel):
+    """GET /api/v1/analytics/early-churn-risk — alerta ANTECIPADO de
+    abandono, antes do paciente completar o piso fixo de
+    `inactive_after_days` (1 ano) que já vira "inativo" de verdade (ver
+    InactivePatientsResponse). `gap_multiplier` é quantas vezes o
+    intervalo médio PRÓPRIO do paciente ele já está sem voltar."""
+
+    items: list[EarlyChurnRiskItem]
+    total_count: int
+    gap_multiplier: float
+    inactive_after_days: int
+
+
 class RecallCandidateItem(BaseModel):
     """Uma linha de "candidato a recontato" — ver DECISÃO em
     AnalyticsRepository._recall_candidates_last_appointment. Diferente de
