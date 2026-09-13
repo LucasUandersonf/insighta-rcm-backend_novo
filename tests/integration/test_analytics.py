@@ -1413,3 +1413,126 @@ async def test_agenda_revenue_forecast_isolates_between_tenants(
     body = response.json()
     assert body["total_scheduled_count"] == 0
     assert body["total_scheduled_value"] == 0.0
+
+
+# Camada 2 do plano de IA preditiva ("aprender com o histórico real de
+# decisões") — pedido direto do usuário: as regras fixas do motor
+# anti-glosa (denial_risk_engine.py) de fato preveem glosa real? Ver
+# DECISÃO completa em AnalyticsRepository.denial_reason_confirmation_rates.
+
+
+async def _create_billing_scenario(client, admin_engine, tenant_id, headers, plan_id, *, scenario, final_status):
+    """Cria paciente+agendamento+faturamento via API reproduzindo UM
+    motivo específico do denial_risk_engine, depois sobrescreve
+    billing.status via SQL direto para simular o desfecho REAL já
+    conhecido ('paid'/'denied') — a API nunca grava esse desfecho
+    sozinha na criação (só normalization_service.py, via upload de
+    arquivo de Glosa, ou settle_billing, mesmo motivo dos demais
+    helpers `_direct` deste arquivo).
+
+    `scenario`:
+      - "missing_cid": CID ausente, contrato cobrando o valor exato ->
+        denial_reasons = ["missing_cid"], nada mais.
+      - "no_contract": procedimento sem contrato cadastrado para este
+        convênio -> denial_reasons = ["no_contract_reference"].
+      - "value_above": cobrança acima do valor de contrato ->
+        denial_reasons = ["value_above_contract"].
+      - "clean": CID, procedimento com contrato, valor exato -> nenhum
+        motivo sinalizado (denial_risk_level = "low", o baseline).
+    """
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Confirmação"}, headers=headers)
+    patient_id = patient_resp.json()["id"]
+
+    procedure_code = "99999999" if scenario == "no_contract" else "10101012"
+    appointment_payload = {
+        "patient_id": patient_id,
+        "insurance_plan_id": plan_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "procedure_code": procedure_code,
+    }
+    if scenario != "missing_cid":
+        appointment_payload["cid_code"] = "J06"
+    appointment_resp = await client.post("/api/v1/appointments", json=appointment_payload, headers=headers)
+    appointment_id = appointment_resp.json()["id"]
+
+    charged_value = 250.0 if scenario == "value_above" else 200.0
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    assert billing_resp.status_code == 201
+    billing_id = billing_resp.json()["id"]
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE core.billing SET status = :status WHERE id = :id"), {"status": final_status, "id": billing_id}
+        )
+    return billing_id
+
+
+async def test_denial_reason_confirmation_contrasts_real_denial_rate_against_baseline(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # Baseline (nenhum motivo sinalizado): 5 faturamentos resolvidos, 1
+    # de fato virou glosa -> taxa real de 20%.
+    for st in ("denied", "paid", "paid", "paid", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="clean", final_status=st)
+
+    # missing_cid: 5 faturamentos, 4 viraram glosa de verdade -> 80%, bem
+    # acima do baseline -> a regra TEM poder preditivo real.
+    for st in ("denied", "denied", "denied", "denied", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="missing_cid", final_status=st)
+
+    # no_contract_reference: 5 faturamentos, só 1 virou glosa de verdade
+    # -> 20%, igual ao baseline -> a regra NÃO está prevendo nada (achado
+    # honesto: "sem cadastro de contrato" é falta de dado, não indício
+    # real de recusa).
+    for st in ("denied", "paid", "paid", "paid", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="no_contract", final_status=st)
+
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["baseline_sample_size"] == 5
+    assert body["baseline_denial_rate"] == 0.2
+    assert body["min_sample"] == 5
+
+    by_code = {item["reason_code"]: item for item in body["items"]}
+    assert by_code["missing_cid"]["sample_size"] == 5
+    assert by_code["missing_cid"]["confirmed_denial_rate"] == 0.8
+    assert by_code["no_contract_reference"]["sample_size"] == 5
+    assert by_code["no_contract_reference"]["confirmed_denial_rate"] == 0.2
+    # Ordenado do mais confirmado pro menos.
+    assert [item["reason_code"] for item in body["items"]][0] == "missing_cid"
+
+
+async def test_denial_reason_confirmation_hides_reasons_below_min_sample(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # Só 3 faturamentos resolvidos com value_above_contract — abaixo do
+    # min_sample (5, default): ruído estatístico demais pra reportar uma
+    # taxa, não deveria aparecer nos itens.
+    for st in ("denied", "denied", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="value_above", final_status=st)
+
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert not any(item["reason_code"] == "value_above_contract" for item in body["items"])
+
+
+async def test_denial_reason_confirmation_baseline_is_none_without_any_resolved_billing(
+    client, auth_headers_a, tenant_a
+):
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["baseline_sample_size"] == 0
+    assert body["baseline_denial_rate"] is None
+    assert body["items"] == []

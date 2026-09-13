@@ -287,6 +287,42 @@ class DenialRiskDistributionResponse(BaseModel):
     total_reviewed: int
 
 
+class DenialReasonConfirmationItem(BaseModel):
+    """Um motivo do denial_risk_engine (ver DECISÃO em
+    AnalyticsRepository.denial_reason_confirmation_rates) e o quanto ele
+    de fato se confirmou como glosa real entre os faturamentos JÁ
+    RESOLVIDOS ('paid'/'denied') que o sinalizaram. `sample_size` já
+    passou pelo corte de amostra mínima do repositório — todo item aqui
+    é reportável."""
+
+    reason_code: str
+    reason_label: str  # ver smart_insights_engine.describe_denial_reason
+    sample_size: int
+    confirmed_denial_rate: float  # fração 0.0-1.0
+
+
+class DenialReasonConfirmationResponse(BaseModel):
+    """GET /api/v1/analytics/denial-reason-confirmation — Camada 2 do
+    plano de IA preditiva: "as regras fixas do motor anti-glosa de fato
+    preveem glosa real?". Sem period_start/period_end de propósito (ver
+    DECISÃO no repositório): olha para TODO o histórico já resolvido, não
+    uma janela.
+
+    `baseline_denial_rate` é a taxa de glosa real entre os faturamentos
+    que o motor NÃO sinalizou nada (`denial_risk_level = 'low'`) — o
+    contraste que decide se um motivo em `items` está de fato prevendo
+    algo (taxa bem acima do baseline) ou é ruído (taxa parecida). `None`
+    quando ainda não há nenhum faturamento 'low' resolvido (base zero,
+    percentual indefinido — mesmo princípio de `_delta_pct` no service).
+    `items` só traz motivos com amostra >= `min_sample`, ordenados do
+    mais confirmado para o menos."""
+
+    baseline_sample_size: int
+    baseline_denial_rate: float | None
+    items: list[DenialReasonConfirmationItem]
+    min_sample: int
+
+
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive" | "comparativo"
     # "faturamento" | "agenda" — ver DECISÃO em smart_insights_engine.Insight.

@@ -36,6 +36,8 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DenialReasonConfirmationItem,
+    DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
@@ -74,6 +76,15 @@ from app.services.smart_insights_engine import (
     generate_insights,
     is_true_denial_risk_reason,
 )
+
+# Amostra mínima antes de reportar a taxa de confirmação de um motivo
+# (ver AnalyticsService.get_denial_reason_confirmation) — mesmo valor
+# default de AnalyticsRepository.professional_denial_rates, mesmo
+# raciocínio de MIN_SPECIFIC_SAMPLES (no_show_risk_engine.py): um
+# "chute" de partida documentado, não uma calibração validada com dado
+# real (mesma limitação já registrada no Achado 7 da Auditoria para os
+# demais limiares deste produto).
+DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -1057,3 +1068,36 @@ class AnalyticsService:
         """
         data = await self.analytics_repo.agenda_revenue_forecast(date_from, date_to)
         return AgendaRevenueForecastResponse(period_start=date_from, period_end=date_to, **data)
+
+    async def get_denial_reason_confirmation(self) -> DenialReasonConfirmationResponse:
+        """
+        Camada 2 do plano de IA preditiva ("aprender com o histórico
+        real de decisões" em vez de só regras fixas) — ver DECISÃO
+        completa em AnalyticsRepository.denial_reason_confirmation_rates.
+        Sem date_from/date_to de propósito (mesmo espírito de
+        get_health_score/get_inactive_patients): usa todo o histórico já
+        resolvido, não uma janela do dashboard.
+        """
+        data = await self.analytics_repo.denial_reason_confirmation_rates(
+            min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE
+        )
+        baseline_denied, baseline_total = data["baseline"]
+        baseline_rate = (baseline_denied / baseline_total) if baseline_total > 0 else None
+
+        items = [
+            DenialReasonConfirmationItem(
+                reason_code=reason_code,
+                reason_label=describe_denial_reason(reason_code),
+                sample_size=total,
+                confirmed_denial_rate=denied / total,
+            )
+            for reason_code, (denied, total) in data["by_reason"].items()
+        ]
+        items.sort(key=lambda item: item.confirmed_denial_rate, reverse=True)
+
+        return DenialReasonConfirmationResponse(
+            baseline_sample_size=baseline_total,
+            baseline_denial_rate=baseline_rate,
+            items=items,
+            min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
+        )

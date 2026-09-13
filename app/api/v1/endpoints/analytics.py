@@ -29,6 +29,7 @@ from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
     ContractUtilizationResponse,
+    DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
@@ -315,3 +316,18 @@ async def get_agenda_revenue_forecast(
     """
     start, end = _default_future_period(date_from, date_to)
     return await _build_service(db).get_agenda_revenue_forecast(start, end)
+
+
+@router.get("/denial-reason-confirmation", response_model=DenialReasonConfirmationResponse)
+async def get_denial_reason_confirmation(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DenialReasonConfirmationResponse:
+    """
+    Camada 2 do plano de IA preditiva: será que os motivos que o motor
+    anti-glosa sinaliza na criação do faturamento (ver denial_risk_engine.py)
+    de fato se confirmam como glosa real depois? Sem date_from/date_to
+    (mesmo espírito de health-score/inactive-patients) — olha todo o
+    histórico já resolvido, não uma janela.
+    """
+    return await _build_service(db).get_denial_reason_confirmation()

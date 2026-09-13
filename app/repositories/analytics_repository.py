@@ -913,6 +913,66 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {level: int(count) for level, count in result.all()}
 
+    async def denial_reason_confirmation_rates(self, *, min_sample: int = 5) -> dict:
+        """
+        Camada 2 do plano de IA preditiva ("aprender com o histórico
+        real"): o quanto cada motivo que denial_risk_engine.py sinaliza
+        NA CRIAÇÃO do faturamento (regras fixas e auditáveis — ver
+        DECISÃO no próprio motor) de fato se confirma como glosa REAL
+        depois. Nenhum modelo de ML aqui — só frequência real sobre o
+        desfecho já conhecido de cada faturamento: `Billing.status` só
+        vira 'denied' quando o Template de Glosa normaliza um arquivo
+        real da operadora confirmando a recusa (ver
+        normalization_service.py), e só vira 'paid' quando o pagamento
+        realmente chegou (`BillingService.settle_billing`). Faturamento
+        'pending' (ainda não conciliado) fica de fora dos dois lados da
+        conta — não sabemos o desfecho real ainda, incluir só inflaria a
+        amostra sem informação nenhuma (mesmo cuidado de "nunca inventar
+        confiança que a evidência não dá" do resto do produto).
+
+        `baseline` é a taxa de glosa real entre os faturamentos que o
+        motor NÃO sinalizou nada (`denial_risk_level = 'low'`) — o
+        contraste que prova (ou desmente) se as regras têm poder
+        preditivo de verdade: um motivo com taxa parecida com o baseline
+        não está prevendo nada.
+
+        Sem filtro de período de propósito (mesmo espírito de
+        get_health_score/get_inactive_patients, AnalyticsService): aqui o
+        objetivo é a melhor estimativa possível de precisão do motor até
+        agora, não "o que aconteceu numa janela" — mais faturamento JÁ
+        RESOLVIDO só deixa a taxa mais estável.
+
+        Retorna {"baseline": (denied_count, total_count), "by_reason":
+        {reason_code: (denied_count, total_count)}}. `by_reason` só inclui
+        combinações com total >= min_sample (mesmo raciocínio de
+        `professional_denial_rates` acima) — um motivo com 1 ou 2 casos
+        resolvidos não é um padrão, é ruído estatístico; `baseline` não
+        passa por esse corte, é reportado sempre que houver qualquer
+        faturamento 'low' resolvido (é o denominador de comparação, não
+        uma afirmação sobre um motivo específico).
+        """
+        denied_case = case((Billing.status == "denied", 1), else_=0)
+        baseline_stmt = select(func.coalesce(func.sum(denied_case), 0), func.count()).where(
+            Billing.status.in_(("paid", "denied")), Billing.denial_risk_level == "low"
+        )
+        baseline_denied, baseline_total = (await self.session.execute(baseline_stmt)).one()
+
+        reason_stmt = text(
+            """
+            SELECT reason.value AS reason_code,
+                   COUNT(*) FILTER (WHERE b.status = 'denied') AS denied_count,
+                   COUNT(*) AS total_count
+            FROM core.billing b, jsonb_array_elements_text(b.denial_reasons) AS reason(value)
+            WHERE b.status IN ('paid', 'denied')
+            GROUP BY reason.value
+            HAVING COUNT(*) >= :min_sample
+            """
+        )
+        result = await self.session.execute(reason_stmt, {"min_sample": min_sample})
+        by_reason = {row.reason_code: (int(row.denied_count), int(row.total_count)) for row in result.all()}
+
+        return {"baseline": (int(baseline_denied), int(baseline_total)), "by_reason": by_reason}
+
     async def no_show_risk_breakdown(self, *, as_of: datetime) -> dict[str, int]:
         """Agrupa AGENDAMENTOS FUTUROS AINDA NÃO REALIZADOS (status
         'scheduled') por nível de risco preditivo de falta — a mesma
