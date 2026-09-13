@@ -96,7 +96,21 @@ class AppointmentService:
         history = await self.appointment_repo.list_past_by_patient(data.patient_id, before=data.scheduled_at)
         tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
         low_threshold, medium_threshold = resolve_thresholds(tenant)
-        risk = assess_no_show_risk(history, data.scheduled_at, low_threshold=low_threshold, medium_threshold=medium_threshold)
+        # Raio-X da Receita, frente "Prevendo movimentos": antecedência
+        # da marcação como segundo sinal de risco de falta (ver DECISÃO
+        # completa em no_show_risk_engine.assess). Calculado AQUI (não
+        # dentro do motor, que continua puro/sem ler o relógio) — max(...,
+        # 0) porque `scheduled_at` sempre deveria ser futuro nesta rota,
+        # mas nunca reporta antecedência negativa por um possível
+        # arredondamento de milissegundos entre a validação e este ponto.
+        candidate_lead_time_days = max((data.scheduled_at - datetime.now(timezone.utc)).days, 0)
+        risk = assess_no_show_risk(
+            history,
+            data.scheduled_at,
+            low_threshold=low_threshold,
+            medium_threshold=medium_threshold,
+            candidate_lead_time_days=candidate_lead_time_days,
+        )
         appointment.no_show_risk_level = risk.risk_level
         appointment.no_show_risk_score = risk.score
 
