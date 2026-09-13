@@ -1,4 +1,5 @@
 import uuid
+from datetime import date, datetime, time, timezone
 
 from fastapi import HTTPException, status
 
@@ -9,7 +10,8 @@ from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
-from app.schemas.appointment import AppointmentCreateRequest, AppointmentResponse, AppointmentUpdateRequest
+from app.schemas.appointment import AppointmentCreateRequest, AppointmentListItem, AppointmentResponse, AppointmentUpdateRequest
+from app.schemas.pagination import PaginatedResponse
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 from app.services.no_show_risk_engine import resolve_thresholds
 from app.services.webhook_dispatch_service import dispatch_event
@@ -123,6 +125,36 @@ class AppointmentService:
     async def list_by_patient(self, patient_id: uuid.UUID) -> list[AppointmentResponse]:
         items = await self.appointment_repo.list_by_patient(patient_id)
         return [AppointmentResponse.model_validate(i) for i in items]
+
+    async def list_by_date_range_paginated(
+        self, date_from: date, date_to: date, *, limit: int, offset: int
+    ) -> PaginatedResponse[AppointmentListItem]:
+        """
+        Peça que faltava depois do Achado 12 da Auditoria de Templates e
+        Insights: os insights de canal de agendamento/motivo de
+        cancelamento apontavam o problema em agregado, mas não existia
+        nenhuma tela de listagem de agendamentos individuais pra mostrar
+        QUAL agendamento tem qual canal/motivo. Mesmo padrão de
+        _bounds/paginação já usado no resto do produto (ver
+        AnalyticsRepository._bounds, BillingService.list_high_risk_paginated).
+        """
+        start = datetime.combine(date_from, time.min, tzinfo=timezone.utc)
+        end = datetime.combine(date_to, time.max, tzinfo=timezone.utc)
+        rows, total = await self.appointment_repo.list_by_date_range_paginated(start, end, limit=limit, offset=offset)
+        items = [
+            AppointmentListItem(
+                id=appointment.id,
+                patient_name=patient_name,
+                scheduled_at=appointment.scheduled_at,
+                status=appointment.status,
+                procedure_code=appointment.procedure_code,
+                visit_type=appointment.visit_type,
+                booking_channel=appointment.booking_channel,
+                cancellation_reason=appointment.cancellation_reason,
+            )
+            for appointment, patient_name in rows
+        ]
+        return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
     async def update_appointment(self, appointment_id: uuid.UUID, data: AppointmentUpdateRequest) -> AppointmentResponse:
         """

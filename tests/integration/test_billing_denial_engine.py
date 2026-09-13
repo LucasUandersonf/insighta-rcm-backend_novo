@@ -243,3 +243,193 @@ async def test_list_high_risk_billing_filters_by_insurance_plan_id(client, auth_
     body = filtered.json()
     assert body["total"] == 1
     assert body["items"][0]["charged_value"] == 150.0
+
+
+# Achados 10/11 da Auditoria de Templates e Insights: BillingCreateRequest
+# (endpoint manual, POST /billing) grava as MESMAS colunas
+# (member_card_number/item_type) que o Template de Faturamento (ingestão
+# em massa) já valida desde a Rodada 1 — mas sem a mesma blindagem. Os 3
+# testes abaixo provam que o endpoint manual agora tem paridade.
+
+
+async def test_manual_billing_sanitizes_member_card_number(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 10 (alto) — mesmo cenário do achado: carteirinha digitada
+    com pontuação/espaço precisa ser normalizada igual à ingestão, senão
+    um demonstrativo de Glosa que chegar depois (já normalizado) nunca
+    vai casar com este billing."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Carteirinha Manual"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appt.json()["id"],
+            "insurance_plan_id": plan_id,
+            "charged_value": 150.0,
+            "member_card_number": "0012.345.678-90",
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+
+    async with admin_engine.begin() as conn:
+        result = await conn.execute(text("SELECT member_card_number FROM core.billing WHERE tenant_id = :t"), {"t": tenant_a})
+        row = result.mappings().first()
+    assert row["member_card_number"] == "001234567890"  # normalizado: só alfanumérico, caixa alta
+
+
+async def test_manual_billing_rejects_invalid_item_type_with_422(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 11 (baixo) — antes desta correção, um item_type fora do
+    vocabulário fechado passava pelo Pydantic sem erro e só era pego
+    pelo CHECK constraint do banco (500 opaco). Agora é rejeitado cedo,
+    com uma mensagem que nomeia os valores aceitos."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Item Type Inválido"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appt.json()["id"],
+            "insurance_plan_id": plan_id,
+            "charged_value": 150.0,
+            "item_type": "tipo-inexistente",
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "não reconhecido" in resp.text
+
+
+async def test_manual_billing_normalizes_valid_item_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Mesmo vocabulário fechado aceita variações de grafia (maiúscula,
+    espaço em vez de underscore) — mesmo comportamento já garantido na
+    ingestão, agora também no endpoint manual."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Item Type Válido"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appt.json()["id"],
+            "insurance_plan_id": plan_id,
+            "charged_value": 150.0,
+            "item_type": "Material OPME",
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+
+    async with admin_engine.begin() as conn:
+        result = await conn.execute(text("SELECT item_type FROM core.billing WHERE tenant_id = :t"), {"t": tenant_a})
+        row = result.mappings().first()
+    assert row["item_type"] == "material_opme"
+
+
+async def test_billing_response_exposes_the_4_new_faturamento_fields(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    campos novos (quantidade/carteirinha/tipo_item/coparticipação) eram
+    validados e gravados corretamente, mas NENHUMA resposta de leitura
+    os devolvia: um gestor não tinha como ver, pela API, qual linha era
+    OPME ou tinha coparticipação. Este teste prova que POST /billing
+    agora devolve os 4 campos (já normalizados, quando aplicável)."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Achado 12"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appt.json()["id"],
+            "insurance_plan_id": plan_id,
+            "charged_value": 150.0,
+            "quantity": 3,
+            "member_card_number": "0012.345.678-90",
+            "item_type": "Material OPME",
+            "coparticipation_value": 25.0,
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["quantity"] == 3
+    assert body["member_card_number"] == "001234567890"  # já normalizado (Achado 10)
+    assert body["item_type"] == "material_opme"  # já normalizado (Achado 11)
+    assert body["coparticipation_value"] == 25.0
+
+
+async def test_appointment_response_exposes_the_4_new_agenda_fields(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado 12 (médio) — mesmo raciocínio do teste acima, para os 4
+    campos novos de Agenda. Como o endpoint manual de agendamento não
+    expõe esses campos na ESCRITA (só a ingestão em massa grava — ver
+    Achado da Auditoria), este teste confirma que a resposta ao menos
+    devolve as 4 chaves (com valor None para um agendamento criado
+    manualmente), provando que o schema de saída não as esconde mais."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Achado 12 Agenda"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    for field in ("booked_at", "visit_type", "cancellation_reason", "booking_channel"):
+        assert field in body

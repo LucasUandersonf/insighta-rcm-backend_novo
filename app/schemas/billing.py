@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.text_utils import normalize_item_type, sanitize_member_card_value
+
 
 class BillingCreateRequest(BaseModel):
     """
@@ -35,6 +37,33 @@ class BillingCreateRequest(BaseModel):
         # (ex: 150.999999999) chegando ao banco.
         return round(v, 2)
 
+    @field_validator("member_card_number")
+    @classmethod
+    def sanitize_member_card(cls, v: str | None) -> str | None:
+        # Achado 10 da Auditoria de Templates e Insights (alto) — este
+        # endpoint grava a MESMA coluna (Billing.member_card_number) que
+        # o Template de Faturamento (ingestão em massa) já normaliza
+        # desde o Achado 1. Sem isso, um lançamento manual com a
+        # carteirinha formatada diferente nunca casaria com um
+        # demonstrativo de Glosa que chegasse depois — a mesma falha
+        # silenciosa do Achado 1, só que pela porta manual.
+        if v is None or v == "":
+            return None
+        return sanitize_member_card_value(v)
+
+    @field_validator("item_type")
+    @classmethod
+    def validate_item_type(cls, v: str | None) -> str | None:
+        # Achado 11 da Auditoria (baixo) — sem isso, um valor fora do
+        # vocabulário fechado (ver ITEM_TYPE_VALUES, app/models/billing.py)
+        # passava batido pelo Pydantic e só era pego pelo CHECK constraint
+        # do banco, virando um 500 opaco em vez de um 422 claro. Mesma
+        # função que o Template de Faturamento usa — um vocabulário só,
+        # nunca duas listas que podem divergir. Nome diferente do import
+        # (`normalize_item_type`) de propósito, para não sombrear a
+        # função do módulo dentro da classe.
+        return normalize_item_type(v)
+
 
 class BillingResponse(BaseModel):
     """Schema de SAÍDA — expõe só o que o frontend precisa, nunca o ORM cru."""
@@ -50,6 +79,18 @@ class BillingResponse(BaseModel):
     settled_at: datetime | None
     guia_id: UUID | None
     created_at: datetime
+    # Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    # campos novos do Dicionário de Dados (quantidade/carteirinha/tipo_item/
+    # coparticipação) eram validados e gravados nas duas portas de
+    # entrada (ingestão em massa e este endpoint manual), mas NENHUMA
+    # resposta de leitura os devolvia — um gestor que clicasse em "Ver
+    # faturamentos" a partir do card de OPME não tinha como ver QUAL
+    # linha é OPME sem abrir o banco direto. Fecha o ciclo "insight
+    # aponta o problema -> tela mostra a linha exata".
+    quantity: int
+    member_card_number: str | None
+    item_type: str | None
+    coparticipation_value: float | None
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
@@ -68,6 +109,12 @@ class BillingSearchItem(BaseModel):
     status: str
     denial_risk_level: str
     created_at: datetime
+    # Achado 12 da Auditoria (médio) — mesmo motivo de BillingResponse
+    # acima: sem isso, a tela que os insights de OPME/coparticipação
+    # linkam não tinha como distinguir uma linha da outra por esses
+    # campos.
+    item_type: str | None
+    member_card_number: str | None
 
 
 class BillingSettleRequest(BaseModel):

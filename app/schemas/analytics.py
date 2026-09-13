@@ -40,6 +40,68 @@ class ExecutiveSummaryResponse(BaseModel):
     # quando não há faturamento no período (% sobre base zero é indefinida).
     denial_risk_pct: float | None
     denial_at_risk_value: float
+    # Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito do
+    # Gestor Clínico": billing.created_at/settled_at sempre existiram no
+    # banco, mas nenhum indicador calculava essa diferença até esta
+    # rodada (ver AnalyticsRepository.payment_lag_total). None quando não
+    # há nenhum billing conciliado no período — não é "0 dias", é
+    # amostra vazia.
+    avg_days_to_receive: PeriodKPI | None
+
+
+class PaymentLagByPlanItem(BaseModel):
+    """Uma linha do ranking de PMR por convênio (ver
+    AnalyticsRepository.payment_lag_by_plan) — pior prazo primeiro, pra
+    apontar QUAL operadora está de fato travando o caixa."""
+
+    insurance_plan_id: UUID
+    insurance_plan_name: str
+    avg_days_to_receive: float
+    billings_settled_count: int
+
+
+class PaymentLagByPlanResponse(BaseModel):
+    """GET /api/v1/analytics/payment-lag-by-plan — Painel → Faturamento.
+    `avg_days_to_receive`/`billings_settled_count` no topo são o
+    agregado do TENANT inteiro (mesmo número de ExecutiveSummaryResponse.
+    avg_days_to_receive.value) — os `items` decompõem isso por convênio."""
+
+    period_start: date
+    period_end: date
+    avg_days_to_receive: float | None
+    billings_settled_count: int
+    items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
+
+
+class AgendaRevenueForecastResponse(BaseModel):
+    """GET /api/v1/analytics/agenda-revenue-forecast — Sala de Comando.
+    Previsão de receita a partir dos agendamentos FUTUROS (status
+    'scheduled') no período — diferente do resto de /analytics, que olha
+    pra trás por padrão. Ver DECISÃO completa em
+    AnalyticsRepository.agenda_revenue_forecast: nunca finge confiança
+    que o dado não tem — 3 baldes separados, nunca um "valor esperado"
+    único que esconde a incerteza.
+
+    `total_scheduled_value` é bruto (soma de agreed_price de todo
+    agendamento com preço de contrato encontrado). `expected_value` é
+    só sobre o subset com no_show_risk_score CALCULADO
+    (`known_risk_count`/`known_risk_value`), ajustado por (1 - risco de
+    falta). `unrated_value`/`unrated_count` são agendamentos com preço
+    encontrado mas paciente "indeterminado" (sem histórico ainda) — de
+    propósito FORA do ajuste de risco. `unpriced_count` é o que nem
+    entra em `total_scheduled_value` (sem convênio/procedimento
+    definido ainda, ou sem contrato vigente)."""
+
+    period_start: date
+    period_end: date
+    total_scheduled_count: int
+    total_scheduled_value: float
+    known_risk_count: int
+    known_risk_value: float
+    expected_value: float
+    unrated_count: int
+    unrated_value: float
+    unpriced_count: int
 
 
 class ProfessionalCapacityMetric(BaseModel):
@@ -223,6 +285,42 @@ class DenialRiskDistributionResponse(BaseModel):
     # AnalyticsRepository.denial_risk_count_breakdown sobre por que
     # "revisado" é sinônimo de "faturado no período" neste produto.
     total_reviewed: int
+
+
+class DenialReasonConfirmationItem(BaseModel):
+    """Um motivo do denial_risk_engine (ver DECISÃO em
+    AnalyticsRepository.denial_reason_confirmation_rates) e o quanto ele
+    de fato se confirmou como glosa real entre os faturamentos JÁ
+    RESOLVIDOS ('paid'/'denied') que o sinalizaram. `sample_size` já
+    passou pelo corte de amostra mínima do repositório — todo item aqui
+    é reportável."""
+
+    reason_code: str
+    reason_label: str  # ver smart_insights_engine.describe_denial_reason
+    sample_size: int
+    confirmed_denial_rate: float  # fração 0.0-1.0
+
+
+class DenialReasonConfirmationResponse(BaseModel):
+    """GET /api/v1/analytics/denial-reason-confirmation — Camada 2 do
+    plano de IA preditiva: "as regras fixas do motor anti-glosa de fato
+    preveem glosa real?". Sem period_start/period_end de propósito (ver
+    DECISÃO no repositório): olha para TODO o histórico já resolvido, não
+    uma janela.
+
+    `baseline_denial_rate` é a taxa de glosa real entre os faturamentos
+    que o motor NÃO sinalizou nada (`denial_risk_level = 'low'`) — o
+    contraste que decide se um motivo em `items` está de fato prevendo
+    algo (taxa bem acima do baseline) ou é ruído (taxa parecida). `None`
+    quando ainda não há nenhum faturamento 'low' resolvido (base zero,
+    percentual indefinido — mesmo princípio de `_delta_pct` no service).
+    `items` só traz motivos com amostra >= `min_sample`, ordenados do
+    mais confirmado para o menos."""
+
+    baseline_sample_size: int
+    baseline_denial_rate: float | None
+    items: list[DenialReasonConfirmationItem]
+    min_sample: int
 
 
 class SmartInsightResponse(BaseModel):
@@ -426,10 +524,20 @@ class FinancialHoleBillingsResponse(BaseModel):
     trás do insight "Você está cobrando menos do que devia de alguns
     convênios" (ver DECISÃO em smart_insights_engine.py::_financial_hole_insight).
     `total_hole_value` é o mesmo número que o insight cita (ver
-    AnalyticsRepository.financial_hole_total) — os dois precisam bater."""
+    AnalyticsRepository.financial_hole_total) — os dois precisam bater,
+    e é sobre TODAS as contas do período, não só as da página atual.
+
+    `limit`/`offset` (achado do usuário: a lista antes mostrava só as
+    piores 15, sem jeito de ver o resto quando havia mais) — mesmo
+    formato de PaginatedResponse (app/schemas/pagination.py), repetido
+    aqui em vez de reaproveitado porque esta resposta já carrega
+    period_start/period_end/total_hole_value, que PaginatedResponse
+    genérico não tem espaço para."""
 
     period_start: date
     period_end: date
     items: list[FinancialHoleBillingItem]
     total_count: int
     total_hole_value: float
+    limit: int
+    offset: int

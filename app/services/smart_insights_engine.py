@@ -142,6 +142,39 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Sem constante de limiar de dias AQUI, de
+# propósito — diferente do resto deste arquivo, o corte "há quantos dias
+# conta como parado" precisa chegar até a query SQL (mesmo motivo de
+# APPEAL_DEADLINE_ALERT_HORIZON_DAYS viver em analytics_service.py, não
+# aqui): quem decide isso é AnalyticsService._STALE_LOTE_AFTER_DAYS, que
+# alimenta LoteRepository.stale_open_lotes_summary já filtrado — este
+# motor só recebe a contagem pronta (ver _stale_open_lotes_insight
+# abaixo) e decide "mostra ou não", nunca reaplica o corte.
+
+# PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito do
+# Gestor Clínico" (Seção 4, Achado 2): billing.created_at/settled_at
+# sempre existiram no banco, na mesma linha, mas nenhum indicador do
+# produto calculava essa diferença. Diferente do bloco de Lotes acima,
+# o corte AQUI não precisa chegar até a query SQL (a agregação —
+# AnalyticsRepository.payment_lag_total — devolve a média crua, sem
+# filtro de "quando alertar"), então os limiares vivem no motor, mesmo
+# padrão do resto deste arquivo.
+#
+# _PAYMENT_LAG_MARKET_BENCHMARK_DAYS é só contexto NARRATIVO (citado na
+# mensagem quando o prazo da própria clínica já passa dele) — nunca o
+# gatilho do alerta, que são os dois limiares abaixo. Segundo a ANAHP, o
+# PMR do setor de saúde suplementar no Brasil chegou a 77 dias em 2025;
+# 60/90 são um "chute razoável" ancorado nesse número (mesma limitação
+# de todo o resto dos limiares deste arquivo — Achado 7 da Auditoria de
+# Templates e Insights: não calibrado contra dado real de produção).
+_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 77.0
+_PAYMENT_LAG_WARNING_DAYS = 60.0
+_PAYMENT_LAG_CRITICAL_DAYS = 90.0
+_MIN_PAYMENT_LAG_SAMPLE = 5  # mesmo raciocínio de amostra mínima do resto do arquivo
+
 
 def _comparative_phrase(ratio: float) -> str:
     """Traduz uma razão numérica (ex: 1.8x) numa comparação que qualquer
@@ -274,6 +307,27 @@ class InsightsPeriodInput:
     coparticipation_total: float = 0.0
     coparticipation_billing_count: int = 0
     total_billing_count: int = 0
+    # Lotes de faturamento (core.lotes) com status='aberto' há mais de
+    # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
+    # — ver AnalyticsService._period_insights_input e
+    # LoteRepository.stale_open_lotes_summary. Estado "AGORA", mesmo
+    # raciocínio de appeals_due_soon_count: só o período atual recebe o
+    # valor real, o anterior fica no default (não existe "lotes abertos
+    # do período anterior" — comparar contra si mesmo não faz sentido).
+    stale_open_lotes_count: int = 0
+    oldest_open_lote_age_days: int | None = None
+    # PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito
+    # do Gestor Clínico": billing.created_at/settled_at sempre
+    # existiram no banco, mas nenhum indicador calculava essa diferença
+    # até esta rodada (ver AnalyticsRepository.payment_lag_total e
+    # _payment_lag_insight). Estado do PERÍODO (billing criado na
+    # janela, já conciliado) — comparável contra o período anterior,
+    # mesmo raciocínio de financial_hole_total/payment_gap_total, ao
+    # contrário de appeals_due_soon_count/stale_open_lotes_count (que
+    # são "AGORA"). None quando não há amostra (nenhum billing
+    # conciliado no período).
+    avg_days_to_receive: float | None = None
+    payment_lag_settled_count: int = 0
 
 
 @dataclass
@@ -467,6 +521,59 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
         financial_impact=current.payment_gap_total,
         action_label="Abrir um recurso",
         action_href="/denial-appeals",
+    )
+
+
+def _payment_lag_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    PMR (achado da auditoria "Veredito do Gestor Clínico" — Seção 4,
+    Achado 2): o segundo maior vilão financeiro do setor segundo a
+    ANAHP (77 dias em 2025), ao lado da glosa — e o dado pra calculá-lo
+    (billing.created_at/settled_at) sempre esteve no banco sem nenhum
+    indicador consumindo. Estado do PERÍODO (billing criado na janela,
+    já conciliado) — comparável contra o período anterior, mesmo
+    raciocínio de _financial_hole_insight/_payment_gap_insight, ao
+    contrário de _appeals_due_soon_insight/_stale_open_lotes_insight
+    (que são "AGORA").
+
+    Sem financial_impact de propósito: estimar quanto dinheiro fica
+    "preso" pelo atraso exigiria multiplicar dias por uma taxa de
+    oportunidade de capital que este produto não tem como saber — mesmo
+    princípio de nunca inventar um número que pareça mais preciso do
+    que a informação disponível sustenta.
+    """
+    if current.avg_days_to_receive is None or current.payment_lag_settled_count < _MIN_PAYMENT_LAG_SAMPLE:
+        return None
+    if current.avg_days_to_receive < _PAYMENT_LAG_WARNING_DAYS:
+        return None
+
+    severity = "critical" if current.avg_days_to_receive >= _PAYMENT_LAG_CRITICAL_DAYS else "warning"
+
+    trend_note = ""
+    if previous.avg_days_to_receive is not None and previous.payment_lag_settled_count >= _MIN_PAYMENT_LAG_SAMPLE:
+        delta_days = current.avg_days_to_receive - previous.avg_days_to_receive
+        if delta_days >= 5:
+            plural = "s" if round(delta_days) != 1 else ""
+            trend_note = f" E está piorando: {delta_days:.0f} dia{plural} a mais do que no período anterior."
+
+    market_note = ""
+    if current.avg_days_to_receive > _PAYMENT_LAG_MARKET_BENCHMARK_DAYS:
+        market_note = (
+            f" Isso já passa da média do setor de saúde suplementar no Brasil "
+            f"(~{_PAYMENT_LAG_MARKET_BENCHMARK_DAYS:.0f} dias, segundo a ANAHP)."
+        )
+
+    return Insight(
+        severity=severity,
+        category="faturamento",
+        title="Os convênios estão demorando demais pra pagar",
+        message=(
+            f"As contas já conciliadas neste período levaram em média {current.avg_days_to_receive:.0f} dias "
+            f"entre o faturamento e o recebimento.{market_note}{trend_note} Vale revisar quais convênios estão "
+            "puxando essa média pra cima e cobrar prazo deles."
+        ),
+        action_label="Ver prazo por convênio",
+        action_href="/",
     )
 
 
@@ -1016,6 +1123,46 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     )
 
 
+def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    "O que resta em aberto" da Auditoria de Templates e Insights: peça
+    natural do mesmo padrão que Guia/coparticipação já fecharam — dado
+    real já modelado (core.lotes.status/closed_at, Fase 2), só faltava
+    um insight consumindo.
+
+    Mesmo raciocínio de _appeals_due_soon_insight (alerta de estado
+    PRESENTE, não comparação com período anterior — um lote aberto há
+    muito tempo não fica "menos preocupante" por não ter mudado desde
+    ontem), mas 'warning', não 'critical': diferente de um recurso de
+    glosa vencendo, não há prazo LEGAL correndo aqui — o risco é
+    operacional (guias dentro do lote ficam paradas, sem virar fatura,
+    atrasando o recebimento), não uma perda irreversível de direito.
+
+    Sem botão de ação, DE PROPÓSITO: ainda não existe nenhuma tela de
+    Lotes no frontend (só o endpoint /lotes, hoje consumido só por
+    FaturaService.create_from_lotes internamente) — "nunca inventa
+    destino" (ver DECISÃO na dataclass Insight acima).
+    """
+    if current.stale_open_lotes_count <= 0:
+        return None
+    plural = "s" if current.stale_open_lotes_count != 1 else ""
+    age_note = (
+        f" O mais antigo está aberto há {current.oldest_open_lote_age_days} dias."
+        if current.oldest_open_lote_age_days is not None
+        else ""
+    )
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem lote de faturamento aberto há muito tempo",
+        message=(
+            f"Tem {current.stale_open_lotes_count} lote{plural} de faturamento aberto há muito tempo sem "
+            f"fechar.{age_note} As guias dentro desses lotes ficam paradas — não avançam para fatura enquanto "
+            "o lote não é fechado."
+        ),
+    )
+
+
 # Radar de Profissional Fora do Padrão — limiares de v1, mesmo espírito
 # de "chute razoável" documentado em no_show_risk_engine.py: exige a
 # taxa do profissional ser pelo menos o DOBRO da média da própria
@@ -1164,10 +1311,12 @@ def generate_insights(
         _weekday_drop_insight(current, previous),
         _weekday_no_show_rate_insight(current),
         _appeals_due_soon_insight(current),
+        _stale_open_lotes_insight(current),
         _denial_risk_pct_insight(current),
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),
+        _payment_lag_insight(current, previous),
         _value_saved_insight(current, previous),
         _capacity_drop_insight(current, previous, estimated_idle_capacity_revenue_lost),
         _no_show_risk_insight(current, estimated_no_show_revenue_at_risk),

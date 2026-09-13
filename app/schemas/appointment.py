@@ -113,5 +113,40 @@ class AppointmentResponse(BaseModel):
     no_show_risk_level: str | None
     no_show_risk_score: float | None
     created_at: datetime
+    # Achado 12 da Auditoria de Templates e Insights (médio) — os 4
+    # campos novos do Dicionário de Dados para Agenda eram validados e
+    # gravados pela ingestão, mas nenhuma resposta de leitura os
+    # devolvia — os insights de canal/motivo de cancelamento apontam o
+    # problema em agregado, mas a tela de destino não tinha como mostrar
+    # QUAL agendamento tem qual canal/motivo.
+    booked_at: datetime | None
+    visit_type: str | None
+    cancellation_reason: str | None
+    booking_channel: str | None
 
     model_config = {"from_attributes": True}
+
+
+class AppointmentListItem(BaseModel):
+    """Linha de GET /appointments (listagem paginada por período) — item
+    da lista "Agendamentos do período" (ver DECISÃO em
+    AppointmentRepository.list_by_date_range_paginated). Peça que faltava
+    depois do Achado 12 da Auditoria de Templates e Insights: os 2
+    insights de Agenda desta rodada (canal de agendamento, motivo de
+    cancelamento concentrado) apontavam o problema em AGREGADO, mas não
+    existia nenhuma tela que mostrasse QUAL agendamento tinha qual canal/
+    motivo — só o `AppointmentResponse` "nu" (sem nome do paciente,
+    pensado pra devolver UM registro após criar/atualizar, não pra
+    listar muitos de uma vez). Espelha o mesmo raciocínio de
+    BillingSearchItem: um recorte de leitura PRÓPRIO para humano
+    reconhecer a linha, com o nome do paciente já resolvido (evita N+1
+    no frontend)."""
+
+    id: UUID
+    patient_name: str
+    scheduled_at: datetime
+    status: str
+    procedure_code: str | None
+    visit_type: str | None
+    booking_channel: str | None
+    cancellation_reason: str | None

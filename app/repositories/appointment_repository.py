@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
+from app.models.patient import Patient
 
 
 class AppointmentRepository:
@@ -47,6 +48,38 @@ class AppointmentRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_by_date_range_paginated(
+        self, date_from: datetime, date_to: datetime, *, limit: int, offset: int
+    ) -> tuple[list[tuple[Appointment, str]], int]:
+        """
+        Peça que faltava depois do Achado 12 da Auditoria de Templates e
+        Insights: os insights de canal de agendamento/motivo de
+        cancelamento (ver smart_insights_engine.py) apontavam o problema
+        em AGREGADO, mas não existia nenhum endpoint que listasse
+        agendamentos individuais de um período — só `list_by_patient`
+        (um paciente específico) e `get_by_id` (um registro). Devolve
+        (Appointment, nome_do_paciente) já resolvido — mesmo motivo de
+        BillingRepository.search: evita o frontend fazer N+1 pra buscar
+        o nome de cada paciente da lista.
+
+        Mais recente primeiro (`scheduled_at.desc()`) — mesmo critério
+        de ordenação de `list_by_patient` e das demais listas paginadas
+        do projeto (ex.: BillingRepository.list_high_risk_paginated).
+        """
+        base = select(Appointment).where(Appointment.scheduled_at >= date_from, Appointment.scheduled_at <= date_to)
+        total = (await self.session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+
+        stmt = (
+            select(Appointment, Patient.full_name)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Appointment.scheduled_at >= date_from, Appointment.scheduled_at <= date_to)
+            .order_by(Appointment.scheduled_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.all()), total
 
     async def add(self, appointment: Appointment) -> Appointment:
         self.session.add(appointment)

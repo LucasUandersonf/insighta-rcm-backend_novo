@@ -88,6 +88,108 @@ async def _seed_revenue_leak_billing(client, admin_engine, tenant_id, headers, *
     return billing_resp.json()
 
 
+# PMR (Prazo Médio de Recebimento) — achado da auditoria "Veredito do
+# Gestor Clínico" (Seção 4, Achado 2): billing.created_at/settled_at
+# sempre existiram no banco, mas nenhum indicador calculava essa
+# diferença até esta rodada.
+
+
+async def _create_settled_billing_direct(client, admin_engine, tenant_id, headers, plan_id, *, days_to_receive, charged_value=200.0, created_at=None):
+    """Cria o billing via API (mais simples pros FKs de appointment/
+    convênio) e depois sobrescreve created_at/settled_at via SQL direto
+    — POST /billing e settle_billing sempre gravam now(), sem jeito de
+    simular "criado há N dias, recebido X dias depois" pela API (mesmo
+    motivo dos demais helpers `_direct` deste arquivo)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente PMR"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        },
+        headers=headers,
+    )
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    billing_id = billing_resp.json()["id"]
+    created = created_at or datetime.now(timezone.utc)
+    settled = created + timedelta(days=days_to_receive)
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE core.billing SET created_at = :created_at, settled_at = :settled_at, "
+                "received_value = charged_value, status = 'paid' WHERE id = :id"
+            ),
+            {"created_at": created, "settled_at": settled, "id": billing_id},
+        )
+    return billing_id
+
+
+async def test_executive_summary_includes_payment_lag_kpi(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    for days in (40.0, 60.0):
+        await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, plan_id, days_to_receive=days)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/executive-summary?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["avg_days_to_receive"] is not None
+    assert body["avg_days_to_receive"]["value"] == 50.0  # média de (40, 60)
+
+
+async def test_executive_summary_payment_lag_is_null_without_any_settled_billing(client, auth_headers_a, tenant_a):
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/executive-summary?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.json()["avg_days_to_receive"] is None
+
+
+async def test_payment_lag_by_plan_orders_worst_first(client, auth_headers_a, admin_engine, tenant_a):
+    slow_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Convênio Lento", normalized_key="convenio_lento")
+    fast_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Convênio Rápido", normalized_key="convenio_rapido")
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, slow_plan, days_to_receive=100.0)
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, fast_plan, days_to_receive=10.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/payment-lag-by-plan?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["billings_settled_count"] == 2
+    assert body["avg_days_to_receive"] == 55.0  # média de (100, 10)
+    assert [item["insurance_plan_name"] for item in body["items"]] == ["Convênio Lento", "Convênio Rápido"]
+    assert body["items"][0]["avg_days_to_receive"] == 100.0
+    assert body["items"][1]["avg_days_to_receive"] == 10.0
+
+
+async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # 5 billings conciliados, todos acima do limiar de alerta (60 dias)
+    # e do benchmark de mercado (77 dias, ANAHP) — amostra mínima cumprida.
+    for _ in range(5):
+        await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, plan_id, days_to_receive=95.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    lag_insight = next((i for i in insights if "demorando" in i["title"].lower()), None)
+    assert lag_insight is not None
+    assert lag_insight["severity"] == "critical"  # 95 dias >= 90 (limiar crítico)
+    assert "média do setor" in lag_insight["message"]
+
+
 async def test_executive_summary_computes_financial_hole_and_margin(client, auth_headers_a, admin_engine, tenant_a):
     await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
     date_from, date_to = _window()
@@ -192,6 +294,110 @@ async def test_financial_hole_billings_isolates_between_tenants(client, admin_en
     )
     assert response_b.status_code == 200
     assert response_b.json()["total_count"] == 0
+
+
+# Achado do usuário direto na tela ("Contas abaixo do combinado", Sala
+# de Comando): a lista era fixa em 15 linhas, sem paginação — se
+# houvesse mais contas do que isso, o resto simplesmente não tinha como
+# ser visto. Os 2 testes abaixo provam que a paginação real (limit/
+# offset, mesmo padrão de GET /appointments) funciona contra Postgres
+# real: total_count sempre reflete TODAS as contas, não só a página
+# atual, e a ordenação (pior hole_value primeiro) se mantém entre
+# páginas.
+
+
+async def _seed_revenue_leak_line(admin_engine, tenant_id, plan_id, contract_id, client, headers, *, tuss_code, agreed_value, charged_value):
+    """Uma linha adicional de vazamento de receita no MESMO
+    convênio+contrato — diferente de _seed_revenue_leak_billing (que
+    cria um convênio novo a cada chamada e colidiria com a constraint
+    UNIQUE (tenant_id, normalized_key) se chamada 2x para o mesmo
+    tenant), esta variante reaproveita plan_id/contract_id e só varia o
+    tuss_code, pra testar MÚLTIPLAS linhas do mesmo tenant."""
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.contract_items (tenant_id, contract_id, tuss_code, agreed_price) VALUES (:t, :c, :code, :value)"),
+            {"t": tenant_id, "c": contract_id, "code": tuss_code, "value": agreed_value},
+        )
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": f"Paciente {tuss_code}"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": tuss_code,
+        },
+        headers=headers,
+    )
+    resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_financial_hole_billings_paginates_worst_first(client, admin_engine, tenant_a, auth_headers_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    contract_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status) VALUES (:id, :t, :plan, '2026-01-01', 'homologado')"),
+            {"id": contract_id, "t": tenant_a, "plan": plan_id},
+        )
+
+    # 5 linhas com hole_value 10/20/30/40/50 (agreed_value fixo em 200,
+    # charged_value variando) — pior primeiro é hole_value 50.
+    for i, hole in enumerate((10.0, 20.0, 30.0, 40.0, 50.0)):
+        await _seed_revenue_leak_line(
+            admin_engine, tenant_a, plan_id, contract_id, client, auth_headers_a,
+            tuss_code=f"HOLE{i}", agreed_value=200.0, charged_value=200.0 - hole,
+        )
+
+    date_from, date_to = _window()
+
+    first_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=0",
+        headers=auth_headers_a,
+    )
+    assert first_page.status_code == 200
+    body = first_page.json()
+    assert body["total_count"] == 5  # sempre TODAS, não só a página atual
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+    assert [item["hole_value"] for item in body["items"]] == [50.0, 40.0]
+
+    second_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=2",
+        headers=auth_headers_a,
+    )
+    body2 = second_page.json()
+    assert body2["total_count"] == 5
+    assert [item["hole_value"] for item in body2["items"]] == [30.0, 20.0]
+
+    last_page = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}&limit=2&offset=4",
+        headers=auth_headers_a,
+    )
+    body3 = last_page.json()
+    assert body3["total_count"] == 5
+    assert [item["hole_value"] for item in body3["items"]] == [10.0]  # última página, só 1 sobra
+
+
+async def test_financial_hole_billings_defaults_to_first_15_when_unpaginated(client, admin_engine, tenant_a, auth_headers_a):
+    """Sem `limit`/`offset` na URL, o comportamento é IDÊNTICO ao de
+    antes desta correção (15 primeiras, pior primeiro) — a paginação é
+    aditiva, não uma mudança de contrato pra quem já consumia o
+    endpoint sem esses parâmetros."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["limit"] == 15
+    assert body["offset"] == 0
 
 
 async def test_agenda_metrics_returns_peak_hours_and_professionals(client, auth_headers_a, admin_engine, tenant_a):
@@ -1003,3 +1209,330 @@ async def test_smart_insights_flags_coparticipation_visibility_from_real_data(cl
     assert response.status_code == 200
     titles = [i["title"] for i in response.json()["insights"]]
     assert any("coparticipação" in t.lower() for t in titles)
+
+
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Mesmo espírito dos 4 testes acima (Achado
+# 5): prova que a agregação SQL (LoteRepository.stale_open_lotes_summary)
+# de fato funciona contra um banco real, não só que o motor puro está
+# certo (já coberto em test_smart_insights_engine.py).
+
+
+async def _create_lote_direct(admin_engine, tenant_id, plan_id, *, created_at, status="aberto", tipo="consulta") -> str:
+    """Insere um Lote direto via SQL, com created_at controlado — mesmo
+    motivo de _create_appointment_direct acima: o endpoint manual
+    (POST /lotes) sempre grava created_at = now() do banco (server_default,
+    ver app/models/lote.py), sem jeito de simular "criado há 45 dias"
+    através da API."""
+    lote_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.lotes (id, tenant_id, insurance_plan_id, tipo, status, created_at) "
+                "VALUES (:id, :t, :plan, :tipo, :status, :created_at)"
+            ),
+            {"id": lote_id, "t": tenant_id, "plan": plan_id, "tipo": tipo, "status": status, "created_at": created_at},
+        )
+    return lote_id
+
+
+async def test_smart_insights_flags_stale_open_lotes_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    now = datetime.now(timezone.utc)
+
+    # 2 lotes abertos há 45 dias (> corte de 30) — devem contar; o de 50
+    # dias é o mais antigo (idade reportada no insight).
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=45))
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=50))
+    # Lote aberto há só 5 dias — dentro do corte, não deveria contar.
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=5))
+    # Lote FECHADO há 90 dias — status != 'aberto', nunca deveria contar
+    # (um lote fechado não está "parado", já virou fatura ou está pronto
+    # pra virar).
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=90), status="fechado")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    lote_insight = next((i for i in insights if "lote" in i["title"].lower()), None)
+    assert lote_insight is not None
+    assert lote_insight["severity"] == "warning"
+    assert lote_insight["category"] == "faturamento"
+    assert "2 lotes" in lote_insight["message"]
+    assert "50 dias" in lote_insight["message"]
+    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
+    assert lote_insight["action_href"] is None
+
+
+async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    now = datetime.now(timezone.utc)
+    # Aberto há só 5 dias (dentro do corte) e um fechado há bastante
+    # tempo — nenhum dos dois deveria disparar o insight.
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=5))
+    await _create_lote_direct(admin_engine, tenant_a, plan_id, created_at=now - timedelta(days=90), status="fechado")
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert not any("lote" in t.lower() for t in titles)
+
+
+# Previsão de receita futura da agenda — pedido direto do usuário: "a
+# receita da agenda... conseguimos tirar metade do faturamento futuro da
+# clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.
+
+
+async def _create_scheduled_appointment(
+    client, admin_engine, tenant_id, headers, plan_id, *, procedure_code=None, no_show_risk_score=None, days_ahead=1
+):
+    """Cria um agendamento FUTURO (status 'scheduled', o default da API)
+    via HTTP e, opcionalmente, sobrescreve no_show_risk_score via SQL
+    direto — a API sempre calcula esse campo sozinha a partir do
+    histórico do paciente (ver no_show_risk_engine.py), sem jeito de
+    "forçar" um valor específico por parâmetro de request. Um paciente
+    novo (sem histórico algum) já nasce com score None (indeterminado)
+    calculado pelo próprio motor, sem precisar de nenhum override — só
+    sobrescrevemos quando o teste precisa de um valor CONHECIDO
+    específico (mesmo padrão de `_create_settled_billing_direct`)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Previsão"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat(),
+            **({"procedure_code": procedure_code} if procedure_code else {}),
+        },
+        headers=headers,
+    )
+    assert appointment_resp.status_code == 201
+    appointment_id = appointment_resp.json()["id"]
+    if no_show_risk_score is not None:
+        async with admin_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE core.appointments SET no_show_risk_score = :score WHERE id = :id"),
+                {"score": no_show_risk_score, "id": appointment_id},
+            )
+    return appointment_id
+
+
+def _forecast_window() -> tuple[str, str]:
+    """Janela [hoje, hoje+5] — cobre os agendamentos de amanhã que
+    `_create_scheduled_appointment` cria por padrão (days_ahead=1)."""
+    today = date.today()
+    return today.isoformat(), (today + timedelta(days=5)).isoformat()
+
+
+async def test_agenda_revenue_forecast_splits_known_risk_from_unrated_and_unpriced(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # 1) Preço encontrado + risco calculado (20% de chance de falta) ->
+    # known_risk_value=200, expected_value=200*(1-0.20)=160.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012", no_show_risk_score=0.20
+    )
+    # 2) Preço encontrado, mas paciente novo -> score None (indeterminado
+    # de verdade, calculado pelo próprio motor, sem override) ->
+    # unrated_value=200, NUNCA entra em expected_value.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012"
+    )
+    # 3) Sem contrato vigente para este procedimento -> unpriced_count,
+    # fora de qualquer soma de valor.
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="99999999"
+    )
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 3
+    assert body["total_scheduled_value"] == 400.0  # só os 2 com preço encontrado
+    assert body["known_risk_count"] == 1
+    assert body["known_risk_value"] == 200.0
+    assert body["expected_value"] == 160.0  # 200 * (1 - 0.20)
+    assert body["unrated_count"] == 1
+    assert body["unrated_value"] == 200.0
+    assert body["unpriced_count"] == 1
+
+
+async def test_agenda_revenue_forecast_ignores_appointments_no_longer_scheduled(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Achado do usuário: a previsão é sobre o que AINDA vai acontecer —
+    um agendamento já concluído (ou cancelado) não é mais "receita
+    futura da agenda", já virou (ou deixou de ser) faturamento real."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=300.0)
+
+    appointment_id = await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, procedure_code="10101012", no_show_risk_score=0.10
+    )
+    async with admin_engine.begin() as conn:
+        await conn.execute(text("UPDATE core.appointments SET status = 'completed' WHERE id = :id"), {"id": appointment_id})
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 0
+    assert body["total_scheduled_value"] == 0.0
+
+
+async def test_agenda_revenue_forecast_isolates_between_tenants(
+    client, admin_engine, tenant_a, auth_headers_a, auth_headers_b
+):
+    plan_a = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_a, procedure_code="10101012", agreed_value=500.0)
+    await _create_scheduled_appointment(
+        client, admin_engine, tenant_a, auth_headers_a, plan_a, procedure_code="10101012", no_show_risk_score=0.0
+    )
+
+    date_from, date_to = _forecast_window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-revenue-forecast?date_from={date_from}&date_to={date_to}", headers=auth_headers_b
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_scheduled_count"] == 0
+    assert body["total_scheduled_value"] == 0.0
+
+
+# Camada 2 do plano de IA preditiva ("aprender com o histórico real de
+# decisões") — pedido direto do usuário: as regras fixas do motor
+# anti-glosa (denial_risk_engine.py) de fato preveem glosa real? Ver
+# DECISÃO completa em AnalyticsRepository.denial_reason_confirmation_rates.
+
+
+async def _create_billing_scenario(client, admin_engine, tenant_id, headers, plan_id, *, scenario, final_status):
+    """Cria paciente+agendamento+faturamento via API reproduzindo UM
+    motivo específico do denial_risk_engine, depois sobrescreve
+    billing.status via SQL direto para simular o desfecho REAL já
+    conhecido ('paid'/'denied') — a API nunca grava esse desfecho
+    sozinha na criação (só normalization_service.py, via upload de
+    arquivo de Glosa, ou settle_billing, mesmo motivo dos demais
+    helpers `_direct` deste arquivo).
+
+    `scenario`:
+      - "missing_cid": CID ausente, contrato cobrando o valor exato ->
+        denial_reasons = ["missing_cid"], nada mais.
+      - "no_contract": procedimento sem contrato cadastrado para este
+        convênio -> denial_reasons = ["no_contract_reference"].
+      - "value_above": cobrança acima do valor de contrato ->
+        denial_reasons = ["value_above_contract"].
+      - "clean": CID, procedimento com contrato, valor exato -> nenhum
+        motivo sinalizado (denial_risk_level = "low", o baseline).
+    """
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Confirmação"}, headers=headers)
+    patient_id = patient_resp.json()["id"]
+
+    procedure_code = "99999999" if scenario == "no_contract" else "10101012"
+    appointment_payload = {
+        "patient_id": patient_id,
+        "insurance_plan_id": plan_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "procedure_code": procedure_code,
+    }
+    if scenario != "missing_cid":
+        appointment_payload["cid_code"] = "J06"
+    appointment_resp = await client.post("/api/v1/appointments", json=appointment_payload, headers=headers)
+    appointment_id = appointment_resp.json()["id"]
+
+    charged_value = 250.0 if scenario == "value_above" else 200.0
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=headers,
+    )
+    assert billing_resp.status_code == 201
+    billing_id = billing_resp.json()["id"]
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE core.billing SET status = :status WHERE id = :id"), {"status": final_status, "id": billing_id}
+        )
+    return billing_id
+
+
+async def test_denial_reason_confirmation_contrasts_real_denial_rate_against_baseline(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # Baseline (nenhum motivo sinalizado): 5 faturamentos resolvidos, 1
+    # de fato virou glosa -> taxa real de 20%.
+    for st in ("denied", "paid", "paid", "paid", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="clean", final_status=st)
+
+    # missing_cid: 5 faturamentos, 4 viraram glosa de verdade -> 80%, bem
+    # acima do baseline -> a regra TEM poder preditivo real.
+    for st in ("denied", "denied", "denied", "denied", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="missing_cid", final_status=st)
+
+    # no_contract_reference: 5 faturamentos, só 1 virou glosa de verdade
+    # -> 20%, igual ao baseline -> a regra NÃO está prevendo nada (achado
+    # honesto: "sem cadastro de contrato" é falta de dado, não indício
+    # real de recusa).
+    for st in ("denied", "paid", "paid", "paid", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="no_contract", final_status=st)
+
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["baseline_sample_size"] == 5
+    assert body["baseline_denial_rate"] == 0.2
+    assert body["min_sample"] == 5
+
+    by_code = {item["reason_code"]: item for item in body["items"]}
+    assert by_code["missing_cid"]["sample_size"] == 5
+    assert by_code["missing_cid"]["confirmed_denial_rate"] == 0.8
+    assert by_code["no_contract_reference"]["sample_size"] == 5
+    assert by_code["no_contract_reference"]["confirmed_denial_rate"] == 0.2
+    # Ordenado do mais confirmado pro menos.
+    assert [item["reason_code"] for item in body["items"]][0] == "missing_cid"
+
+
+async def test_denial_reason_confirmation_hides_reasons_below_min_sample(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=200.0)
+
+    # Só 3 faturamentos resolvidos com value_above_contract — abaixo do
+    # min_sample (5, default): ruído estatístico demais pra reportar uma
+    # taxa, não deveria aparecer nos itens.
+    for st in ("denied", "denied", "paid"):
+        await _create_billing_scenario(client, admin_engine, tenant_a, auth_headers_a, plan_id, scenario="value_above", final_status=st)
+
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert not any(item["reason_code"] == "value_above_contract" for item in body["items"])
+
+
+async def test_denial_reason_confirmation_baseline_is_none_without_any_resolved_billing(
+    client, auth_headers_a, tenant_a
+):
+    response = await client.get("/api/v1/analytics/denial-reason-confirmation", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["baseline_sample_size"] == 0
+    assert body["baseline_denial_rate"] is None
+    assert body["items"] == []

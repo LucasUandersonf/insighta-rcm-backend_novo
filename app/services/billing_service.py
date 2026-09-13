@@ -171,6 +171,8 @@ class BillingService:
                 status=billing.status,
                 denial_risk_level=billing.denial_risk_level,
                 created_at=billing.created_at,
+                item_type=billing.item_type,
+                member_card_number=billing.member_card_number,
             )
             for billing, patient_name, procedure_code, plan_name in rows
         ]

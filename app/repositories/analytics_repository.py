@@ -122,6 +122,68 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
 
+    async def payment_lag_total(self, date_from: date, date_to: date) -> tuple[float | None, int]:
+        """
+        Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito
+        do Gestor Clínico": `billing.created_at`/`settled_at` sempre
+        existiram no banco, na mesma linha, mas nenhum indicador do
+        produto calculava essa diferença. Segundo a ANAHP, o PMR do
+        setor de saúde suplementar chegou a 77 dias em 2025 — quase tão
+        grave quanto a glosa (que já tinha insight próprio desde antes).
+
+        Mesma semântica de período de `financial_hole_total`/
+        `payment_gap_total`: billing CRIADO na janela (`created_at`), só
+        entram os já conciliados (`settled_at IS NOT NULL`, mesmo filtro
+        de `payment_gap_total`) — um billing sem `settled_at` ainda não
+        tem "prazo de recebimento" pra medir, só "ainda não recebido".
+
+        Devolve (média de dias entre `created_at` e `settled_at`,
+        quantidade de billings considerados) — a média é `None` quando
+        não há nenhum billing conciliado no período (amostra zero, nunca
+        "0 dias" inventado).
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0), COUNT(*)
+            FROM core.billing b
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.settled_at IS NOT NULL
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        avg_days, count = result.one()
+        return (float(avg_days) if avg_days is not None else None, int(count))
+
+    async def payment_lag_by_plan(self, date_from: date, date_to: date) -> list[dict]:
+        """Mesma regra de `payment_lag_total`, agrupada por convênio —
+        pior prazo primeiro, pra apontar QUAL operadora está de fato
+        travando o caixa (ver PaymentLagPanel.tsx, frontend)."""
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT ip.id, ip.display_name,
+                   AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0) AS avg_days,
+                   COUNT(*) AS settled_count
+            FROM core.billing b
+            JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
+            WHERE b.created_at >= :start AND b.created_at <= :end
+              AND b.settled_at IS NOT NULL
+            GROUP BY ip.id, ip.display_name
+            ORDER BY avg_days DESC
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        return [
+            {
+                "insurance_plan_id": str(row[0]),
+                "insurance_plan_name": row[1],
+                "avg_days_to_receive": float(row[2]),
+                "billings_settled_count": int(row[3]),
+            }
+            for row in result.all()
+        ]
+
     async def financial_hole_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `financial_hole_total`, mas agrupada por
         convênio — a base do ranking de perda financeira por operadora
@@ -193,15 +255,25 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return int(result.scalar_one())
 
-    async def list_financial_hole_billings(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+    async def list_financial_hole_billings(
+        self, date_from: date, date_to: date, *, limit: int = 15, offset: int = 0
+    ) -> list[dict]:
         """
         As contas reais por trás do "Divergência de Cobrança" — o insight
         de cobrança abaixo do contrato (smart_insights_engine.py::
         _financial_hole_insight) diz QUANTO no total, esta lista diz
         QUAIS contas, pra quem cuida do faturamento revisar e corrigir
-        uma a uma. Só as piores (`hole_value` maior) primeiro — mesmo
-        espírito de "lista curta e acionável" de list_inactive_patients/
-        list_recall_candidates, não uma tela de auditoria completa.
+        uma a uma. Piores (`hole_value` maior) primeiro.
+
+        Achado do usuário direto na tela: a versão original desta lista
+        (limit=15, sem `offset`) mostrava só as piores e nunca dizia como
+        ver o resto — uma clínica com 30 contas nessa situação via
+        literalmente a metade, sem scroll nem paginação. Agora é uma
+        lista paginável de verdade (mesmo padrão de
+        AppointmentRepository.list_by_date_range_paginated) — o `limit`
+        default continua 15 (mesmo tamanho de página de sempre, primeira
+        página idêntica ao comportamento anterior), só ganhou `offset`
+        pra alcançar as demais.
         """
         start, end = _bounds(date_from, date_to)
         stmt = text(
@@ -210,10 +282,10 @@ class AnalyticsRepository:
                    ip.display_name, b.charged_value, ci.agreed_price, (ci.agreed_price - b.charged_value) AS hole_value
             {self._FINANCIAL_HOLE_BILLINGS_FROM}
             ORDER BY hole_value DESC
-            LIMIT :limit
+            LIMIT :limit OFFSET :offset
             """
         )
-        result = await self.session.execute(stmt, {"start": start, "end": end, "limit": limit})
+        result = await self.session.execute(stmt, {"start": start, "end": end, "limit": limit, "offset": offset})
         return [
             {
                 "billing_id": str(row[0]),
@@ -493,6 +565,78 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"as_of": as_of, "levels": ["medio", "alto"]})
         return {int(weekday): int(count) for weekday, count in result.all()}
 
+    async def agenda_revenue_forecast(self, date_from: date, date_to: date) -> dict:
+        """
+        Previsão de receita futura da agenda — achado do usuário direto:
+        "a receita da agenda... conseguimos tirar metade do faturamento
+        futuro da clínica". Olha agendamentos FUTUROS (status
+        'scheduled', diferente do resto deste arquivo que olha o
+        passado) e projeta quanto a clínica deve faturar, cruzando
+        `ContractItem.agreed_price` (mesmo LATERAL JOIN de
+        `financial_hole_total`) com `Appointment.no_show_risk_score`
+        (já calculado por `no_show_risk_engine.py` na criação do
+        agendamento — nenhum dado novo).
+
+        DECISÃO — nunca finge confiança que o dado não tem: 3 baldes,
+        nunca um número só
+        -------------------------------------------------------------
+        Um agendamento cai em exatamente um destes:
+          1) `agreed_price` encontrado E `no_show_risk_score` calculado
+             -> entra em `known_risk_value` (bruto) e `expected_value`
+             (ajustado por 1 - risco de falta).
+          2) `agreed_price` encontrado, mas `no_show_risk_score` NULL
+             (paciente "indeterminado" — sem histórico, ver
+             no_show_risk_engine.py) -> `unrated_value`, DE FORA do
+             ajuste de risco (mesmo princípio de "indeterminado nunca
+             vira baixo risco por omissão" do motor de no-show).
+          3) `agreed_price` não encontrado (sem convênio/procedimento
+             definido ainda, ou sem contrato vigente) -> `unpriced_count`,
+             fora de qualquer estimativa de valor.
+        Somar os 3 num único "valor esperado" esconderia exatamente a
+        incerteza que o resto do produto já se recusa a esconder.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = text(
+            """
+            SELECT
+                COUNT(*) AS total_scheduled_count,
+                COALESCE(SUM(ci.agreed_price), 0) AS total_scheduled_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NOT NULL) AS known_risk_count,
+                COALESCE(SUM(ci.agreed_price) FILTER (WHERE a.no_show_risk_score IS NOT NULL), 0) AS known_risk_value,
+                COALESCE(SUM(ci.agreed_price * (1 - a.no_show_risk_score)) FILTER (WHERE a.no_show_risk_score IS NOT NULL), 0) AS expected_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NULL) AS unrated_count,
+                COALESCE(SUM(ci.agreed_price) FILTER (WHERE ci.agreed_price IS NOT NULL AND a.no_show_risk_score IS NULL), 0) AS unrated_value,
+                COUNT(*) FILTER (WHERE ci.agreed_price IS NULL) AS unpriced_count
+            FROM core.appointments a
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = a.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= a.scheduled_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= a.scheduled_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :start AND a.scheduled_at <= :end
+            """
+        )
+        result = await self.session.execute(stmt, {"start": start, "end": end})
+        row = result.one()
+        return {
+            "total_scheduled_count": int(row.total_scheduled_count),
+            "total_scheduled_value": float(row.total_scheduled_value),
+            "known_risk_count": int(row.known_risk_count),
+            "known_risk_value": float(row.known_risk_value),
+            "expected_value": float(row.expected_value),
+            "unrated_count": int(row.unrated_count),
+            "unrated_value": float(row.unrated_value),
+            "unpriced_count": int(row.unpriced_count),
+        }
+
     async def avg_charged_value(self, date_from: date, date_to: date) -> float:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.coalesce(func.avg(Billing.charged_value), 0)).where(
@@ -768,6 +912,66 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {level: int(count) for level, count in result.all()}
+
+    async def denial_reason_confirmation_rates(self, *, min_sample: int = 5) -> dict:
+        """
+        Camada 2 do plano de IA preditiva ("aprender com o histórico
+        real"): o quanto cada motivo que denial_risk_engine.py sinaliza
+        NA CRIAÇÃO do faturamento (regras fixas e auditáveis — ver
+        DECISÃO no próprio motor) de fato se confirma como glosa REAL
+        depois. Nenhum modelo de ML aqui — só frequência real sobre o
+        desfecho já conhecido de cada faturamento: `Billing.status` só
+        vira 'denied' quando o Template de Glosa normaliza um arquivo
+        real da operadora confirmando a recusa (ver
+        normalization_service.py), e só vira 'paid' quando o pagamento
+        realmente chegou (`BillingService.settle_billing`). Faturamento
+        'pending' (ainda não conciliado) fica de fora dos dois lados da
+        conta — não sabemos o desfecho real ainda, incluir só inflaria a
+        amostra sem informação nenhuma (mesmo cuidado de "nunca inventar
+        confiança que a evidência não dá" do resto do produto).
+
+        `baseline` é a taxa de glosa real entre os faturamentos que o
+        motor NÃO sinalizou nada (`denial_risk_level = 'low'`) — o
+        contraste que prova (ou desmente) se as regras têm poder
+        preditivo de verdade: um motivo com taxa parecida com o baseline
+        não está prevendo nada.
+
+        Sem filtro de período de propósito (mesmo espírito de
+        get_health_score/get_inactive_patients, AnalyticsService): aqui o
+        objetivo é a melhor estimativa possível de precisão do motor até
+        agora, não "o que aconteceu numa janela" — mais faturamento JÁ
+        RESOLVIDO só deixa a taxa mais estável.
+
+        Retorna {"baseline": (denied_count, total_count), "by_reason":
+        {reason_code: (denied_count, total_count)}}. `by_reason` só inclui
+        combinações com total >= min_sample (mesmo raciocínio de
+        `professional_denial_rates` acima) — um motivo com 1 ou 2 casos
+        resolvidos não é um padrão, é ruído estatístico; `baseline` não
+        passa por esse corte, é reportado sempre que houver qualquer
+        faturamento 'low' resolvido (é o denominador de comparação, não
+        uma afirmação sobre um motivo específico).
+        """
+        denied_case = case((Billing.status == "denied", 1), else_=0)
+        baseline_stmt = select(func.coalesce(func.sum(denied_case), 0), func.count()).where(
+            Billing.status.in_(("paid", "denied")), Billing.denial_risk_level == "low"
+        )
+        baseline_denied, baseline_total = (await self.session.execute(baseline_stmt)).one()
+
+        reason_stmt = text(
+            """
+            SELECT reason.value AS reason_code,
+                   COUNT(*) FILTER (WHERE b.status = 'denied') AS denied_count,
+                   COUNT(*) AS total_count
+            FROM core.billing b, jsonb_array_elements_text(b.denial_reasons) AS reason(value)
+            WHERE b.status IN ('paid', 'denied')
+            GROUP BY reason.value
+            HAVING COUNT(*) >= :min_sample
+            """
+        )
+        result = await self.session.execute(reason_stmt, {"min_sample": min_sample})
+        by_reason = {row.reason_code: (int(row.denied_count), int(row.total_count)) for row in result.all()}
+
+        return {"baseline": (int(baseline_denied), int(baseline_total)), "by_reason": by_reason}
 
     async def no_show_risk_breakdown(self, *, as_of: datetime) -> dict[str, int]:
         """Agrupa AGENDAMENTOS FUTUROS AINDA NÃO REALIZADOS (status

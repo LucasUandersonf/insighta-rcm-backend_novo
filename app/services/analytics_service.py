@@ -26,14 +26,18 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DenialReasonConfirmationItem,
+    DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
@@ -48,6 +52,8 @@ from app.schemas.analytics import (
     PeriodKPI,
     FinancialHoleBillingItem,
     FinancialHoleBillingsResponse,
+    PaymentLagByPlanItem,
+    PaymentLagByPlanResponse,
     PlanLossItem,
     PlanLossRankingResponse,
     ProfessionalCapacityMetric,
@@ -70,6 +76,15 @@ from app.services.smart_insights_engine import (
     generate_insights,
     is_true_denial_risk_reason,
 )
+
+# Amostra mínima antes de reportar a taxa de confirmação de um motivo
+# (ver AnalyticsService.get_denial_reason_confirmation) — mesmo valor
+# default de AnalyticsRepository.professional_denial_rates, mesmo
+# raciocínio de MIN_SPECIFIC_SAMPLES (no_show_risk_engine.py): um
+# "chute" de partida documentado, não uma calibração validada com dado
+# real (mesma limitação já registrada no Achado 7 da Auditoria para os
+# demais limiares deste produto).
+DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -96,6 +111,22 @@ _INACTIVE_PATIENT_AFTER_DAYS = 365
 # princípio de MIN_SAMPLE_SIZE/thresholds em smart_insights_engine.py,
 # um número fixo e nomeado em vez de mágico espalhado pelo código.
 APPEAL_DEADLINE_ALERT_HORIZON_DAYS = 5
+
+# "O que resta em aberto" da Auditoria de Templates e Insights: peça
+# natural do mesmo padrão que Guia/coparticipação já fecharam —
+# core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
+# consumindo até esta rodada. Mesmo motivo de o corte viver AQUI (e não
+# em smart_insights_engine.py, junto dos outros limiares) que
+# APPEAL_DEADLINE_ALERT_HORIZON_DAYS acima: o corte precisa chegar até a
+# query SQL (LoteRepository.stale_open_lotes_summary), não é aplicado
+# sobre um dado já bruto que o motor filtra depois — o motor
+# (_stale_open_lotes_insight) só decide "mostra ou não", já recebe a
+# contagem pronta. 30 dias é um chute razoável (ciclo de fechamento
+# mensal de lote é comum no mercado — mesmos 3 ERPs pesquisados pra
+# Guia/Lote), não calibrado com dado real — mesma limitação já
+# documentada no Achado 7 da Auditoria para os demais limiares deste
+# motor: revisitar quando houver volume real de uso.
+_STALE_LOTE_AFTER_DAYS = 30
 
 # "Lista vermelha" de pacientes (Painel → Agenda) — mesmo raciocínio de
 # amostra mínima de no_show_risk_engine.MIN_SPECIFIC_SAMPLES: exige pelo
@@ -232,6 +263,7 @@ class AnalyticsService:
         appeal_repo: DenialAppealRepository,
         tenant_repo: TenantRepository,
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
+        lote_repo: LoteRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -240,6 +272,7 @@ class AnalyticsService:
         self.tenant_repo = tenant_repo
         self.availability_repo = availability_repo
         self.health_score_snapshot_repo = health_score_snapshot_repo
+        self.lote_repo = lote_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -287,6 +320,11 @@ class AnalyticsService:
 
         current_utilization = await self._avg_utilization(date_from, date_to)
         previous_utilization = await self._avg_utilization(previous.start, previous.end)
+
+        # PMR (achado da auditoria "Veredito do Gestor Clínico") — ver
+        # DECISÃO completa em AnalyticsRepository.payment_lag_total.
+        current_lag_days, _current_lag_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
+        previous_lag_days, _previous_lag_count = await self.analytics_repo.payment_lag_total(previous.start, previous.end)
 
         appeals_due_soon_count = await self.appeal_repo.count_due_within(
             as_of=date.today(), horizon_days=APPEAL_DEADLINE_ALERT_HORIZON_DAYS
@@ -337,6 +375,44 @@ class AnalyticsService:
             appeals_due_soon_count=appeals_due_soon_count,
             denial_risk_pct=denial_risk_pct,
             denial_at_risk_value=denial_at_risk_value,
+            avg_days_to_receive=(
+                PeriodKPI(
+                    value=current_lag_days,
+                    previous_value=previous_lag_days or 0.0,
+                    delta_pct=_delta_pct(current_lag_days, previous_lag_days or 0.0),
+                )
+                if current_lag_days is not None
+                else None
+            ),
+        )
+
+    async def get_payment_lag_by_plan(self, date_from: date, date_to: date) -> PaymentLagByPlanResponse:
+        """
+        Ranking de PMR por convênio — pior prazo primeiro, pra apontar
+        QUAL operadora está de fato travando o caixa (ver DECISÃO
+        completa em AnalyticsRepository.payment_lag_total/
+        payment_lag_by_plan e "Veredito do Gestor Clínico", achado 2).
+        `avg_days_to_receive`/`billings_settled_count` no topo repetem o
+        agregado do tenant inteiro (mesmo número de
+        ExecutiveSummaryResponse.avg_days_to_receive.value) — os `items`
+        decompõem isso por convênio.
+        """
+        avg_days, settled_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
+        rows = await self.analytics_repo.payment_lag_by_plan(date_from, date_to)
+        return PaymentLagByPlanResponse(
+            period_start=date_from,
+            period_end=date_to,
+            avg_days_to_receive=avg_days,
+            billings_settled_count=settled_count,
+            items=[
+                PaymentLagByPlanItem(
+                    insurance_plan_id=uuid.UUID(row["insurance_plan_id"]),
+                    insurance_plan_name=row["insurance_plan_name"],
+                    avg_days_to_receive=row["avg_days_to_receive"],
+                    billings_settled_count=row["billings_settled_count"],
+                )
+                for row in rows
+            ],
         )
 
     async def get_agenda_metrics(self, date_from: date, date_to: date) -> AgendaMetricsResponse:
@@ -528,6 +604,7 @@ class AnalyticsService:
         upcoming_risk_count_by_weekday: dict[int, int] | None = None,
         professional_utilization_rates: list[tuple[str, str, float]] | None = None,
         include_agenda_text_breakdowns: bool = True,
+        stale_open_lotes: tuple[int, int | None] = (0, None),
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -542,10 +619,21 @@ class AnalyticsService:
         # estado "AGORA" (prazo vencendo hoje), não algo que faça sentido
         # perguntar de novo para o "período anterior" — comparar contra
         # si mesmo sempre daria delta zero. Só o período ATUAL recebe o
-        # valor real; o anterior fica no default 0 do dataclass.
+        # valor real; o anterior fica no default 0 do dataclass. Mesmo
+        # raciocínio para stale_open_lotes (lotes abertos há muito tempo,
+        # ver LoteRepository.stale_open_lotes_summary/
+        # _stale_open_lotes_insight) — "O que resta em aberto" da
+        # Auditoria de Templates e Insights, próxima peça do mesmo padrão
+        # que Guia/coparticipação já fecharam.
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         financial_hole = await self.analytics_repo.financial_hole_total(date_from, date_to)
         payment_gap = await self.analytics_repo.payment_gap_total(date_from, date_to)
+        # PMR (achado da auditoria "Veredito do Gestor Clínico") —
+        # chamado uma vez por período (atual e anterior), mesmo padrão de
+        # financial_hole/payment_gap acima: _payment_lag_insight compara
+        # os dois, ao contrário de appeals_due_soon/stale_open_lotes
+        # (estado "AGORA", só o período atual importa).
+        payment_lag_days, payment_lag_settled_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
         avg_utilization = await self._avg_utilization(date_from, date_to)
         denial_findings = await self.analytics_repo.denial_findings_by_plan(date_from, date_to)
         # "Sempre a partir de agora", nunca da janela do dashboard — ver
@@ -629,6 +717,10 @@ class AnalyticsService:
             coparticipation_total=coparticipation_total,
             coparticipation_billing_count=coparticipation_billing_count,
             total_billing_count=total_billing_count,
+            stale_open_lotes_count=stale_open_lotes[0],
+            oldest_open_lote_age_days=stale_open_lotes[1],
+            avg_days_to_receive=payment_lag_days,
+            payment_lag_settled_count=payment_lag_settled_count,
         )
 
     async def get_smart_insights(
@@ -642,6 +734,12 @@ class AnalyticsService:
         previous = _previous_period(date_from, date_to)
         appeals_due_soon = await self.appeal_repo.count_due_within(
             as_of=date.today(), horizon_days=APPEAL_DEADLINE_ALERT_HORIZON_DAYS
+        )
+        # "O que resta em aberto" da Auditoria de Templates e Insights:
+        # estado "AGORA" (mesmo raciocínio de appeals_due_soon acima) —
+        # ver LoteRepository.stale_open_lotes_summary/_STALE_LOTE_AFTER_DAYS.
+        stale_open_lotes = await self.lote_repo.stale_open_lotes_summary(
+            as_of=datetime.now(timezone.utc), stale_after_days=_STALE_LOTE_AFTER_DAYS
         )
 
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
@@ -692,6 +790,7 @@ class AnalyticsService:
             annual_goal_context=annual_goal_context,
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday,
             professional_utilization_rates=professional_utilization_rates,
+            stale_open_lotes=stale_open_lotes,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False
@@ -911,7 +1010,9 @@ class AnalyticsService:
             professional_name=professional_name,
         )
 
-    async def get_financial_hole_billings(self, date_from: date, date_to: date) -> FinancialHoleBillingsResponse:
+    async def get_financial_hole_billings(
+        self, date_from: date, date_to: date, *, limit: int = 15, offset: int = 0
+    ) -> FinancialHoleBillingsResponse:
         """
         Lista real por trás do insight "Você está cobrando menos do que
         devia de alguns convênios" (ver DECISÃO em
@@ -920,11 +1021,16 @@ class AnalyticsService:
         usuário: o card dizia QUANTO no total, mas não QUAIS contas
         corrigir. `total_hole_value` reaproveita financial_hole_total
         (mesma query-base do agregado) em vez de somar `items` na mão —
-        os dois precisam bater mesmo quando a lista é truncada.
+        os dois precisam bater mesmo quando a lista está paginada.
+
+        Segundo achado do usuário, direto na tela: `limit`/`offset` são
+        novos — antes esta lista só devolvia as 15 piores, sem jeito de
+        ver o resto quando `total_count` era maior. `limit=15` continua
+        o default (primeira página igual a antes).
         """
         total_count = await self.analytics_repo.count_financial_hole_billings(date_from, date_to)
         total_hole_value = await self.analytics_repo.financial_hole_total(date_from, date_to)
-        rows = await self.analytics_repo.list_financial_hole_billings(date_from, date_to)
+        rows = await self.analytics_repo.list_financial_hole_billings(date_from, date_to, limit=limit, offset=offset)
         return FinancialHoleBillingsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -942,4 +1048,56 @@ class AnalyticsService:
             ],
             total_count=total_count,
             total_hole_value=total_hole_value,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_agenda_revenue_forecast(self, date_from: date, date_to: date) -> AgendaRevenueForecastResponse:
+        """
+        Previsão de receita futura da agenda — pedido direto do usuário:
+        "a receita da agenda... conseguimos tirar metade do faturamento
+        futuro da clínica". Ver DECISÃO completa em
+        AnalyticsRepository.agenda_revenue_forecast: 3 baldes separados
+        (risco conhecido/ajustado, sem histórico ainda/sem ajuste, sem
+        preço de contrato/fora da conta), nunca um único número que
+        esconderia a incerteza real do dado.
+
+        Diferente de todo o resto deste service (que olha para trás,
+        `date_from`/`date_to` como janela PASSADA), aqui o período é
+        FUTURO — ver `_default_future_period` no endpoint.
+        """
+        data = await self.analytics_repo.agenda_revenue_forecast(date_from, date_to)
+        return AgendaRevenueForecastResponse(period_start=date_from, period_end=date_to, **data)
+
+    async def get_denial_reason_confirmation(self) -> DenialReasonConfirmationResponse:
+        """
+        Camada 2 do plano de IA preditiva ("aprender com o histórico
+        real de decisões" em vez de só regras fixas) — ver DECISÃO
+        completa em AnalyticsRepository.denial_reason_confirmation_rates.
+        Sem date_from/date_to de propósito (mesmo espírito de
+        get_health_score/get_inactive_patients): usa todo o histórico já
+        resolvido, não uma janela do dashboard.
+        """
+        data = await self.analytics_repo.denial_reason_confirmation_rates(
+            min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE
+        )
+        baseline_denied, baseline_total = data["baseline"]
+        baseline_rate = (baseline_denied / baseline_total) if baseline_total > 0 else None
+
+        items = [
+            DenialReasonConfirmationItem(
+                reason_code=reason_code,
+                reason_label=describe_denial_reason(reason_code),
+                sample_size=total,
+                confirmed_denial_rate=denied / total,
+            )
+            for reason_code, (denied, total) in data["by_reason"].items()
+        ]
+        items.sort(key=lambda item: item.confirmed_denial_rate, reverse=True)
+
+        return DenialReasonConfirmationResponse(
+            baseline_sample_size=baseline_total,
+            baseline_denial_rate=baseline_rate,
+            items=items,
+            min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
         )

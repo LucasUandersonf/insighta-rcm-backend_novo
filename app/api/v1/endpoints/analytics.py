@@ -19,6 +19,7 @@ from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.lote_repository import LoteRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -26,7 +27,9 @@ from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    AgendaRevenueForecastResponse,
     ContractUtilizationResponse,
+    DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
@@ -34,6 +37,7 @@ from app.schemas.analytics import (
     InactivePatientsResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
+    PaymentLagByPlanResponse,
     PlanLossRankingResponse,
     RecallCandidatesResponse,
     SmartInsightsResponse,
@@ -57,6 +61,20 @@ def _default_period(date_from: date | None, date_to: date | None) -> tuple[date,
     return resolved_start, resolved_end
 
 
+def _default_future_period(date_from: date | None, date_to: date | None) -> tuple[date, date]:
+    """Sem filtro explícito -> hoje + 13 dias (próximas 2 semanas de
+    agenda) — o INVERSO de `_default_period` acima. Todo o resto de
+    /analytics olha pra trás (janela fechada terminando "hoje"); a
+    previsão de receita da agenda (ver AnalyticsService.
+    get_agenda_revenue_forecast) precisa olhar pra FRENTE, sobre
+    agendamentos ainda não realizados (status 'scheduled')."""
+    resolved_start = date_from or date.today()
+    resolved_end = date_to or (resolved_start + timedelta(days=13))
+    if resolved_start > resolved_end:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_from deve ser <= date_to.")
+    return resolved_start, resolved_end
+
+
 def _build_service(db: DbSession) -> AnalyticsService:
     return AnalyticsService(
         AnalyticsRepository(db),
@@ -69,6 +87,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         # de desempenho anual — ver smart_insights_engine.py::_annual_goal_insight.
         TenantRepository(db),
         HealthScoreSnapshotRepository(db),
+        LoteRepository(db),
     )
 
 
@@ -183,6 +202,8 @@ async def get_financial_hole_billings(
     db: DbSession,
     date_from: date | None = None,
     date_to: date | None = None,
+    limit: int = 15,
+    offset: int = 0,
     current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
 ) -> FinancialHoleBillingsResponse:
     """
@@ -192,9 +213,13 @@ async def get_financial_hole_billings(
     AnalyticsService.get_financial_hole_billings) — mesmo período do
     resto da Sala de Comando (não é um estado "AGORA" como
     inactive-patients/recall-candidates).
+
+    `limit`/`offset` (achado do usuário, direto na tela): a lista era
+    fixa em 15 linhas, sem paginação — quando havia mais que isso, o
+    resto simplesmente não tinha como ser visto.
     """
     start, end = _default_period(date_from, date_to)
-    return await _build_service(db).get_financial_hole_billings(start, end)
+    return await _build_service(db).get_financial_hole_billings(start, end, limit=limit, offset=offset)
 
 
 @router.get("/network-benchmark", response_model=NetworkBenchmarkResponse)
@@ -236,6 +261,24 @@ async def get_plan_loss_ranking(
     return await _build_service(db).get_plan_loss_ranking(start, end)
 
 
+@router.get("/payment-lag-by-plan", response_model=PaymentLagByPlanResponse)
+async def get_payment_lag_by_plan(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PaymentLagByPlanResponse:
+    """
+    PMR (Prazo Médio de Recebimento) por convênio — achado da auditoria
+    "Veredito do Gestor Clínico" (Seção 4, Achado 2): billing.created_at/
+    settled_at sempre existiram no banco, mas nenhum indicador calculava
+    essa diferença. Pior prazo primeiro, pra apontar QUAL operadora está
+    de fato travando o caixa (ver PaymentLagPanel.tsx, frontend).
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_payment_lag_by_plan(start, end)
+
+
 @router.get("/contract-utilization", response_model=ContractUtilizationResponse)
 async def get_contract_utilization(
     db: DbSession,
@@ -256,3 +299,35 @@ async def get_denial_risk_distribution(
 ) -> DenialRiskDistributionResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_denial_risk_distribution(start, end)
+
+
+@router.get("/agenda-revenue-forecast", response_model=AgendaRevenueForecastResponse)
+async def get_agenda_revenue_forecast(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AgendaRevenueForecastResponse:
+    """
+    Previsão de receita futura da agenda (Sala de Comando) — pedido
+    direto do usuário: "a receita da agenda... conseguimos tirar metade
+    do faturamento futuro da clínica". Período FUTURO por padrão (ver
+    `_default_future_period`), diferente de todo o resto deste arquivo.
+    """
+    start, end = _default_future_period(date_from, date_to)
+    return await _build_service(db).get_agenda_revenue_forecast(start, end)
+
+
+@router.get("/denial-reason-confirmation", response_model=DenialReasonConfirmationResponse)
+async def get_denial_reason_confirmation(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DenialReasonConfirmationResponse:
+    """
+    Camada 2 do plano de IA preditiva: será que os motivos que o motor
+    anti-glosa sinaliza na criação do faturamento (ver denial_risk_engine.py)
+    de fato se confirmam como glosa real depois? Sem date_from/date_to
+    (mesmo espírito de health-score/inactive-patients) — olha todo o
+    histórico já resolvido, não uma janela.
+    """
+    return await _build_service(db).get_denial_reason_confirmation()

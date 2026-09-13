@@ -166,3 +166,103 @@ async def test_patch_fills_in_local_and_tipo_paciente_later(client, auth_headers
     updated = patch_resp.json()
     assert updated["local_id"] == local_id
     assert updated["tipo_paciente"] == "ambulatorial"
+
+
+# --- GET /appointments (Achado 12 / tela de listagem por período) ---
+#
+# Peça que faltava depois do Achado 12 da Auditoria de Templates e
+# Insights: os insights de canal de agendamento/motivo de cancelamento
+# (ver smart_insights_engine.py) apontavam o problema em AGREGADO, mas
+# não existia nenhuma tela que listasse agendamentos individuais de um
+# período com esses campos. Os testes abaixo cobrem o que
+# test_smart_insights_flags_booking_channel_no_show_from_real_data (em
+# test_analytics.py) NÃO cobre: o endpoint de listagem em si — filtro de
+# período, paginação (total/limit/offset) e o JOIN com Patient para
+# resolver patient_name sem N+1 no frontend.
+
+
+async def test_list_appointments_filters_by_date_range_and_resolves_patient_name(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.integration.test_analytics import _create_appointment_direct
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Período"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    inside = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+    before_window = datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc)
+    after_window = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc)
+
+    await _create_appointment_direct(
+        admin_engine,
+        tenant_a,
+        patient_id,
+        inside,
+        status="no_show",
+        booking_channel="whatsapp",
+        cancellation_reason=None,
+    )
+    await _create_appointment_direct(admin_engine, tenant_a, patient_id, before_window, status="completed")
+    await _create_appointment_direct(admin_engine, tenant_a, patient_id, after_window, status="completed")
+
+    response = await client.get(
+        "/api/v1/appointments?date_from=2026-03-01&date_to=2026-03-31", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["patient_name"] == "Paciente Período"
+    assert item["status"] == "no_show"
+    assert item["booking_channel"] == "whatsapp"
+    assert item["cancellation_reason"] is None
+
+
+async def test_list_appointments_paginates_with_total_limit_offset(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.integration.test_analytics import _create_appointment_direct
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Paginação"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    for day in range(1, 6):
+        await _create_appointment_direct(
+            admin_engine,
+            tenant_a,
+            patient_id,
+            datetime(2026, 5, day, 10, 0, tzinfo=timezone.utc),
+            status="scheduled",
+        )
+
+    response = await client.get(
+        "/api/v1/appointments?date_from=2026-05-01&date_to=2026-05-31&limit=2&offset=0", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    first_page = response.json()
+    assert first_page["total"] == 5
+    assert first_page["limit"] == 2
+    assert first_page["offset"] == 0
+    assert len(first_page["items"]) == 2
+    # scheduled_at.desc() — o mais recente primeiro (dia 5).
+    assert first_page["items"][0]["scheduled_at"].startswith("2026-05-05")
+
+    response = await client.get(
+        "/api/v1/appointments?date_from=2026-05-01&date_to=2026-05-31&limit=2&offset=4", headers=auth_headers_a
+    )
+    last_page = response.json()
+    assert last_page["total"] == 5
+    assert len(last_page["items"]) == 1
+    assert last_page["items"][0]["scheduled_at"].startswith("2026-05-01")
+
+
+async def test_list_appointments_empty_range_returns_empty_page(client, auth_headers_a):
+    response = await client.get(
+        "/api/v1/appointments?date_from=2026-01-01&date_to=2026-01-31", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 0
+    assert body["items"] == []
+
+
+async def test_list_appointments_requires_authentication(client):
+    response = await client.get("/api/v1/appointments?date_from=2026-01-01&date_to=2026-01-31")
+    assert response.status_code == 401
