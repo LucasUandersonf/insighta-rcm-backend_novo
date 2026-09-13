@@ -122,6 +122,47 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
 
+    async def payment_gap_without_appeal_summary(self) -> tuple[int, float]:
+        """
+        Raio-X da Receita, frente "Evitando perdas": billing já
+        CONCILIADO com Divergência de Recebimento (operadora pagou menos
+        do que o contratado — mesmo LATERAL JOIN de `payment_gap_total`
+        acima) que ainda não tem NENHUM recurso de glosa aberto
+        (`core.denial_appeals`) — dinheiro que a clínica tem direito de
+        contestar, mas ainda ninguém reclamou.
+
+        Backlog ATUAL, não escopado por período (mesmo raciocínio de
+        `high_risk_pending_count`/`appeals_due_soon_count`): um billing
+        conciliado há 3 semanas com gap ainda sem recurso continua sendo
+        "agora" um problema, não deixa de contar só porque saiu da janela
+        de 7 dias do dashboard.
+        """
+        stmt = text(
+            """
+            SELECT COUNT(*), COALESCE(SUM(GREATEST(ci.agreed_price - b.received_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.received_value IS NOT NULL
+              AND ci.agreed_price IS NOT NULL
+              AND ci.agreed_price > b.received_value
+              AND NOT EXISTS (SELECT 1 FROM core.denial_appeals da WHERE da.billing_id = b.id)
+            """
+        )
+        count, total_gap = (await self.session.execute(stmt)).one()
+        return int(count), float(total_gap)
+
     async def payment_lag_total(self, date_from: date, date_to: date) -> tuple[float | None, int]:
         """
         Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito
@@ -326,6 +367,29 @@ class AnalyticsRepository:
             """
         )
         result = await self.session.execute(stmt, {"start": start, "end": end})
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def revenue_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por convênio —
+        mesma base de `billing_summary().total_billed`
+        (ReportingRepository), sem filtro de status nem LATERAL join
+        (não compara contra contrato, só soma o que foi cobrado). Base
+        do insight de concentração de receita (Raio-X da Receita, frente
+        "Gestão eficiente" — ver smart_insights_engine.py::
+        _revenue_concentration_insight). Mesmo critério de
+        `financial_hole_by_plan`: convênio sem nenhum billing no período
+        simplesmente não aparece no dict.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(InsurancePlan.display_name, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(InsurancePlan.display_name)
+        )
+        result = await self.session.execute(stmt)
         return {name: float(total) for name, total in result.all() if total}
 
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:

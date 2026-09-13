@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
+from app.repositories.contract_repository import ContractRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
@@ -127,6 +128,15 @@ APPEAL_DEADLINE_ALERT_HORIZON_DAYS = 5
 # documentada no Achado 7 da Auditoria para os demais limiares deste
 # motor: revisitar quando houver volume real de uso.
 _STALE_LOTE_AFTER_DAYS = 30
+
+# Raio-X da Receita, frente "Evitando perdas" — Contract.valid_until
+# sempre existiu no banco, sem nenhum insight avisando ANTES do
+# vencimento (ver ContractRepository.expiring_without_renewal_summary e
+# smart_insights_engine.py::_contract_expiring_insight). Mesmo motivo de
+# o corte viver AQUI (não no motor) que _STALE_LOTE_AFTER_DAYS acima: a
+# janela precisa chegar até a query SQL. 30 dias é o mesmo "chute
+# razoável" documentado nos demais limiares deste produto.
+CONTRACT_EXPIRING_ALERT_HORIZON_DAYS = 30
 
 # "Lista vermelha" de pacientes (Painel → Agenda) — mesmo raciocínio de
 # amostra mínima de no_show_risk_engine.MIN_SPECIFIC_SAMPLES: exige pelo
@@ -264,6 +274,7 @@ class AnalyticsService:
         tenant_repo: TenantRepository,
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
+        contract_repo: ContractRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -273,6 +284,7 @@ class AnalyticsService:
         self.availability_repo = availability_repo
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
+        self.contract_repo = contract_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -605,6 +617,8 @@ class AnalyticsService:
         professional_utilization_rates: list[tuple[str, str, float]] | None = None,
         include_agenda_text_breakdowns: bool = True,
         stale_open_lotes: tuple[int, int | None] = (0, None),
+        expiring_contracts: tuple[int, str | None, int | None] = (0, None, None),
+        payment_gap_without_appeal: tuple[int, float] = (0, 0.0),
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -628,12 +642,27 @@ class AnalyticsService:
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         financial_hole = await self.analytics_repo.financial_hole_total(date_from, date_to)
         payment_gap = await self.analytics_repo.payment_gap_total(date_from, date_to)
+        # Concentração de receita por convênio (Raio-X da Receita, frente
+        # "Gestão eficiente") — só `current` é lido por
+        # _revenue_concentration_insight, mas buscado nos dois períodos
+        # pelo mesmo motivo de professional_denial_rates abaixo (o
+        # helper monta o input inteiro pra qualquer um dos dois períodos,
+        # sem saber de fora qual vai ser usado por qual insight).
+        revenue_by_plan = await self.analytics_repo.revenue_by_plan(date_from, date_to)
         # PMR (achado da auditoria "Veredito do Gestor Clínico") —
         # chamado uma vez por período (atual e anterior), mesmo padrão de
         # financial_hole/payment_gap acima: _payment_lag_insight compara
         # os dois, ao contrário de appeals_due_soon/stale_open_lotes
         # (estado "AGORA", só o período atual importa).
         payment_lag_days, payment_lag_settled_count = await self.analytics_repo.payment_lag_total(date_from, date_to)
+        # ROI de marketing (Raio-X da Receita, frente "Melhorias") —
+        # mesmas duas chamadas que ReportDataService já fazia pro
+        # relatório semanal (ver ReportingRepository.marketing_spend_total/
+        # revenue_from_campaign_patients), agora também alimentando o
+        # feed da Sala de Comando. Período-escopado como financial_hole/
+        # payment_gap acima (_marketing_roi_insight compara os dois).
+        marketing_spend_total = await self.reporting_repo.marketing_spend_total(date_from, date_to)
+        marketing_revenue_attributed = await self.reporting_repo.revenue_from_campaign_patients(date_from, date_to)
         avg_utilization = await self._avg_utilization(date_from, date_to)
         denial_findings = await self.analytics_repo.denial_findings_by_plan(date_from, date_to)
         # "Sempre a partir de agora", nunca da janela do dashboard — ver
@@ -721,6 +750,14 @@ class AnalyticsService:
             oldest_open_lote_age_days=stale_open_lotes[1],
             avg_days_to_receive=payment_lag_days,
             payment_lag_settled_count=payment_lag_settled_count,
+            expiring_contracts_count=expiring_contracts[0],
+            soonest_expiring_contract_plan_name=expiring_contracts[1],
+            soonest_expiring_contract_days=expiring_contracts[2],
+            revenue_by_plan=revenue_by_plan,
+            marketing_spend_total=marketing_spend_total,
+            marketing_revenue_attributed=marketing_revenue_attributed,
+            payment_gap_without_appeal_count=payment_gap_without_appeal[0],
+            payment_gap_without_appeal_value=payment_gap_without_appeal[1],
         )
 
     async def get_smart_insights(
@@ -741,6 +778,27 @@ class AnalyticsService:
         stale_open_lotes = await self.lote_repo.stale_open_lotes_summary(
             as_of=datetime.now(timezone.utc), stale_after_days=_STALE_LOTE_AFTER_DAYS
         )
+        # Estado "AGORA" (mesmo raciocínio de appeals_due_soon/
+        # stale_open_lotes acima) — usado tanto pelo alerta de contrato
+        # vencendo quanto pela meta anual logo abaixo.
+        today = date.today()
+
+        # Raio-X da Receita, frente "Evitando perdas": ver
+        # ContractRepository.expiring_without_renewal_summary. Só o
+        # primeiro (o que vence primeiro) alimenta o insight, mesmo
+        # critério de "só o pior caso" do resto do motor.
+        expiring_contracts_rows = await self.contract_repo.expiring_without_renewal_summary(
+            today, CONTRACT_EXPIRING_ALERT_HORIZON_DAYS
+        )
+        expiring_contracts = (
+            len(expiring_contracts_rows),
+            expiring_contracts_rows[0]["plan_name"] if expiring_contracts_rows else None,
+            (expiring_contracts_rows[0]["valid_until"] - today).days if expiring_contracts_rows else None,
+        )
+        # Raio-X da Receita, frente "Evitando perdas": backlog ATUAL,
+        # mesmo raciocínio de appeals_due_soon acima — ver
+        # AnalyticsRepository.payment_gap_without_appeal_summary.
+        payment_gap_without_appeal = await self.analytics_repo.payment_gap_without_appeal_summary()
 
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
         # redesenho) — só calculado para o período ATUAL, nunca para o
@@ -748,7 +806,6 @@ class AnalyticsService:
         # _AnnualGoalContext). tenant.annual_revenue_goal é lido direto do
         # Tenant (tabela sem RLS — mesmo motivo de TenantRepository já
         # existir separado, ver seu docstring), nunca calculado sozinho.
-        today = date.today()
         tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
         annual_goal_context = _AnnualGoalContext(
             annual_revenue_goal=float(tenant.annual_revenue_goal) if tenant and tenant.annual_revenue_goal else None,
@@ -791,6 +848,8 @@ class AnalyticsService:
             upcoming_risk_count_by_weekday=upcoming_risk_count_by_weekday,
             professional_utilization_rates=professional_utilization_rates,
             stale_open_lotes=stale_open_lotes,
+            expiring_contracts=expiring_contracts,
+            payment_gap_without_appeal=payment_gap_without_appeal,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False

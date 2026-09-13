@@ -1286,6 +1286,255 @@ async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_
     assert not any("lote" in t.lower() for t in titles)
 
 
+# Raio-X da Receita — contrato de convênio vencendo sem renovação
+# cadastrada (ver ContractRepository.expiring_without_renewal_summary e
+# smart_insights_engine.py::_contract_expiring_insight).
+
+
+async def _create_contract_direct(admin_engine, tenant_id, plan_id, *, valid_from, valid_until, status="homologado"):
+    """Mesmo espírito de `_create_contract` acima, mas com controle
+    explícito de `valid_until`/`status` — o helper existente sempre
+    grava `valid_from='2026-01-01'` e deixa `valid_until` NULL, o que
+    não serve para testar vencimento."""
+    contract_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, valid_until, status) "
+                "VALUES (:id, :t, :plan, :vf, :vu, :status)"
+            ),
+            {"id": contract_id, "t": tenant_id, "plan": plan_id, "vf": valid_from, "vu": valid_until, "status": status},
+        )
+    return contract_id
+
+
+async def test_smart_insights_flags_contract_expiring_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Bradesco Saúde", normalized_key="bradesco_saude")
+    today = date.today()
+    # Vence em 10 dias, dentro do horizonte de alerta (30 dias) e sem
+    # nenhum contrato sucessor cadastrado — deve disparar.
+    await _create_contract_direct(
+        admin_engine, tenant_a, plan_id, valid_from=today - timedelta(days=300), valid_until=today + timedelta(days=10)
+    )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    contract_insight = next((i for i in insights if "vencendo" in i["title"].lower()), None)
+    assert contract_insight is not None
+    assert contract_insight["severity"] == "warning"
+    assert "Bradesco Saúde" in contract_insight["message"]
+    assert contract_insight["action_href"] == "/contracts"
+
+
+async def test_smart_insights_ignores_contract_expiring_when_renewal_already_registered(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    today = date.today()
+    await _create_contract_direct(
+        admin_engine, tenant_a, plan_id, valid_from=today - timedelta(days=300), valid_until=today + timedelta(days=10)
+    )
+    # Renovação já homologada, começando logo depois do vencimento do
+    # contrato acima — não é mais "vencendo sem renovação".
+    await _create_contract_direct(
+        admin_engine, tenant_a, plan_id, valid_from=today + timedelta(days=11), valid_until=None
+    )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert not any("vencendo" in t.lower() for t in titles)
+
+
+# Raio-X da Receita — concentração de receita em poucos convênios (ver
+# AnalyticsRepository.revenue_by_plan e smart_insights_engine.py::
+# _revenue_concentration_insight).
+
+
+async def test_smart_insights_flags_revenue_concentration_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    dominant_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Unimed Nacional", normalized_key="unimed_nacional")
+    minor_plan = await _create_insurance_plan(admin_engine, tenant_a, display_name="Amil", normalized_key="amil")
+
+    async def _bill(plan_id, value):
+        patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Concentração"}, headers=auth_headers_a)
+        appointment_resp = await client.post(
+            "/api/v1/appointments",
+            json={
+                "patient_id": patient_resp.json()["id"],
+                "insurance_plan_id": plan_id,
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            },
+            headers=auth_headers_a,
+        )
+        await client.post(
+            "/api/v1/billing",
+            json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": value},
+            headers=auth_headers_a,
+        )
+
+    # 8.000 na Unimed contra 2.000 na Amil -> 80% de concentração.
+    await _bill(dominant_plan, 8_000.0)
+    await _bill(minor_plan, 2_000.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    concentration_insight = next((i for i in insights if "depende de um único convênio" in i["title"].lower()), None)
+    assert concentration_insight is not None
+    assert concentration_insight["severity"] == "critical"
+    assert "Unimed Nacional" in concentration_insight["title"]
+    assert "80%" in concentration_insight["message"]
+
+
+# Raio-X da Receita — ROI de marketing no feed de insights (ver
+# ReportingRepository.marketing_spend_total/revenue_from_campaign_patients
+# e smart_insights_engine.py::_marketing_roi_insight).
+
+
+async def test_smart_insights_flags_marketing_roi_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    today = date.today()
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.marketing_spend (id, tenant_id, source, campaign_id, spend_date, amount_spent) "
+                "VALUES (:id, :t, 'meta_ads', 'campanha-outono', :spend_date, 1000.0)"
+            ),
+            {"id": str(uuid.uuid4()), "t": tenant_a, "spend_date": today},
+        )
+        patient_id = str(uuid.uuid4())
+        await conn.execute(
+            text(
+                "INSERT INTO core.patients (id, tenant_id, full_name, acquisition_campaign_id) "
+                "VALUES (:id, :t, 'Paciente Campanha', 'campanha-outono')"
+            ),
+            {"id": patient_id, "t": tenant_a},
+        )
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": 300.0},
+        headers=auth_headers_a,
+    )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    marketing_insight = next((i for i in insights if "marketing" in i["title"].lower()), None)
+    assert marketing_insight is not None
+    # Gastou R$1.000, atribuiu R$300 -> ROI de -70%, abaixo do piso crítico (-50%).
+    assert marketing_insight["severity"] == "critical"
+    assert "R$ 1,000.00" in marketing_insight["message"]
+    assert "-70%" in marketing_insight["message"]
+
+
+# Raio-X da Receita — glosa paga a menor sem recurso aberto (ver
+# AnalyticsRepository.payment_gap_without_appeal_summary e
+# smart_insights_engine.py::_payment_gap_without_appeal_insight).
+
+
+async def _create_payment_gap_billing(client, admin_engine, tenant_id, headers, plan_id, contract_id, *, tuss_code, agreed_value, received_value):
+    """Cria convênio já dado + contrato já dado -> paciente -> consulta
+    -> fatura CONCILIADA com `received_value` abaixo do combinado (mesmo
+    espírito de `_create_settled_billing_direct`, mas com um gap real em
+    vez de received_value == charged_value)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Gap Sem Recurso"}, headers=headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": tuss_code,
+            "cid_code": "J06",
+        },
+        headers=headers,
+    )
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": agreed_value,
+        },
+        headers=headers,
+    )
+    billing_id = billing_resp.json()["id"]
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE core.billing SET received_value = :rv, status = 'paid' WHERE id = :id"),
+            {"rv": received_value, "id": billing_id},
+        )
+    return billing_id
+
+
+async def test_smart_insights_flags_payment_gap_without_appeal_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    contract_id = await _create_contract(admin_engine, tenant_a, plan_id, "60606060", 200.0)
+    await _create_payment_gap_billing(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, contract_id,
+        tuss_code="60606060", agreed_value=200.0, received_value=120.0,
+    )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    gap_insight = next((i for i in insights if "ninguém contestou" in i["title"].lower()), None)
+    assert gap_insight is not None
+    assert gap_insight["severity"] == "critical"
+    assert "1 conta" in gap_insight["message"]
+    assert gap_insight["action_href"] == "/denial-appeals"
+
+
+async def test_smart_insights_ignores_payment_gap_once_an_appeal_is_open(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    contract_id = await _create_contract(admin_engine, tenant_a, plan_id, "70707070", 200.0)
+    billing_id = await _create_payment_gap_billing(
+        client, admin_engine, tenant_a, auth_headers_a, plan_id, contract_id,
+        tuss_code="70707070", agreed_value=200.0, received_value=120.0,
+    )
+    now = datetime.now(timezone.utc)
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO core.denial_appeals "
+                "(tenant_id, billing_id, appeal_type, denied_at, deadline_at, status) "
+                "VALUES (:t, :b, 'administrativa', :d, :dl, 'aberto')"
+            ),
+            {"t": tenant_a, "b": billing_id, "d": now.date(), "dl": (now + timedelta(days=30)).date()},
+        )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    titles = [i["title"] for i in response.json()["insights"]]
+    assert not any("ninguém contestou" in t.lower() for t in titles)
+
+
 # Previsão de receita futura da agenda — pedido direto do usuário: "a
 # receita da agenda... conseguimos tirar metade do faturamento futuro da
 # clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.
