@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
 from app.models.billing import Billing
+from app.models.contract_item import ContractItem
 from app.models.insurance_plan import InsurancePlan
 
 
@@ -391,6 +392,68 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {name: float(total) for name, total in result.all() if total}
+
+    async def revenue_by_professional(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por profissional —
+        Raio-X da Receita, frente "Gestão eficiente" (ver
+        AnalyticsService.get_profitability): cruzado com minutos
+        OCUPADOS de agenda (CapacityService, já usado em
+        `professional_utilization_rates` no motor de insights) para
+        calcular receita por hora de agenda ocupada. Billing sem
+        profissional vinculado (`Appointment.professional_id` NULL —
+        comum em dado vindo de ingestão em massa sem essa coluna
+        preenchida) não aparece: não há como atribuir a receita a
+        ninguém em específico.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Appointment.professional_id, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.professional_id.is_not(None))
+            .group_by(Appointment.professional_id)
+        )
+        result = await self.session.execute(stmt)
+        return {str(professional_id): float(total) for professional_id, total in result.all() if total}
+
+    async def revenue_by_procedure(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Faturado do período agrupado por procedimento (código TUSS) —
+        Raio-X da Receita, frente "Gestão eficiente": ranking de mix de
+        receita, maior primeiro. `procedure_name` é "melhor esforço": o
+        nome mais recente cadastrado em QUALQUER contrato com esse
+        código TUSS, de QUALQUER convênio — diferente do preço (que É
+        contrato-específico e varia por convênio), o nome de um
+        procedimento TUSS é padronizado pela ANS, então não precisa vir
+        do MESMO convênio da cobrança para ser um nome válido. None
+        quando nenhum contrato ainda cadastrou esse código (procedimento
+        cobrado sem tabela de preço correspondente).
+        """
+        start, end = _bounds(date_from, date_to)
+        name_subq = (
+            select(ContractItem.procedure_name)
+            .where(ContractItem.tuss_code == Appointment.procedure_code)
+            .order_by(ContractItem.created_at.desc())
+            .limit(1)
+            .correlate(Appointment)
+            .scalar_subquery()
+        )
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.procedure_code, name_subq.label("procedure_name"), func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.procedure_code.is_not(None))
+            .group_by(Appointment.procedure_code)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"procedure_code": code, "procedure_name": name, "billing_count": int(count), "revenue": float(revenue)}
+            for code, name, count, revenue in result.all()
+        ]
 
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado

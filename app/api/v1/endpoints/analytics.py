@@ -37,6 +37,7 @@ from app.schemas.analytics import (
     HealthScoreResponse,
     EarlyChurnRiskResponse,
     InactivePatientsResponse,
+    ProfitabilityResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     PaymentLagByPlanResponse,
@@ -183,6 +184,22 @@ async def get_early_churn_risk(
     date_from/date_to pelo mesmo motivo: é sempre "a partir de hoje".
     """
     return await _build_service(db).get_early_churn_risk()
+
+
+@router.get("/profitability", response_model=ProfitabilityResponse)
+async def get_profitability(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ProfitabilityResponse:
+    """
+    Raio-X da Receita, frente "Gestão eficiente" — receita por hora de
+    agenda ocupada por profissional, e ranking de mix de receita por
+    procedimento.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_profitability(start, end)
 
 
 @router.get("/recall-candidates", response_model=RecallCandidatesResponse)

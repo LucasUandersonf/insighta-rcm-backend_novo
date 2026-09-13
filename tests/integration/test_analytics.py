@@ -1678,6 +1678,95 @@ async def test_smart_insights_flags_early_churn_risk_from_real_data(client, auth
     assert churn_insight["action_href"] == "#carteira-inativa"
 
 
+# Raio-X da Receita — rentabilidade por profissional e por procedimento
+# (ver AnalyticsRepository.revenue_by_professional/revenue_by_procedure
+# e AnalyticsService.get_profitability).
+
+
+async def test_profitability_computes_revenue_per_hour_by_professional(client, auth_headers_a, admin_engine, tenant_a):
+    professional_resp = await client.post(
+        "/api/v1/professionals", json={"full_name": "Dr. Rentável"}, headers=auth_headers_a
+    )
+    assert professional_resp.status_code == 201
+    professional_id = professional_resp.json()["id"]
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Rentável Saúde", normalized_key="rentavel_saude")
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Rentável"}, headers=auth_headers_a)
+
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "professional_id": professional_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "duration_minutes": 60,
+        },
+        headers=auth_headers_a,
+    )
+    assert appointment_resp.status_code == 201
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": 300.0},
+        headers=auth_headers_a,
+    )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    item = next((p for p in body["by_professional"] if p["professional_id"] == professional_id), None)
+    assert item is not None
+    assert item["revenue"] == 300.0
+    assert item["booked_minutes"] == 60
+    assert item["revenue_per_hour"] == 300.0  # R$300 em 1h de agenda ocupada
+
+
+async def test_profitability_ranks_procedures_by_revenue_and_reports_share(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Mix Saúde", normalized_key="mix_saude")
+    await _create_contract(admin_engine, tenant_a, plan_id, "80808080", 400.0)
+
+    async def _bill(procedure_code, value):
+        patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Mix"}, headers=auth_headers_a)
+        appointment_resp = await client.post(
+            "/api/v1/appointments",
+            json={
+                "patient_id": patient_resp.json()["id"],
+                "insurance_plan_id": plan_id,
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "procedure_code": procedure_code,
+                "cid_code": "J06",
+            },
+            headers=auth_headers_a,
+        )
+        await client.post(
+            "/api/v1/billing",
+            json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": value},
+            headers=auth_headers_a,
+        )
+
+    # 80808080 tem tabela de preço cadastrada (nome disponível); 90909090
+    # não tem contrato -> procedure_name None, ainda assim entra no ranking.
+    await _bill("80808080", 800.0)
+    await _bill("90909090", 200.0)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    procedures = {p["procedure_code"]: p for p in body["by_procedure"]}
+    assert procedures["80808080"]["revenue"] == 800.0
+    assert body["total_billed"] == 1000.0  # 800 + 200, tenant isolado por teste
+    assert procedures["80808080"]["share_pct"] == 80.0
+    assert procedures["90909090"]["procedure_name"] is None
+    # Maior receita primeiro.
+    assert body["by_procedure"][0]["procedure_code"] == "80808080"
+
+
 # Previsão de receita futura da agenda — pedido direto do usuário: "a
 # receita da agenda... conseguimos tirar metade do faturamento futuro da
 # clínica". Ver DECISÃO completa em AnalyticsRepository.agenda_revenue_forecast.

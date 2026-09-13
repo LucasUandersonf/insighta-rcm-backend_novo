@@ -571,3 +571,45 @@ class FinancialHoleBillingsResponse(BaseModel):
     total_hole_value: float
     limit: int
     offset: int
+
+
+class ProfessionalProfitabilityItem(BaseModel):
+    """Uma linha de rentabilidade por profissional — Raio-X da Receita,
+    frente "Gestão eficiente" (ver DECISÃO completa em
+    AnalyticsService.get_profitability). Dois profissionais podem ter a
+    MESMA ocupação de agenda e gerar receitas bem diferentes por hora —
+    `revenue_per_hour` é o número que revela essa diferença, que nem
+    `avg_capacity_utilization` (ocupação) nem `revenue` sozinhos (sem
+    dividir pelo tempo ocupado) mostram."""
+
+    professional_id: UUID
+    full_name: str
+    revenue: float
+    booked_minutes: int
+    revenue_per_hour: float | None  # None quando booked_minutes == 0 (sem agenda ocupada no período, não faz sentido dividir)
+
+
+class ProcedureProfitabilityItem(BaseModel):
+    """Uma linha do ranking de mix de receita por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure. `share_pct` é a fatia do
+    faturado TOTAL do período que este procedimento representa."""
+
+    procedure_code: str
+    procedure_name: str | None
+    revenue: float
+    billing_count: int
+    share_pct: float
+
+
+class ProfitabilityResponse(BaseModel):
+    """GET /api/v1/analytics/profitability — Raio-X da Receita, frente
+    "Gestão eficiente": responde "quem/o que realmente traz receita",
+    além de faturamento total e taxa de glosa. `by_professional` vem
+    ordenado por receita/hora (maior primeiro); `by_procedure` por
+    receita total (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    by_professional: list[ProfessionalProfitabilityItem]
+    by_procedure: list[ProcedureProfitabilityItem]

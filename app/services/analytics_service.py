@@ -44,6 +44,9 @@ from app.schemas.analytics import (
     EarlyChurnRiskItem,
     EarlyChurnRiskResponse,
     ExecutiveSummaryResponse,
+    ProcedureProfitabilityItem,
+    ProfessionalProfitabilityItem,
+    ProfitabilityResponse,
     HealthScoreComponentResponse,
     HealthScoreResponse,
     HealthScoreTrendResponse,
@@ -1110,6 +1113,70 @@ class AnalyticsService:
             total_count=total_count,
             gap_multiplier=_EARLY_CHURN_GAP_MULTIPLIER,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
+    async def get_profitability(self, date_from: date, date_to: date) -> ProfitabilityResponse:
+        """
+        Raio-X da Receita, frente "Gestão eficiente": até esta rodada, o
+        produto media ocupação de agenda e taxa de glosa por profissional
+        SEPARADAMENTE (ver professional_utilization_rates/
+        professional_denial_rates no motor de insights) — nunca receita
+        por hora de agenda OCUPADA, a pergunta real por trás de "esse
+        profissional está rendendo o que deveria". Cruza
+        AnalyticsRepository.revenue_by_professional com CapacityService
+        (o MESMO cálculo de minutos ocupados já usado em
+        get_agenda_metrics), profissional por profissional.
+
+        `by_procedure` é independente de profissional — ranking de mix
+        de receita por código TUSS (ver
+        AnalyticsRepository.revenue_by_procedure).
+        """
+        billing = await self.reporting_repo.billing_summary(date_from, date_to)
+        total_billed = billing["total_billed"]
+
+        revenue_by_professional = await self.analytics_repo.revenue_by_professional(date_from, date_to)
+        professionals_by_id = {str(p.id): p for p in await self.professional_repo.list_active()}
+
+        by_professional: list[ProfessionalProfitabilityItem] = []
+        for professional_id, revenue in revenue_by_professional.items():
+            professional = professionals_by_id.get(professional_id)
+            if professional is None:
+                continue  # profissional inativo/removido — receita histórica sem dono pra exibir
+            utilization = await self.capacity_service.get_utilization(professional.id, date_from, date_to)
+            booked_minutes = utilization.booked_minutes
+            revenue_per_hour = (revenue / (booked_minutes / 60)) if booked_minutes > 0 else None
+            by_professional.append(
+                ProfessionalProfitabilityItem(
+                    professional_id=professional.id,
+                    full_name=professional.full_name,
+                    revenue=revenue,
+                    booked_minutes=booked_minutes,
+                    revenue_per_hour=revenue_per_hour,
+                )
+            )
+        # Maior receita/hora primeiro; quem não tem agenda ocupada no
+        # período (revenue_per_hour=None) vai pro final, nunca misturado
+        # com quem tem valor real na frente.
+        by_professional.sort(key=lambda item: (item.revenue_per_hour is None, -(item.revenue_per_hour or 0)))
+
+        procedure_rows = await self.analytics_repo.revenue_by_procedure(date_from, date_to)
+        by_procedure = [
+            ProcedureProfitabilityItem(
+                procedure_code=row["procedure_code"],
+                procedure_name=row["procedure_name"],
+                revenue=row["revenue"],
+                billing_count=row["billing_count"],
+                share_pct=(row["revenue"] / total_billed * 100) if total_billed > 0 else 0.0,
+            )
+            for row in procedure_rows
+        ]
+
+        return ProfitabilityResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_billed=total_billed,
+            by_professional=by_professional,
+            by_procedure=by_procedure,
         )
 
     async def get_recall_candidates(
