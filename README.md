@@ -1,4 +1,43 @@
-# InsightaRCM — Camada Analítica e de Inteligência Financeira (Backend/FastAPI)
+# Insighta — Plataforma de Inteligência de Receita e Decisão Estratégica (Backend/FastAPI)
+
+> **Reposicionamento de produto (14/09/2026):** até esta revisão, este
+> README (e o nome do repositório) chamava o sistema de "RCM" —
+> impreciso desde que a seção Estratégia/Rede/Comparativo e o Raio-X da
+> Receita passaram a ser o núcleo, não um complemento. RCM (Revenue
+> Cycle Management) descreve o **dado** que o sistema consome
+> (faturamento, glosa, guia TISS, lote, fatura — ver `app/models/` e
+> `app/services/` de billing/glosa/lote/fatura abaixo); não descreve o
+> que ele **entrega**. O que o motor de insights (`smart_insights_engine.py`,
+> `analytics_service.py`) e as telas de diagnóstico fazem com esse dado
+> — projeção de receita, comparativo com a mediana de outras clínicas,
+> ranking de ação priorizada — é uma categoria diferente. Três coisas
+> concretas sustentam o novo nome, todas já implementadas e testadas:
+>
+> 1. **Prevê, não só descreve.** `get_agenda_revenue_forecast` (14 dias
+>    à frente, com "baldes honestos" — nunca inventa risco pra quem não
+>    tem histórico), `_early_churn_insight` (comparado ao próprio ritmo
+>    do paciente, não um corte genérico de 365 dias), risco de falta
+>    por atendimento com o motivo do porquê exposto.
+> 2. **Compara com uma rede que uma clínica isolada nunca teria acesso
+>    sozinha** — `build_network_comparativo_insight` (glosa e falta vs.
+>    mediana de clínicas de porte parecido, nunca uma clínica
+>    específica) e o ranking de renegociação de contrato (maior nota do
+>    motor inteiro) são efeito de rede, categoria que nem RCM
+>    tradicional nem BI genérico têm estrutura de dado pra oferecer.
+> 3. **Aponta a ação, não só o número** — `action_label`/`action_href`
+>    em praticamente todo `Insight`, ranking de perda por convênio,
+>    lista de atendimentos de alto risco de falta pra ligar hoje.
+>
+> O que o sistema **não** é, por escolha deliberada de produto, não por
+> lacuna a esconder: não assume o risco financeiro do que audita (sem
+> modelo de garantia de recebimento), não audita prontuário/documento
+> clínico linha a linha, não substitui ERP hospitalar. Essas três coisas
+> são o núcleo de negócio de ferramentas de RCM/auditoria puras — aqui
+> ficam deliberadamente fora, porque a IA do produto segue o princípio
+> "primeiro passo, nunca o último" (ver `denial_appeal_draft_service.py`
+> e `contract_extraction_service.py`: sempre rascunho revisável por
+> humano, nunca decisão automática final sobre dinheiro ou mérito
+> clínico/jurídico).
 
 > **Sprint de Central de Upload e Redesign Petrol (29/08/2026, tarde):**
 > até esta versão, o ÚNICO jeito de um lote operacional (CSV/XML/JSON)
