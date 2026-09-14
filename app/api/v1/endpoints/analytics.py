@@ -43,6 +43,7 @@ from app.schemas.analytics import (
     OportunidadesResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
+    PriorityQueueResponse,
     RecallCandidatesResponse,
     SmartInsightsResponse,
 )
@@ -145,6 +146,33 @@ async def get_smart_insights(
     ]
     return await _build_service(db).get_smart_insights(
         start, end, tenant_id=current_user.tenant_id, network_benchmark=network_benchmark
+    )
+
+
+@router.get("/priority-queue", response_model=PriorityQueueResponse)
+async def get_priority_queue(
+    db: DbSession,
+    db_no_tenant: DbSessionNoTenant,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 10,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PriorityQueueResponse:
+    """Épico F1.1 do Plano Diretor — tela "Hoje", página inicial da
+    Sala de Comando. Mesma dupla de sessão (db + db_no_tenant) de
+    /smart-insights logo acima, pelo mesmo motivo: o Comparativo de
+    rede entra como candidato da fila e precisa da fonte cross-tenant."""
+    start, end = _default_period(date_from, date_to)
+    benchmark = await NetworkBenchmarkService(NetworkBenchmarkRepository(db_no_tenant)).get_benchmark(
+        uuid.UUID(current_user.tenant_id)
+    )
+    network_benchmark = [
+        (m.key, m.label, m.your_rate, m.network_median)
+        for m in benchmark.metrics
+        if m.your_rate is not None and m.network_median is not None
+    ]
+    return await _build_service(db).get_priority_queue(
+        start, end, tenant_id=current_user.tenant_id, network_benchmark=network_benchmark, limit=limit
     )
 
 

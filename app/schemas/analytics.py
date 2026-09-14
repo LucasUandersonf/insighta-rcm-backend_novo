@@ -363,6 +363,36 @@ class SmartInsightsResponse(BaseModel):
     insights: list[SmartInsightResponse]
 
 
+class PriorityQueueItem(SmartInsightResponse):
+    """Épico F1.1 (Plano Diretor) — item da fila única. É um
+    SmartInsightResponse com um campo a mais: `source` diz se o item
+    veio do feed de insights (que já cobre boa parte do produto) ou foi
+    extraído na hora de um PAINEL do Raio-X da Receita que não gera
+    card de feed sozinho (ranking de perda por convênio, utilização de
+    contrato, rentabilidade por profissional) — ver DECISÃO completa em
+    AnalyticsService.get_priority_queue. O frontend usa `source` pra
+    badge "de onde veio" (nunca esconde a proveniência, mesmo critério
+    já usado em `category`)."""
+
+    source: str  # "insight" | "raiox"
+
+
+class PriorityQueueResponse(BaseModel):
+    """GET /api/v1/analytics/priority-queue — tela "Hoje", página
+    inicial da Sala de Comando. Reaproveita 100% do cálculo já feito em
+    get_smart_insights + os 3 painéis do Raio-X que mais concentram
+    perda não coberta por um card de feed (ver DECISÃO no service) —
+    camada de agregação e ranqueamento, nenhum motor novo."""
+
+    period_start: date
+    period_end: date
+    items: list[PriorityQueueItem]
+    # Quantos itens existiam ANTES do corte por `limit` — permite o
+    # frontend mostrar "3 de 14 ações abertas" em vez de fingir que a
+    # fila é só o que coube na tela.
+    total_considered: int
+
+
 class HealthScoreComponentResponse(BaseModel):
     key: str  # "denial" | "no_show" | "appeal"
     label: str

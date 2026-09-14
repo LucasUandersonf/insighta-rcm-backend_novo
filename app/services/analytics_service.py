@@ -64,6 +64,8 @@ from app.schemas.analytics import (
     PaymentLagByPlanResponse,
     PlanLossItem,
     PlanLossRankingResponse,
+    PriorityQueueItem,
+    PriorityQueueResponse,
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
@@ -1017,6 +1019,141 @@ class AnalyticsService:
                 )
                 for i in insights
             ],
+        )
+
+    # _PRIORITY_QUEUE_DEFAULT_LIMIT: quantos itens a tela "Hoje" mostra por
+    # padrão — 10 é "cabe numa tela sem rolar muito" para o gestor de 5
+    # minutos que a F1.1 do Plano Diretor descreve; `total_considered` no
+    # response deixa claro quando há mais itens fora do corte.
+    _PRIORITY_QUEUE_DEFAULT_LIMIT = 10
+
+    async def get_priority_queue(
+        self,
+        date_from: date,
+        date_to: date,
+        *,
+        tenant_id: str,
+        network_benchmark: list[tuple[str, str, float, float]] | None = None,
+        limit: int = _PRIORITY_QUEUE_DEFAULT_LIMIT,
+    ) -> PriorityQueueResponse:
+        """
+        Épico F1.1 do Plano Diretor ("Fila única de ação priorizada"):
+        "Hoje os 39 mecanismos vivem espalhados em abas [...] O gestor
+        decide sozinho, de cabeça, o que atacar primeiro." Esta fila
+        reaproveita 100% do cálculo já pronto — get_smart_insights (que
+        já cobre a maior parte do motor, incluindo o Comparativo) MAIS
+        os 3 painéis do Raio-X da Receita que concentram perda real mas
+        NUNCA viram card de feed sozinhos (ver DECISÃO no boletim
+        técnico: "são painéis, não cards de feed"): ranking de perda por
+        convênio, utilização de contrato ociosa, e o profissional com
+        menor receita por hora ocupada. Nenhum motor novo, só uma
+        camada de agregação e ranqueamento por cima de serviços que já
+        existem — exatamente o que o tech-note do épico pede.
+
+        Cada painel entra só quando tem ALGO material a mostrar (nunca
+        um card vazio "0 de perda") e só o PIOR item de cada um — mesmo
+        critério de "só o pior caso vira manchete" já usado em
+        _professional_outlier_insight/build_network_comparativo_insight.
+        """
+        insights_response = await self.get_smart_insights(
+            date_from, date_to, tenant_id=tenant_id, network_benchmark=network_benchmark
+        )
+        items: list[PriorityQueueItem] = [
+            PriorityQueueItem(
+                severity=i.severity,
+                category=i.category,
+                title=i.title,
+                message=i.message,
+                financial_impact=i.financial_impact,
+                is_new=i.is_new,
+                action_label=i.action_label,
+                action_href=i.action_href,
+                source="insight",
+            )
+            for i in insights_response.insights
+        ]
+
+        loss_ranking = await self.get_plan_loss_ranking(date_from, date_to)
+        if loss_ranking.plans and loss_ranking.plans[0].total_loss > 0:
+            worst_plan = loss_ranking.plans[0]
+            items.append(
+                PriorityQueueItem(
+                    severity="critical",
+                    category="faturamento",
+                    title=f"Maior perda concentrada no convênio {worst_plan.plan_name}",
+                    message=(
+                        f"Somando buraco de cobrança, pagamento a menor e valor em risco de glosa, "
+                        f"{worst_plan.plan_name} concentra R$ {worst_plan.total_loss:,.2f} de perda no período — "
+                        "o maior entre todos os convênios faturados. Ver o ranking completo pra decidir com qual "
+                        "convênio conversar primeiro."
+                    ).replace(",", "X").replace(".", ",").replace("X", "."),
+                    financial_impact=worst_plan.total_loss,
+                    action_label="Ver ranking de perda por convênio",
+                    action_href="/",
+                    source="raiox",
+                )
+            )
+
+        utilization = await self.get_contract_utilization(date_from, date_to)
+        if utilization.contracts and utilization.contracts[0].idle_catalog_value > 0:
+            worst_contract = utilization.contracts[0]
+            items.append(
+                PriorityQueueItem(
+                    severity="warning",
+                    category="faturamento",
+                    title=f"Contrato de {worst_contract.plan_name} com catálogo pouco utilizado",
+                    message=(
+                        f"Só {worst_contract.utilization_pct:.0f}% dos procedimentos negociados com "
+                        f"{worst_contract.plan_name} foram faturados no período — R$ {worst_contract.idle_catalog_value:,.2f} "
+                        "em valor de tabela contratado nunca cobrado. Pode ser linha de serviço parada, não "
+                        "necessariamente um problema, mas vale investigar por quê."
+                    ).replace(",", "X").replace(".", ",").replace("X", "."),
+                    financial_impact=worst_contract.idle_catalog_value,
+                    action_label="Ver utilização de contrato",
+                    action_href="/",
+                    source="raiox",
+                )
+            )
+
+        profitability = await self.get_profitability(date_from, date_to)
+        rated_professionals = [p for p in profitability.by_professional if p.revenue_per_hour is not None]
+        # Exige pelo menos 2 pra "pior" ter sentido comparativo — com 1
+        # profissional só, não existe "pior que quem" (mesmo princípio
+        # de amostra mínima do resto do motor: nunca inventa confiança
+        # sem ter contra o que comparar).
+        if len(rated_professionals) >= 2:
+            worst_professional = min(rated_professionals, key=lambda p: p.revenue_per_hour or 0)
+            best_rate = max(p.revenue_per_hour or 0 for p in rated_professionals)
+            if best_rate > 0 and (worst_professional.revenue_per_hour or 0) < best_rate:
+                items.append(
+                    PriorityQueueItem(
+                        severity="warning",
+                        category="estrategia",
+                        title=f"{worst_professional.full_name} com a menor receita por hora ocupada da equipe",
+                        message=(
+                            f"R$ {(worst_professional.revenue_per_hour or 0):,.2f}/hora ocupada, contra até "
+                            f"R$ {best_rate:,.2f}/hora de outro profissional da equipe no mesmo período. Pode ser mix "
+                            "de procedimento, tabela de convênio, ou algo a conversar — sem inventar o motivo aqui."
+                        ).replace(",", "X").replace(".", ",").replace("X", "."),
+                        financial_impact=None,
+                        action_label="Ver rentabilidade por profissional",
+                        # "#tab:id" — mesma convenção de smart_insights_engine.Insight:
+                        # a fila renderiza dentro da própria Sala de Comando, então
+                        # troca de aba (aba "Rentabilidade" já existe), não navega
+                        # pra fora (ver InsightActionButton no frontend).
+                        action_href="#tab:rentabilidade",
+                        source="raiox",
+                    )
+                )
+
+        severity_rank = {"critical": 0, "comparativo": 1, "warning": 2, "positive": 3}
+        items.sort(key=lambda i: (i.financial_impact is None, -(i.financial_impact or 0), severity_rank.get(i.severity, 99)))
+
+        return PriorityQueueResponse(
+            period_start=date_from,
+            period_end=date_to,
+            items=items[:limit],
+            total_considered=len(items),
         )
 
     async def get_health_score(self) -> HealthScoreResponse:

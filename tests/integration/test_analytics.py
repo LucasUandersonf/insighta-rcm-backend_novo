@@ -691,6 +691,61 @@ async def test_plan_loss_ranking_orders_by_total_loss_descending(client, auth_he
     assert [p["plan_name"] for p in plans] == ["Bradesco Saúde", "Unimed Nacional"]
 
 
+async def test_priority_queue_merges_insights_and_raiox_panels_sorted_by_impact(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Épico F1.1 do Plano Diretor: a fila reaproveita generate_insights()
+    (via get_smart_insights) MAIS o ranking de perda por convênio, que
+    nunca vira card de feed sozinho — este teste prova que o item do
+    Raio-X (source="raiox") aparece na mesma fila, com `financial_impact`
+    de verdade vindo do JOIN real (não um valor fixo do teste)."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/priority-queue?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["items"], "fila não deveria vir vazia com um buraco financeiro real no período"
+    assert body["total_considered"] >= len(body["items"])
+
+    raiox_items = [i for i in body["items"] if i["source"] == "raiox"]
+    loss_ranking_item = next((i for i in raiox_items if "Unimed Nacional" in i["title"]), None)
+    assert loss_ranking_item is not None
+    assert loss_ranking_item["financial_impact"] == 200.0
+    assert loss_ranking_item["category"] == "faturamento"
+
+    # Ordenado por financial_impact desc (itens sem impacto ficam por
+    # último) — mesmo critério de generate_insights().
+    impacts = [i["financial_impact"] for i in body["items"] if i["financial_impact"] is not None]
+    assert impacts == sorted(impacts, reverse=True)
+
+
+async def test_priority_queue_respects_limit_but_reports_total_considered(client, auth_headers_a, admin_engine, tenant_a):
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/priority-queue?date_from={date_from}&date_to={date_to}&limit=1", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 1
+    assert body["total_considered"] >= 1
+
+
+async def test_atendimento_cannot_access_priority_queue(client, admin_engine, tenant_a, auth_headers_a):
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@priority-queue-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get("/api/v1/analytics/priority-queue", headers=headers)
+    assert response.status_code == 403
+
+
 async def test_contract_utilization_flags_unbilled_items(client, auth_headers_a, admin_engine, tenant_a):
     """Contrato com 2 procedimentos negociados, só 1 faturado no
     período -> 50% de utilização e idle_catalog_value = preço do item
