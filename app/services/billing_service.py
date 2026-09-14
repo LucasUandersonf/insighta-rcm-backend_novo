@@ -24,7 +24,13 @@ from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
-from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSearchItem, BillingSettleRequest
+from app.schemas.billing import (
+    BillingCoparticipationConfirmationRequest,
+    BillingCreateRequest,
+    BillingResponse,
+    BillingSearchItem,
+    BillingSettleRequest,
+)
 from app.schemas.pagination import PaginatedResponse
 from app.services.denial_risk_engine import assess
 from app.services.webhook_dispatch_service import dispatch_event
@@ -183,6 +189,8 @@ class BillingService:
                 created_at=billing.created_at,
                 item_type=billing.item_type,
                 member_card_number=billing.member_card_number,
+                coparticipation_value=float(billing.coparticipation_value) if billing.coparticipation_value is not None else None,
+                coparticipation_received=billing.coparticipation_received,
             )
             for billing, patient_name, procedure_code, plan_name in rows
         ]
@@ -218,5 +226,38 @@ class BillingService:
             entity_type="billing",
             entity_id=billing.id,
             diff={"status": {"before": previous_status, "after": billing.status}},
+        )
+        return BillingResponse.model_validate(billing)
+
+    async def confirm_coparticipation(
+        self, tenant_id: str, actor_user_id: uuid.UUID | None, billing_id: uuid.UUID, data: BillingCoparticipationConfirmationRequest
+    ) -> BillingResponse:
+        """
+        Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") —
+        confirma (ou não) que a coparticipação cobrada nesta linha foi
+        de fato recebida do paciente no momento do atendimento. Ver
+        DECISÃO completa em 043_coparticipation_confirmation.sql sobre
+        por que o estado inicial é NULL, nunca False.
+        """
+        billing = await self.billing_repo.get_by_id(billing_id)
+        if billing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faturamento não encontrado neste tenant.")
+        if not billing.coparticipation_value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Este faturamento não tem valor de coparticipação cobrado — nada para confirmar.",
+            )
+        previous_received = billing.coparticipation_received
+        billing.coparticipation_received = data.received
+        billing.coparticipation_confirmed_at = datetime.now(timezone.utc)
+        billing.coparticipation_confirmed_by = actor_user_id
+        await self.billing_repo.save(billing)
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="coparticipation_confirmed",
+            entity_type="billing",
+            entity_id=billing.id,
+            diff={"coparticipation_received": {"before": previous_received, "after": billing.coparticipation_received}},
         )
         return BillingResponse.model_validate(billing)

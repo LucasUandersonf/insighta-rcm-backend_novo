@@ -843,6 +843,14 @@ class AnalyticsService:
         coparticipation_total, coparticipation_billing_count, total_billing_count = (
             await self.analytics_repo.coparticipation_summary(date_from, date_to)
         )
+        # Épico F4.2 — "estado AGORA", mesmo raciocínio de risk_breakdown
+        # acima: só o período ATUAL é lido por
+        # _coparticipation_unconfirmed_insight, mas buscar pros dois é
+        # inofensivo (mesma query barata, sem quebrar o padrão de
+        # sempre buscar tudo aqui).
+        coparticipation_unconfirmed_value, coparticipation_unconfirmed_count = (
+            await self.analytics_repo.coparticipation_unconfirmed_summary(date_from, date_to)
+        )
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
@@ -883,6 +891,8 @@ class AnalyticsService:
             coparticipation_total=coparticipation_total,
             coparticipation_billing_count=coparticipation_billing_count,
             total_billing_count=total_billing_count,
+            coparticipation_unconfirmed_value=coparticipation_unconfirmed_value,
+            coparticipation_unconfirmed_count=coparticipation_unconfirmed_count,
             stale_open_lotes_count=stale_open_lotes[0],
             oldest_open_lote_age_days=stale_open_lotes[1],
             avg_days_to_receive=payment_lag_days,

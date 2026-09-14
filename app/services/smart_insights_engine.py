@@ -432,6 +432,15 @@ class InsightsPeriodInput:
     coparticipation_total: float = 0.0
     coparticipation_billing_count: int = 0
     total_billing_count: int = 0
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — de
+    # toda coparticipação COBRADA (coparticipation_total acima), quanto
+    # ainda não foi confirmada como recebida do paciente (ver
+    # AnalyticsRepository.coparticipation_unconfirmed_summary). Estado
+    # "AGORA" (como no_show_risk_score etc.): só o período atual recebe
+    # o valor real, o anterior fica no default — não existe "pendência
+    # de confirmação do período anterior" com sentido de negócio.
+    coparticipation_unconfirmed_value: float = 0.0
+    coparticipation_unconfirmed_count: int = 0
     # Lotes de faturamento (core.lotes) com status='aberto' há mais de
     # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
     # — ver AnalyticsService._period_insights_input e
@@ -912,6 +921,39 @@ def _coparticipation_growth_insight(current: InsightsPeriodInput, previous: Insi
             "recebendo esse valor do paciente na hora do atendimento, não só lançando no sistema."
         ),
         financial_impact=current.coparticipation_total,
+    )
+
+
+def _coparticipation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — fecha
+    a lacuna que os DOIS insights de coparticipação acima deixam
+    explicitamente em aberto (ver docstring de
+    _coparticipation_growth_insight: "nunca se o paciente de fato
+    PAGOU"). Agora que existe confirmação de recebimento
+    (Billing.coparticipation_received — ver
+    043_coparticipation_confirmation.sql), este insight soma o que foi
+    COBRADO mas ainda não confirmado como recebido (NULL) ou confirmado
+    que NÃO foi recebido (FALSE) — um vazamento de receita real, não
+    hipotético.
+
+    Amostra mínima na CONTAGEM de linhas não confirmadas (mesmo
+    raciocínio de _MIN_COPARTICIPATION_SAMPLE): 1-2 linhas esquecidas é
+    ruído operacional do dia a dia, não um padrão que merece alerta.
+    """
+    if current.coparticipation_unconfirmed_count < _MIN_COPARTICIPATION_SAMPLE or current.coparticipation_unconfirmed_value <= 0:
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem coparticipação cobrada que ainda não foi confirmada como recebida",
+        message=(
+            f"R$ {current.coparticipation_unconfirmed_value:,.2f} em coparticipação (a parte que o PACIENTE paga) "
+            f"foram cobrados em {current.coparticipation_unconfirmed_count} atendimento(s) neste período, mas "
+            "ninguém confirmou no sistema se esse valor de fato entrou no caixa. Vale conferir com a recepção e "
+            "confirmar cada um — cobrado no papel não é o mesmo que recebido de verdade."
+        ),
+        financial_impact=current.coparticipation_unconfirmed_value,
     )
 
 
@@ -1811,6 +1853,7 @@ def generate_insights(
         _opme_concentration_insight(current, previous),
         _coparticipation_visibility_insight(current, previous),
         _coparticipation_growth_insight(current, previous),
+        _coparticipation_unconfirmed_insight(current),
         _revenue_concentration_insight(current),
         _marketing_roi_insight(current, previous),
     ):

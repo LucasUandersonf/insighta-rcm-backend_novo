@@ -9,7 +9,7 @@ por baixo, que filtra as linhas. O ORM só precisa declarar o schema.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,4 +72,13 @@ class Billing(Base):
     # todo convênio/procedimento tem coparticipação), nunca confundido
     # com charged_value (que continua sendo só a parte cobrada do convênio).
     coparticipation_value: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") —
+    # confirmação de que coparticipation_value foi DE FATO recebido do
+    # paciente, não só cobrado no papel. NULL = ainda não confirmado
+    # (estado inicial, nunca DEFAULT false — ver DECISÃO completa em
+    # 043_coparticipation_confirmation.sql), FALSE = confirmado que NÃO
+    # foi recebido (vazamento de receita provado).
+    coparticipation_received: Mapped[bool | None] = mapped_column(Boolean)
+    coparticipation_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    coparticipation_confirmed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

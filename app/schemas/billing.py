@@ -91,6 +91,11 @@ class BillingResponse(BaseModel):
     member_card_number: str | None
     item_type: str | None
     coparticipation_value: float | None
+    # Épico F4.2 — ver DECISÃO completa em
+    # 043_coparticipation_confirmation.sql (NULL = ainda não confirmado,
+    # nunca um false inventado).
+    coparticipation_received: bool | None
+    coparticipation_confirmed_at: datetime | None
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
@@ -115,6 +120,12 @@ class BillingSearchItem(BaseModel):
     # campos.
     item_type: str | None
     member_card_number: str | None
+    # Épico F4.2 — a tela de confirmação de coparticipação usa o MESMO
+    # BillingSearchPicker das outras (settle, denial-appeal); precisa
+    # saber se há coparticipação cobrada e o estado atual da confirmação
+    # antes de oferecer o botão "confirmar recebida/não recebida".
+    coparticipation_value: float | None
+    coparticipation_received: bool | None
 
 
 class BillingSettleRequest(BaseModel):
@@ -128,3 +139,13 @@ class BillingSettleRequest(BaseModel):
     @classmethod
     def limit_precision(cls, v: float) -> float:
         return round(v, 2)
+
+
+class BillingCoparticipationConfirmationRequest(BaseModel):
+    """Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") —
+    confirma (ou não) que a coparticipação cobrada foi de fato recebida
+    do paciente. `received=False` é um vazamento de receita PROVADO
+    (diferente de nunca ter sido confirmado, que é o estado NULL padrão
+    — ver DECISÃO completa em 043_coparticipation_confirmation.sql)."""
+
+    received: bool

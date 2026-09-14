@@ -282,6 +282,11 @@ _POST_UPGRADE_SQL_FILES = [
     # ADD COLUMN IF NOT EXISTS + DROP/CREATE FUNCTION — auto-idempotente,
     # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "042_organizations.sql",
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — ver
+    # DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "043_coparticipation_confirmation.sql",
 ]
 
 _ROLES_SQL = """

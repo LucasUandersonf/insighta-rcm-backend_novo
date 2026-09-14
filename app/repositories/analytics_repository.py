@@ -1005,6 +1005,29 @@ class AnalyticsRepository:
         copart_total, copart_count = (await self.session.execute(copart_stmt)).one()
         return float(copart_total), int(copart_count), int(total_billing_count)
 
+    async def coparticipation_unconfirmed_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — de
+        toda coparticipação COBRADA no período (coparticipation_value
+        preenchido), quanto ainda NÃO foi confirmada como recebida
+        (coparticipation_received NULL — nunca confirmado) OU foi
+        confirmada que NÃO foi recebida (FALSE — vazamento provado).
+        Ver DECISÃO completa em 043_coparticipation_confirmation.sql.
+
+        Retorna (valor_nao_confirmado, contagem) — alimenta
+        smart_insights_engine.py::_coparticipation_unconfirmed_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.coparticipation_value), 0), func.count()).where(
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.coparticipation_value.is_not(None),
+            Billing.coparticipation_value > 0,
+            Billing.coparticipation_received.is_not(True),
+        )
+        unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
+        return float(unconfirmed_total), int(unconfirmed_count)
+
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/
         'high') faturado no período — alimenta o insight "X% do valor

@@ -799,6 +799,44 @@ def test_coparticipation_growth_insight_absent_without_any_data():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
 
 
+# ---------------------------------------------------------------------
+# Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — quanto
+# do que foi COBRADO de coparticipação ainda não foi confirmado como
+# recebido do paciente.
+# ---------------------------------------------------------------------
+
+
+def test_coparticipation_unconfirmed_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=250.0, coparticipation_unconfirmed_count=5,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 250.0
+    assert "ainda não foi confirmada" in insights[0].title.lower()
+
+
+def test_coparticipation_unconfirmed_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=50.0, coparticipation_unconfirmed_count=2,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_unconfirmed_insight_absent_without_any_unconfirmed_value():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=0.0, coparticipation_unconfirmed_count=0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""
