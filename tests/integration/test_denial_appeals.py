@@ -259,12 +259,14 @@ class _FakeDenialAppealDrafter:
     get_document_context (não de um valor fixo)."""
 
     captured_context: dict | None = None
+    captured_history: dict | None = None
 
     def __init__(self):
         pass
 
-    async def draft(self, context_row: dict) -> str:
+    async def draft(self, context_row: dict, appeal_history: dict | None = None) -> str:
         _FakeDenialAppealDrafter.captured_context = context_row
+        _FakeDenialAppealDrafter.captured_history = appeal_history
         return "Rascunho gerado: a guia foi corretamente autorizada, conforme dados do caso."
 
 
@@ -272,7 +274,7 @@ class _FakeFailingDrafter:
     def __init__(self):
         pass
 
-    async def draft(self, context_row: dict) -> str:
+    async def draft(self, context_row: dict, appeal_history: dict | None = None) -> str:
         raise DenialAppealDraftError("A IA devolveu uma resposta vazia — tente novamente.")
 
 
@@ -321,6 +323,68 @@ async def test_atendimento_cannot_draft_justification(client, admin_engine, tena
 
     response = await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=headers)
     assert response.status_code == 403
+
+
+async def test_draft_justification_includes_appeal_history_for_same_type(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    """Épico F2.4 do Plano Diretor: o rascunho recebe o histórico de
+    recursos JÁ RESOLVIDOS do MESMO appeal_type desta clínica — aqui
+    resolvemos 3 recursos 'administrativa' (2 deferido, 1 indeferido)
+    e provamos que o 4º (o que está sendo redigido agora) recebe
+    exatamente esse histórico, SEM se contar a si mesmo."""
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft_history")
+
+    resolutions = ["deferido", "deferido", "indeferido"]
+    for outcome in resolutions:
+        billing_id = await _create_billing(client, auth_headers_a, plan_id)
+        appeal_id = await _create_appeal(client, auth_headers_a, billing_id, appeal_type="administrativa")
+        await client.post(f"/api/v1/denial-appeals/{appeal_id}/file", json={}, headers=auth_headers_a)
+        resolve_resp = await client.post(
+            f"/api/v1/denial-appeals/{appeal_id}/resolve", json={"status": outcome}, headers=auth_headers_a
+        )
+        assert resolve_resp.status_code == 200
+
+    # O recurso sendo redigido agora ainda está 'aberto' — não deveria
+    # entrar na própria contagem de histórico (exclude_appeal_id).
+    new_billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    new_appeal_id = await _create_appeal(client, auth_headers_a, new_billing_id, appeal_type="administrativa")
+
+    response = await client.post(
+        f"/api/v1/denial-appeals/{new_appeal_id}/draft-justification", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+
+    history = _FakeDenialAppealDrafter.captured_history
+    assert history == {"deferido": 2, "indeferido": 1}
+
+
+async def test_draft_justification_history_is_scoped_by_appeal_type(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    """Recursos resolvidos de um appeal_type DIFERENTE ('medica') não
+    deveriam contaminar o histórico de 'tecnica' — a granularidade do
+    histórico é por tipo, não geral."""
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft_history_scope")
+
+    for appeal_type, outcome in [("medica", "deferido"), ("medica", "deferido"), ("medica", "deferido")]:
+        billing_id = await _create_billing(client, auth_headers_a, plan_id)
+        appeal_id = await _create_appeal(client, auth_headers_a, billing_id, appeal_type=appeal_type)
+        await client.post(f"/api/v1/denial-appeals/{appeal_id}/file", json={}, headers=auth_headers_a)
+        await client.post(f"/api/v1/denial-appeals/{appeal_id}/resolve", json={"status": outcome}, headers=auth_headers_a)
+
+    new_billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    new_appeal_id = await _create_appeal(client, auth_headers_a, new_billing_id, appeal_type="tecnica")
+
+    response = await client.post(
+        f"/api/v1/denial-appeals/{new_appeal_id}/draft-justification", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+
+    history = _FakeDenialAppealDrafter.captured_history
+    assert history == {"deferido": 0, "indeferido": 0}
 
 
 async def test_draft_justification_returns_502_when_ai_call_fails(client, auth_headers_a, admin_engine, tenant_a, monkeypatch):

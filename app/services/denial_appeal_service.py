@@ -332,14 +332,24 @@ class DenialAppealService:
         não é opcional numa auditoria de LGPD: é exatamente o tipo de
         fluxo de dado que "quem acessou/exportou dado de qual paciente,
         quando" precisa cobrir.
+
+        Épico F2.4 do Plano Diretor ("Recurso de glosa assistido"):
+        além do dado factual do caso, o rascunho recebe o histórico de
+        sucesso desta clínica em recursos do MESMO appeal_type (ver
+        DenialAppealRepository.count_resolved_by_appeal_type) — só como
+        reforço, nunca como substituto do argumento de fato (ver regra
+        3b do system prompt).
         """
-        await self._get_or_404(appeal_id)
+        appeal = await self._get_or_404(appeal_id)
         context_row = await self.repo.get_document_context(appeal_id)
         assert context_row is not None  # _get_or_404 já confirmou que o appeal existe
+        appeal_history = await self.repo.count_resolved_by_appeal_type(
+            appeal_type=appeal.appeal_type, exclude_appeal_id=appeal_id
+        )
 
         try:
             drafter = AnthropicDenialAppealDrafter()
-            draft = await drafter.draft(context_row)
+            draft = await drafter.draft(context_row, appeal_history)
             await self.audit_repo.record(
                 tenant_id=uuid.UUID(tenant_id),
                 actor_user_id=actor_user_id,

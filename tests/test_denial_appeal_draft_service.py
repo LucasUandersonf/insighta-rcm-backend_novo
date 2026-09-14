@@ -61,3 +61,30 @@ def test_draft_message_labels_appeal_type_in_portuguese_for_each_type():
     ]:
         message = build_draft_user_message(_base_context(appeal_type=appeal_type))
         assert expected_fragment in message.lower()
+
+
+def test_draft_message_omits_history_line_below_min_sample():
+    """Épico F2.4: amostra abaixo de _MIN_APPEAL_HISTORY_SAMPLE (3) nunca
+    vira linha de prompt — "1 de 1 = 100%" seria confiança inventada."""
+    message = build_draft_user_message(_base_context(), appeal_history={"deferido": 1, "indeferido": 0})
+    assert "histórico desta clínica" not in message.lower()
+
+
+def test_draft_message_omits_history_line_when_none():
+    message = build_draft_user_message(_base_context(), appeal_history=None)
+    assert "histórico desta clínica" not in message.lower()
+
+
+def test_draft_message_includes_history_line_at_min_sample():
+    message = build_draft_user_message(_base_context(), appeal_history={"deferido": 2, "indeferido": 1})
+    lowered = message.lower()
+    assert "histórico desta clínica" in lowered
+    assert "recurso administrativo" in lowered or "administrativo" in lowered
+    assert "2 de 3 recursos já resolvidos foram deferidos" in message
+    assert "67% de sucesso" in message
+
+
+def test_draft_message_history_win_rate_rounds_correctly():
+    message = build_draft_user_message(_base_context(), appeal_history={"deferido": 0, "indeferido": 4})
+    assert "0 de 4 recursos já resolvidos foram deferidos" in message
+    assert "0% de sucesso" in message

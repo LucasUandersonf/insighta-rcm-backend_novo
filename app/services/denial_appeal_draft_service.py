@@ -41,6 +41,14 @@ _APPEAL_TYPE_LABELS = {
     "medica": "recurso médico (negativa de cobertura por junta médica)",
 }
 
+# Épico F2.4 do Plano Diretor ("Recurso de glosa assistido") pede
+# "histórico de recursos ganhos pra motivo semelhante" como um dos 3
+# insumos do rascunho — amostra mínima antes de citar qualquer taxa,
+# mesmo critério de _MIN_COPARTICIPATION_SAMPLE/min_sample usado em
+# todo o resto do produto: "1 de 1 = 100%" seria uma confiança
+# inventada, não um padrão real.
+_MIN_APPEAL_HISTORY_SAMPLE = 3
+
 _DRAFT_SYSTEM_PROMPT = """Você ajuda uma clínica médica brasileira a redigir o parágrafo de \
 "Justificativa do Recurso" de uma carta de contestação de glosa (negativa de pagamento) enviada por \
 uma operadora de saúde.
@@ -55,6 +63,9 @@ como substituir com segurança.
 3. Se o motivo da negativa for de natureza ADMINISTRATIVA/documental (ex: falta de guia, senha vencida, \
 divergência de código), construa o argumento em cima disso (ex: "a guia foi corretamente autorizada sob o \
 número X, senha Y" quando esses dados existirem).
+3b. Se uma TAXA DE SUCESSO HISTÓRICA desta clínica em recursos semelhantes for fornecida, pode citá-la como \
+reforço (ex: "recursos semelhantes desta clínica têm histórico favorável") — mas isso NUNCA substitui o \
+argumento de fato do caso específico, só reforça.
 4. Se os fatos fornecidos não forem suficientes para sustentar um argumento substantivo (faltam dados-chave \
 ou a negativa é de mérito clínico que você não pode avaliar), escreva um parágrafo mais curto reconhecendo \
 os fatos disponíveis e sinalizando EXPLICITAMENTE, dentro do próprio texto, que a clínica precisa completar \
@@ -68,12 +79,20 @@ class DenialAppealDraftError(Exception):
     pass
 
 
-def build_draft_user_message(context_row: dict) -> str:
+def build_draft_user_message(context_row: dict, appeal_history: dict[str, int] | None = None) -> str:
     """
     Função PURA: monta a mensagem enviada à IA a partir do MESMO dict
     que `DenialAppealRepository.get_document_context` já devolve para o
     PDF (ver denial_appeal_service.build_appeal_document) — nenhum dado
     novo, só reformatado em texto para o prompt. Testável sem rede.
+
+    `appeal_history` (opcional) — épico F2.4 do Plano Diretor: contagem
+    `{"deferido": N, "indeferido": M}` de recursos JÁ RESOLVIDOS do
+    MESMO appeal_type nesta clínica (ver
+    DenialAppealRepository.count_resolved_by_appeal_type). Só vira
+    linha do prompt quando a amostra total bate
+    `_MIN_APPEAL_HISTORY_SAMPLE` — abaixo disso, fica de fora (nunca
+    "1 de 1 = 100%" como se fosse um padrão real).
     """
     appeal_type_label = _APPEAL_TYPE_LABELS.get(context_row["appeal_type"], context_row["appeal_type"])
     lines = [
@@ -99,6 +118,16 @@ def build_draft_user_message(context_row: dict) -> str:
     if context_row.get("charged_value") is not None:
         lines.append(f"Valor cobrado: R$ {float(context_row['charged_value']):,.2f}.".replace(",", "X").replace(".", ",").replace("X", "."))
 
+    if appeal_history is not None:
+        total_resolved = appeal_history.get("deferido", 0) + appeal_history.get("indeferido", 0)
+        if total_resolved >= _MIN_APPEAL_HISTORY_SAMPLE:
+            win_rate_pct = round(appeal_history.get("deferido", 0) / total_resolved * 100)
+            lines.append(
+                f"Histórico desta clínica em recursos do tipo '{appeal_type_label}': "
+                f"{appeal_history.get('deferido', 0)} de {total_resolved} recursos já resolvidos foram deferidos "
+                f"({win_rate_pct}% de sucesso)."
+            )
+
     lines.append(
         "Com base SOMENTE nesses fatos, escreva o parágrafo de justificativa do recurso, seguindo todas as "
         "regras do system prompt."
@@ -121,12 +150,12 @@ class AnthropicDenialAppealDrafter:
             "content-type": "application/json",
         }
 
-    async def draft(self, context_row: dict) -> str:
+    async def draft(self, context_row: dict, appeal_history: dict[str, int] | None = None) -> str:
         payload = {
             "model": settings.DENIAL_APPEAL_DRAFT_MODEL,
             "max_tokens": 1024,
             "system": _DRAFT_SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": build_draft_user_message(context_row)}],
+            "messages": [{"role": "user", "content": build_draft_user_message(context_row, appeal_history)}],
         }
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post("https://api.anthropic.com/v1/messages", headers=self._headers, json=payload)
