@@ -21,6 +21,7 @@ from app.api.v1.endpoints import (
     glosas,
     guias,
     ingestion,
+    insight_outcomes,
     insurance_companies,
     integrations,
     locais,
@@ -50,6 +51,7 @@ api_router.include_router(insurance_companies.router)
 api_router.include_router(denial_appeals.router)
 api_router.include_router(guias.router)
 api_router.include_router(lotes.router)
+api_router.include_router(insight_outcomes.router)
 api_router.include_router(faturas.router)
 api_router.include_router(glosas.router)
 api_router.include_router(webhooks.router)
