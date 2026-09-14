@@ -39,6 +39,8 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DataQualityByUserItem,
+    DataQualityResponse,
     DenialReasonConfirmationItem,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
@@ -104,6 +106,12 @@ from app.services.smart_insights_engine import (
 # real (mesma limitação já registrada no Achado 7 da Auditoria para os
 # demais limiares deste produto).
 DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
+
+# Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") — amostra
+# mínima de atendimentos lançados por um atendente antes de reportar sua
+# taxa de completude, mesmo raciocínio de DENIAL_REASON_CONFIRMATION_MIN_SAMPLE
+# logo acima: 1-2 lançamentos não é um "padrão do atendente", é ruído.
+DATA_QUALITY_MIN_SAMPLE = 5
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -1627,4 +1635,39 @@ class AnalyticsService:
             baseline_denial_rate=baseline_rate,
             items=items,
             min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
+        )
+
+    async def get_data_quality_by_user(self, date_from: date, date_to: date) -> DataQualityResponse:
+        """
+        Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
+        quanto de cada atendente que lança atendimento já entra completo
+        (CID + procedimento), a fonte mais comum de risco de glosa por
+        dado ausente (ver DECISÃO completa em
+        AnalyticsRepository.data_completeness_by_user). Ordenado do PIOR
+        pro melhor — quem mais precisa de atenção/treinamento primeiro,
+        mesmo critério de "pior caso primeiro" do resto do produto
+        (Radar de Profissional, fila de ação priorizada).
+        """
+        rows = await self.analytics_repo.data_completeness_by_user(date_from, date_to, min_sample=DATA_QUALITY_MIN_SAMPLE)
+        items = [
+            DataQualityByUserItem(
+                user_id=user_id,
+                full_name=full_name,
+                complete_count=complete,
+                total_count=total,
+                completion_rate=complete / total,
+            )
+            for user_id, full_name, complete, total in rows
+        ]
+        items.sort(key=lambda item: item.completion_rate)
+
+        total_considered = sum(item.total_count for item in items)
+        total_complete = sum(item.complete_count for item in items)
+        overall_rate = (total_complete / total_considered) if total_considered > 0 else None
+
+        return DataQualityResponse(
+            items=items,
+            overall_completion_rate=overall_rate,
+            total_considered=total_considered,
+            min_sample=DATA_QUALITY_MIN_SAMPLE,
         )

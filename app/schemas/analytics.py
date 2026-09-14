@@ -333,6 +333,37 @@ class DenialReasonConfirmationResponse(BaseModel):
     min_sample: int
 
 
+class DataQualityByUserItem(BaseModel):
+    """Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
+    ver DECISÃO completa em AnalyticsRepository.data_completeness_by_user.
+    `completion_rate` é a fração (0.0-1.0) de atendimentos lançados por
+    este usuário no período que já nasceram com CID + procedimento
+    preenchidos."""
+
+    user_id: str
+    full_name: str
+    complete_count: int
+    total_count: int
+    completion_rate: float
+
+
+class DataQualityResponse(BaseModel):
+    """GET /api/v1/analytics/data-quality — painel de qualidade de
+    cadastro: quanto de cada atendente já lança um atendimento completo
+    (CID + procedimento), a fonte mais comum de risco de glosa por dado
+    ausente (ver denial_risk_engine.py). `items` ordenado do PIOR pro
+    melhor (quem mais precisa de atenção primeiro) — só atendentes com
+    amostra >= `min_sample` aparecem, mesmo critério do resto do
+    produto. `overall_completion_rate` é None quando nenhum atendente
+    atingiu a amostra mínima no período (base zero, nunca "100%" por
+    ausência de dado)."""
+
+    items: list[DataQualityByUserItem]
+    overall_completion_rate: float | None
+    total_considered: int
+    min_sample: int
+
+
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive" | "comparativo"
     # "faturamento" | "agenda" — ver DECISÃO em smart_insights_engine.Insight.

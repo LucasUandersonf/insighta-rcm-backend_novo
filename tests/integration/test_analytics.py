@@ -9,6 +9,7 @@ tests/test_smart_insights_engine.py, sem banco).
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import text
 
 
@@ -637,6 +638,7 @@ async def test_atendimento_cannot_access_analytics(client, admin_engine, tenant_
         "plan-loss-ranking",
         "contract-utilization",
         "denial-risk-distribution",
+        "data-quality",
     ):
         response = await client.get(f"/api/v1/analytics/{path}", headers=headers)
         assert response.status_code == 403, f"{path} deveria barrar atendimento"
@@ -2374,3 +2376,113 @@ async def test_denial_reason_confirmation_baseline_is_none_without_any_resolved_
     assert body["baseline_sample_size"] == 0
     assert body["baseline_denial_rate"] is None
     assert body["items"] == []
+
+
+# =====================================================================
+# GET /analytics/data-quality — Épico F2.2 do Plano Diretor ("Qualidade
+# de dado na origem").
+# =====================================================================
+
+
+async def _create_patient(client, headers, full_name="Paciente Qualidade de Dado") -> str:
+    resp = await client.post("/api/v1/patients", json={"full_name": full_name}, headers=headers)
+    return resp.json()["id"]
+
+
+async def _launch_appointment(client, headers, patient_id, *, complete: bool) -> None:
+    payload = {
+        "patient_id": patient_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+    }
+    if complete:
+        payload["procedure_code"] = "10101012"
+        payload["cid_code"] = "J06"
+    resp = await client.post("/api/v1/appointments", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+
+
+async def test_data_quality_ranks_worst_attendant_first(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.conftest import _insert_user, _login
+
+    worse = await _insert_user(admin_engine, tenant_id=tenant_a, email="ana.recepcao@clinica-a.com", role="atendimento")
+    better = await _insert_user(admin_engine, tenant_id=tenant_a, email="beto.recepcao@clinica-a.com", role="atendimento")
+    worse_token = await _login(client, worse["email"], worse["password"])
+    better_token = await _login(client, better["email"], better["password"])
+    worse_headers = {"Authorization": f"Bearer {worse_token}"}
+    better_headers = {"Authorization": f"Bearer {better_token}"}
+
+    patient_id = await _create_patient(client, auth_headers_a)
+
+    # Ana: 5 lançamentos, só 1 completo (20%).
+    for i in range(5):
+        await _launch_appointment(client, worse_headers, patient_id, complete=(i == 0))
+    # Beto: 5 lançamentos, todos completos (100%).
+    for _ in range(5):
+        await _launch_appointment(client, better_headers, patient_id, complete=True)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["min_sample"] == 5
+    assert len(body["items"]) == 2
+    # Pior primeiro.
+    assert body["items"][0]["full_name"] == "ana.recepcao"
+    assert body["items"][0]["complete_count"] == 1
+    assert body["items"][0]["total_count"] == 5
+    assert body["items"][0]["completion_rate"] == 0.2
+    assert body["items"][1]["full_name"] == "beto.recepcao"
+    assert body["items"][1]["completion_rate"] == 1.0
+
+    assert body["total_considered"] == 10
+    assert body["overall_completion_rate"] == pytest.approx(0.6)
+
+
+async def test_data_quality_excludes_attendant_below_min_sample(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="poucos.lancamentos@clinica-a.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    patient_id = await _create_patient(client, auth_headers_a)
+
+    # Só 3 lançamentos — abaixo de min_sample (5): ruído estatístico
+    # demais para reportar uma taxa por atendente.
+    for i in range(3):
+        await _launch_appointment(client, headers, patient_id, complete=(i == 0))
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["total_considered"] == 0
+    assert body["overall_completion_rate"] is None
+
+
+async def test_data_quality_ignores_appointments_without_created_by(client, auth_headers_a, admin_engine, tenant_a):
+    """Atendimento importado em massa/via job automatizado não tem
+    'quem lançou' (created_by NULL) — não deveria virar um atendente
+    fantasma 'sem nome' na lista."""
+    patient_id = await _create_patient(client, auth_headers_a)
+    async with admin_engine.begin() as conn:
+        for _ in range(6):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) "
+                    "VALUES (:t, :p, :dt, 'scheduled')"
+                ),
+                {"t": tenant_a, "p": patient_id, "dt": datetime.now(timezone.utc) + timedelta(days=1)},
+            )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []

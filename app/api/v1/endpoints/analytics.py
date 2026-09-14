@@ -31,6 +31,7 @@ from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
     ContractUtilizationResponse,
+    DataQualityResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
@@ -412,3 +413,19 @@ async def get_denial_reason_confirmation(
     histórico já resolvido, não uma janela.
     """
     return await _build_service(db).get_denial_reason_confirmation()
+
+
+@router.get("/data-quality", response_model=DataQualityResponse)
+async def get_data_quality(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DataQualityResponse:
+    """
+    Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") — painel
+    de qualidade de cadastro: taxa de atendimento lançado já completo
+    (CID + procedimento) por atendente, ordenado do pior pro melhor.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_data_quality_by_user(start, end)

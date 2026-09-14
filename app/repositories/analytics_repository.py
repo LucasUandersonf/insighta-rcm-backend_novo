@@ -1426,6 +1426,45 @@ class AnalyticsRepository:
         no_show, total = (await self.session.execute(stmt)).one()
         return int(no_show or 0), int(total or 0)
 
+    async def data_completeness_by_user(
+        self, date_from: date, date_to: date, *, min_sample: int = 5
+    ) -> list[tuple[str, str, int, int]]:
+        """
+        Épico F2.2 do Plano Diretor ("Qualidade de dado na origem"): de
+        todo atendimento LANÇADO (created_at, não scheduled_at — o que
+        importa aqui é o momento do cadastro, não da consulta) no
+        período por um atendente (Appointment.created_by), quantos já
+        nasceram com os dois campos que mais alimentam risco de glosa
+        por dado ausente já preenchidos (cid_code + procedure_code — ver
+        denial_risk_engine._rule_missing_cid/_rule_missing_procedure_code).
+
+        Só entra atendente com amostra >= min_sample — mesmo raciocínio
+        de professional_denial_rates logo abaixo: 1 lançamento não é um
+        "padrão do atendente", é ruído. Atendimento sem created_by
+        (ingestão em massa, job automatizado) não tem "quem lançou" —
+        fica de fora do agrupamento, nunca vira um atendente fantasma
+        "sem nome" (JOIN, não LEFT JOIN, filtra isso automaticamente).
+
+        Retorna [(user_id, nome, completos, total)].
+        """
+        from app.models.user import User
+
+        start, end = _bounds(date_from, date_to)
+        complete_expr = func.sum(
+            case((Appointment.cid_code.is_not(None) & Appointment.procedure_code.is_not(None), 1), else_=0)
+        )
+        total_expr = func.count()
+        stmt = (
+            select(User.id, User.full_name, complete_expr, total_expr)
+            .select_from(Appointment)
+            .join(User, User.id == Appointment.created_by)
+            .where(Appointment.created_at >= start, Appointment.created_at <= end)
+            .group_by(User.id, User.full_name)
+            .having(func.count() >= min_sample)
+        )
+        result = await self.session.execute(stmt)
+        return [(str(user_id), full_name, int(complete), int(total)) for user_id, full_name, complete, total in result.all()]
+
     async def professional_denial_rates(self, date_from: date, date_to: date, *, min_sample: int = 5) -> list[tuple[str, str, float, int]]:
         """
         Taxa de glosa (risco médio/alto) por profissional executante, só
