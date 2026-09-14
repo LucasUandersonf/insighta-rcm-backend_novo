@@ -630,10 +630,31 @@ class AnalyticsService:
         return ContractUtilizationResponse(period_start=date_from, period_end=date_to, contracts=contracts)
 
     async def get_denial_risk_distribution(self, date_from: date, date_to: date) -> DenialRiskDistributionResponse:
-        breakdown = await self.analytics_repo.denial_risk_count_breakdown(date_from, date_to)
-        items = [DenialRiskDistributionItem(level=level, count=count) for level, count in breakdown.items()]
+        """
+        Achado do Parecer Técnico "Boletim Insighta" (revisão 2): esta
+        resposta e o insight "% do faturado em risco de glosa" cobriam o
+        MESMO corte de dado (nível de risco no período) em duas
+        granularidades diferentes — contagem aqui, valor agregado lá.
+        Busca as duas agregações (já existiam separadas, ver
+        AnalyticsRepository.denial_risk_count_breakdown/
+        denial_risk_value_breakdown) e devolve os dois lado a lado por
+        nível, pro frontend alternar a visão sem precisar de duas telas.
+        """
+        count_breakdown = await self.analytics_repo.denial_risk_count_breakdown(date_from, date_to)
+        value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
+        levels = set(count_breakdown) | set(value_breakdown)
+        items = [
+            DenialRiskDistributionItem(
+                level=level, count=count_breakdown.get(level, 0), value=value_breakdown.get(level, 0.0)
+            )
+            for level in levels
+        ]
         return DenialRiskDistributionResponse(
-            period_start=date_from, period_end=date_to, items=items, total_reviewed=sum(breakdown.values())
+            period_start=date_from,
+            period_end=date_to,
+            items=items,
+            total_reviewed=sum(count_breakdown.values()),
+            total_value_reviewed=sum(value_breakdown.values()),
         )
 
     async def _period_insights_input(

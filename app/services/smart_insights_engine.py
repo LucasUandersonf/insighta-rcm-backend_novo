@@ -145,6 +145,14 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# Raio-X da Receita — achado do Parecer Técnico "Boletim Insighta"
+# (revisão 2, 14/09): _coparticipation_visibility_insight só dispara UMA
+# vez (a "estreia" do dado); nada acompanhava a fatia de coparticipação
+# depois disso. 5pp é o mesmo piso já usado em
+# _OPME_CONCENTRATION_INCREASE_PP — mesmo "chute razoável" documentado
+# no resto do arquivo.
+_COPARTICIPATION_GROWTH_INCREASE_PP = 5.0
+
 # "O que resta em aberto" da Auditoria de Templates e Insights: peça
 # natural do mesmo padrão que Guia/coparticipação já fecharam —
 # core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
@@ -168,12 +176,21 @@ _MIN_COPARTICIPATION_SAMPLE = 5
 #
 # _PAYMENT_LAG_MARKET_BENCHMARK_DAYS é só contexto NARRATIVO (citado na
 # mensagem quando o prazo da própria clínica já passa dele) — nunca o
-# gatilho do alerta, que são os dois limiares abaixo. Segundo a ANAHP, o
-# PMR do setor de saúde suplementar no Brasil chegou a 77 dias em 2025;
-# 60/90 são um "chute razoável" ancorado nesse número (mesma limitação
-# de todo o resto dos limiares deste arquivo — Achado 7 da Auditoria de
-# Templates e Insights: não calibrado contra dado real de produção).
-_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 77.0
+# gatilho do alerta, que são os dois limiares abaixo.
+#
+# CORREÇÃO — Parecer Técnico "Boletim Insighta" (revisão 2, 14/09)
+# sugeriu subir este número para 120 dias, citando "ANAHP 2024, quase o
+# dobro de 2022". Verificado via busca antes de aplicar (indicadores do
+# Sistema de Indicadores Hospitalares da Anahp, cobertos por Medicina
+# S/A e Saúde Business): o PMR real do setor em 2024 foi de
+# aproximadamente 69 dias — CAINDO frente aos ~76 dias de 2023, não
+# subindo. A alegação de 120 dias não se sustenta contra a fonte
+# primária; mantido aqui o número real verificado, não o do parecer.
+# 60/90 (limiares de alerta abaixo) continuam um "chute razoável"
+# ancorado nesse benchmark (mesma limitação de todo o resto deste
+# arquivo — Achado 7 da Auditoria de Templates e Insights: não
+# calibrado contra dado real de produção).
+_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 69.0
 _PAYMENT_LAG_WARNING_DAYS = 60.0
 _PAYMENT_LAG_CRITICAL_DAYS = 90.0
 _MIN_PAYMENT_LAG_SAMPLE = 5  # mesmo raciocínio de amostra mínima do resto do arquivo
@@ -616,8 +633,11 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
 def _payment_lag_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
     """
     PMR (achado da auditoria "Veredito do Gestor Clínico" — Seção 4,
-    Achado 2): o segundo maior vilão financeiro do setor segundo a
-    ANAHP (77 dias em 2025), ao lado da glosa — e o dado pra calculá-lo
+    Achado 2): o segundo maior vilão financeiro do setor ao lado da
+    glosa — mesmo com o PMR médio real da ANAHP em queda (~69 dias em
+    2024, vindo de ~76 em 2023, ver _PAYMENT_LAG_MARKET_BENCHMARK_DAYS),
+    ainda é tempo de caixa preso que a clínica não recupera sozinha — e
+    o dado pra calculá-lo
     (billing.created_at/settled_at) sempre esteve no banco sem nenhum
     indicador consumindo. Estado do PERÍODO (billing criado na janela,
     já conciliado) — comparável contra o período anterior, mesmo
@@ -776,6 +796,52 @@ def _coparticipation_visibility_insight(current: InsightsPeriodInput, previous: 
             f"a parte que o PACIENTE paga, separada do que o convênio cobre — presente em {pct_of_billings:.0f}% "
             "dos seus faturamentos. Esse valor não aparecia em nenhum relatório antes; vale conferir se está "
             "batendo com o que de fato foi cobrado do paciente na recepção."
+        ),
+        financial_impact=current.coparticipation_total,
+    )
+
+
+def _coparticipation_growth_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): o insight
+    acima (_coparticipation_visibility_insight) é um "aviso de
+    boas-vindas" que dispara UMA ÚNICA vez, no momento em que o dado
+    passa a ser confiável — depois disso, nenhum insight acompanhava a
+    fatia de coparticipação no faturamento de forma contínua. Este
+    insight fecha essa lacuna com o MESMO padrão já usado em
+    _opme_concentration_insight: só alerta quando a fatia SOBE de forma
+    material vs. o período anterior. Exige amostra confiável NOS DOIS
+    períodos (o inverso do insight de cima, que exige o contrário) —
+    de propósito: um cobre a "estreia" do dado, este cobre a
+    "tendência" depois dela, nunca os dois no mesmo carregamento.
+
+    Sem inventar "inadimplência" de propósito: hoje o produto registra
+    quanto foi COBRADO de coparticipação (Billing.coparticipation_value),
+    nunca se o paciente de fato PAGOU — fabricar uma taxa de
+    inadimplência sem esse dado seria exatamente o tipo de confiança que
+    o motor inteiro se recusa a inventar. Este insight fica em "virou
+    fatia maior da receita", não em "não foi pago".
+    """
+    if (
+        current.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE
+        or previous.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE
+        or current.total_billed <= 0
+        or previous.total_billed <= 0
+    ):
+        return None
+    pct = (current.coparticipation_total / current.total_billed) * 100
+    previous_pct = (previous.coparticipation_total / previous.total_billed) * 100
+    if pct - previous_pct < _COPARTICIPATION_GROWTH_INCREASE_PP:
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="A fatia de coparticipação no seu faturamento está subindo",
+        message=(
+            f"R$ {current.coparticipation_total:,.2f} ({pct:.0f}% do faturado no período) foram registrados como "
+            f"coparticipação — a parte que o PACIENTE paga — {pct - previous_pct:.0f} pontos percentuais acima do "
+            f"período anterior ({previous_pct:.0f}%). Vale confirmar que a recepção está de fato cobrando e "
+            "recebendo esse valor do paciente na hora do atendimento, não só lançando no sistema."
         ),
         financial_impact=current.coparticipation_total,
     )
@@ -1656,6 +1722,7 @@ def generate_insights(
         _cancellation_reason_insight(current),
         _opme_concentration_insight(current, previous),
         _coparticipation_visibility_insight(current, previous),
+        _coparticipation_growth_insight(current, previous),
         _revenue_concentration_insight(current),
         _marketing_roi_insight(current, previous),
     ):

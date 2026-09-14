@@ -272,11 +272,20 @@ class ContractUtilizationResponse(BaseModel):
 class DenialRiskDistributionItem(BaseModel):
     level: str  # "low" | "medium" | "high"
     count: int
+    # Achado do Parecer Técnico "Boletim Insighta" (revisão 2): antes
+    # existiam DUAS telas pro mesmo corte de dado — esta (contagem) e o
+    # card "% do faturado em risco de glosa" do feed de insights (valor,
+    # mas só agregado medium+high, sem abrir por nível). Trazer o valor
+    # em R$ de CADA nível pra dentro desta mesma resposta elimina a
+    # necessidade de duas telas — o frontend alterna a visão (contagem
+    # vs. R$) sem precisar de um segundo endpoint.
+    value: float
 
 
 class DenialRiskDistributionResponse(BaseModel):
     """GET /api/v1/analytics/denial-risk-distribution — Painel → Faturamento
-    (donut "Distribuição de risco de glosa" do canvas de design)."""
+    (donut "Distribuição de risco de glosa" do canvas de design), com
+    alternância entre contagem e valor faturado por nível de risco."""
 
     period_start: date
     period_end: date
@@ -285,6 +294,7 @@ class DenialRiskDistributionResponse(BaseModel):
     # AnalyticsRepository.denial_risk_count_breakdown sobre por que
     # "revisado" é sinônimo de "faturado no período" neste produto.
     total_reviewed: int
+    total_value_reviewed: float
 
 
 class DenialReasonConfirmationItem(BaseModel):
