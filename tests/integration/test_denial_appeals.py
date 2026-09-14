@@ -337,6 +337,47 @@ async def test_draft_justification_returns_502_when_ai_call_fails(client, auth_h
     assert response.status_code == 502
 
 
+# ---------------------------------------------------------------------
+# Trilha de auditoria (F4.1 do Plano Diretor — LGPD e segurança)
+# ---------------------------------------------------------------------
+
+
+async def test_downloading_appeal_document_is_audited(client, auth_headers_a, admin_engine, tenant_a):
+    """Épico F4.1: o PDF carrega CPF e CID do paciente (dado sensível
+    de saúde) — baixar precisa ficar registrado em quem/quando."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_audit_doc")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    await client.get(f"/api/v1/denial-appeals/{appeal_id}/document", headers=auth_headers_a)
+
+    audit_resp = await client.get(
+        f"/api/v1/audit-log?entity_type=denial_appeal&action=document_downloaded", headers=auth_headers_a
+    )
+    assert audit_resp.status_code == 200
+    entries = audit_resp.json()["items"]
+    assert any(e["entity_id"] == appeal_id for e in entries)
+
+
+async def test_ai_draft_generation_is_audited(client, auth_headers_a, admin_engine, tenant_a, monkeypatch):
+    """Épico F4.1: gerar o rascunho via IA manda o CID pra um
+    processador terceiro (API da Anthropic) — exatamente o tipo de
+    fluxo que uma auditoria de LGPD precisa conseguir mostrar."""
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_audit_ai")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=auth_headers_a)
+
+    audit_resp = await client.get(
+        f"/api/v1/audit-log?entity_type=denial_appeal&action=ai_draft_generated", headers=auth_headers_a
+    )
+    assert audit_resp.status_code == 200
+    entries = audit_resp.json()["items"]
+    assert any(e["entity_id"] == appeal_id for e in entries)
+
+
 async def test_draft_justification_without_api_key_returns_502(client, auth_headers_a, admin_engine, tenant_a):
     """Sem monkeypatch nenhum: a classe REAL (AnthropicDenialAppealDrafter)
     roda, ANTHROPIC_API_KEY não está configurada neste sandbox, e o

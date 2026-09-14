@@ -157,7 +157,9 @@ async def draft_denial_appeal_justification(
     volta como preview editável, só entra no PDF se o usuário mandar
     (via ?justification= em GET /document).
     """
-    draft = await _build_service(db).draft_justification(appeal_id)
+    draft = await _build_service(db).draft_justification(
+        current_user.tenant_id, appeal_id, actor_user_id=uuid.UUID(current_user.id)
+    )
     return DenialAppealDraftJustificationResponse(draft=draft)
 
 
@@ -178,7 +180,9 @@ async def download_denial_appeal_document(
     recurso, é só um jeito de sair daqui com o rascunho pronto pra
     completar e protocolar pelo canal da operadora.
     """
-    pdf_bytes = await _build_service(db).build_appeal_document(current_user.tenant_id, appeal_id, justification)
+    pdf_bytes = await _build_service(db).build_appeal_document(
+        current_user.tenant_id, appeal_id, justification, actor_user_id=uuid.UUID(current_user.id)
+    )
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
