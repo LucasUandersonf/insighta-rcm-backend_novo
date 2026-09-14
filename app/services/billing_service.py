@@ -93,11 +93,21 @@ class BillingService:
                 tuss_code=appointment.procedure_code,
             )
 
+        # Raio-X da Receita, frente "Evitando perdas": resolve o sinal de
+        # duplicidade AQUI (repositório) — o motor de regras continua
+        # puro/sem banco (ver DECISÃO em denial_risk_engine.py e
+        # BillingRepository.has_duplicate).
+        has_duplicate = await self.billing_repo.has_duplicate(
+            data.appointment_id, data.charged_value, data.item_type
+        )
+
         # quantity entra no motor de regras (ver DECISÃO em
         # denial_risk_engine.assess) para multiplicar o preço de tabela —
         # sem isso, lançamento manual de quantidade > 1 sofreria o mesmo
         # falso positivo já corrigido na ingestão em lote.
-        risk = assess(appointment, contract_item, data.charged_value, quantity=data.quantity)
+        risk = assess(
+            appointment, contract_item, data.charged_value, quantity=data.quantity, has_duplicate_billing=has_duplicate
+        )
 
         billing = Billing(
             id=uuid.uuid4(),

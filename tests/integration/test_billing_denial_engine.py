@@ -148,6 +148,100 @@ async def test_clean_billing_is_low_risk_and_not_held(client, auth_headers_a, ad
     assert body["status"] == "pending"
 
 
+async def test_billing_submitted_twice_for_the_same_appointment_is_flagged_as_duplicate(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Raio-X da Receita, frente 'Evitando perdas' — clique duplo no
+    botão Salvar, ou duas pessoas da recepção lançando o mesmo
+    atendimento: a SEGUNDA cobrança idêntica (mesmo atendimento, mesmo
+    valor, mesmo tipo de item) deve ser barrada como alto risco antes de
+    ser enviada pro convênio."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="40404040", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Duplicado"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "40404040",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    appointment_id = appointment_resp.json()["id"]
+
+    first_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    assert first_resp.status_code == 201
+    assert first_resp.json()["denial_risk_level"] == "low"
+
+    second_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    assert second_resp.status_code == 201
+    second_body = second_resp.json()
+    assert second_body["denial_risk_level"] == "high"
+    assert "duplicate_billing" in second_body["denial_reasons"]
+    assert second_body["status"] == "held_for_review"
+
+
+async def test_billing_with_different_item_type_on_same_appointment_is_not_a_duplicate(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Duas linhas legítimas na mesma consulta (ex: procedimento + OPME)
+    não deveriam disparar o alerta de duplicidade só por compartilharem o
+    atendimento e o valor — o critério exige item_type também bater."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="50505050", agreed_value=150.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Itens Distintos"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "50505050",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    appointment_id = appointment_resp.json()["id"]
+
+    first_resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 150.0,
+            "item_type": "procedimento",
+        },
+        headers=auth_headers_a,
+    )
+    assert first_resp.status_code == 201
+
+    second_resp = await client.post(
+        "/api/v1/billing",
+        json={
+            "appointment_id": appointment_id, "insurance_plan_id": plan_id, "charged_value": 150.0,
+            "item_type": "material_opme",
+        },
+        headers=auth_headers_a,
+    )
+    assert second_resp.status_code == 201
+    assert "duplicate_billing" not in second_resp.json()["denial_reasons"]
+
+
 async def test_list_high_risk_billing_returns_only_held_for_review(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Bradesco", normalized_key="bradesco")
     await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="70707070", agreed_value=150.0)

@@ -470,6 +470,36 @@ class InactivePatientsResponse(BaseModel):
     inactive_after_days: int
 
 
+class EarlyChurnRiskItem(BaseModel):
+    """Uma linha de "risco de abandono antecipado" — Raio-X da Receita,
+    frente "Prevendo movimentos" (ver DECISÃO completa em
+    AnalyticsRepository.list_early_churn_risk_patients). Diferente de
+    InactivePatientItem (piso fixo de 1 ano igual pra todo mundo), aqui o
+    limiar é o PRÓPRIO ritmo do paciente: `avg_interval_days` é o
+    intervalo médio histórico entre as consultas dele, `days_since_last`
+    já ultrapassa esse intervalo em pelo menos `gap_multiplier`x (ver
+    EarlyChurnRiskResponse)."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    avg_interval_days: float
+    days_since_last: float
+
+
+class EarlyChurnRiskResponse(BaseModel):
+    """GET /api/v1/analytics/early-churn-risk — alerta ANTECIPADO de
+    abandono, antes do paciente completar o piso fixo de
+    `inactive_after_days` (1 ano) que já vira "inativo" de verdade (ver
+    InactivePatientsResponse). `gap_multiplier` é quantas vezes o
+    intervalo médio PRÓPRIO do paciente ele já está sem voltar."""
+
+    items: list[EarlyChurnRiskItem]
+    total_count: int
+    gap_multiplier: float
+    inactive_after_days: int
+
+
 class RecallCandidateItem(BaseModel):
     """Uma linha de "candidato a recontato" — ver DECISÃO em
     AnalyticsRepository._recall_candidates_last_appointment. Diferente de
@@ -541,3 +571,76 @@ class FinancialHoleBillingsResponse(BaseModel):
     total_hole_value: float
     limit: int
     offset: int
+
+
+class ProfessionalProfitabilityItem(BaseModel):
+    """Uma linha de rentabilidade por profissional — Raio-X da Receita,
+    frente "Gestão eficiente" (ver DECISÃO completa em
+    AnalyticsService.get_profitability). Dois profissionais podem ter a
+    MESMA ocupação de agenda e gerar receitas bem diferentes por hora —
+    `revenue_per_hour` é o número que revela essa diferença, que nem
+    `avg_capacity_utilization` (ocupação) nem `revenue` sozinhos (sem
+    dividir pelo tempo ocupado) mostram."""
+
+    professional_id: UUID
+    full_name: str
+    revenue: float
+    booked_minutes: int
+    revenue_per_hour: float | None  # None quando booked_minutes == 0 (sem agenda ocupada no período, não faz sentido dividir)
+
+
+class ProcedureProfitabilityItem(BaseModel):
+    """Uma linha do ranking de mix de receita por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure. `share_pct` é a fatia do
+    faturado TOTAL do período que este procedimento representa."""
+
+    procedure_code: str
+    procedure_name: str | None
+    revenue: float
+    billing_count: int
+    share_pct: float
+
+
+class ProfitabilityResponse(BaseModel):
+    """GET /api/v1/analytics/profitability — Raio-X da Receita, frente
+    "Gestão eficiente": responde "quem/o que realmente traz receita",
+    além de faturamento total e taxa de glosa. `by_professional` vem
+    ordenado por receita/hora (maior primeiro); `by_procedure` por
+    receita total (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    by_professional: list[ProfessionalProfitabilityItem]
+    by_procedure: list[ProcedureProfitabilityItem]
+
+
+class MarketingChannelItem(BaseModel):
+    """Uma linha de desempenho de campanha — Raio-X da Receita, frente
+    "Gestão eficiente" (ver DECISÃO completa em
+    ReportingRepository.marketing_performance_by_campaign). `cac` usa o
+    período do dashboard; `avg_revenue_per_patient` (proxy de LTV) usa o
+    histórico TOTAL dos pacientes atribuídos a esta campanha, não só o
+    período — os dois denominadores são propositalmente diferentes."""
+
+    source: str
+    campaign_id: str
+    campaign_name: str | None
+    spend: float
+    patients_acquired: int  # pacientes NOVOS no período
+    cac: float | None  # spend / patients_acquired; None quando patients_acquired == 0
+    lifetime_patients: int  # total histórico de pacientes já atribuídos a esta campanha
+    lifetime_revenue: float  # receita histórica TOTAL desses pacientes
+    avg_revenue_per_patient: float | None  # proxy de LTV; None quando lifetime_patients == 0
+
+
+class MarketingChannelsResponse(BaseModel):
+    """GET /api/v1/analytics/marketing-channels — Raio-X da Receita,
+    frente "Gestão eficiente": ROI de marketing existia só AGREGADO até
+    esta rodada (ver ReportDataService); esta resposta abre por
+    campanha/canal, ordenado por gasto (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_spend: float
+    items: list[MarketingChannelItem]

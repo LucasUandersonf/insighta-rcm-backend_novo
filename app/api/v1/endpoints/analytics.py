@@ -17,6 +17,7 @@ from app.api.deps import CurrentUser, DbSession, DbSessionNoTenant, require_role
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
+from app.repositories.contract_repository import ContractRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
@@ -34,7 +35,10 @@ from app.schemas.analytics import (
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
     HealthScoreResponse,
+    EarlyChurnRiskResponse,
     InactivePatientsResponse,
+    MarketingChannelsResponse,
+    ProfitabilityResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     PaymentLagByPlanResponse,
@@ -88,6 +92,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         TenantRepository(db),
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
+        ContractRepository(db),
     )
 
 
@@ -166,6 +171,52 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/early-churn-risk", response_model=EarlyChurnRiskResponse)
+async def get_early_churn_risk(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> EarlyChurnRiskResponse:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos" — alerta ANTECIPADO
+    de abandono, antes do paciente completar o piso fixo de 1 ano que já
+    vira "inativo" de verdade (ver get_inactive_patients acima). Sem
+    date_from/date_to pelo mesmo motivo: é sempre "a partir de hoje".
+    """
+    return await _build_service(db).get_early_churn_risk()
+
+
+@router.get("/profitability", response_model=ProfitabilityResponse)
+async def get_profitability(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ProfitabilityResponse:
+    """
+    Raio-X da Receita, frente "Gestão eficiente" — receita por hora de
+    agenda ocupada por profissional, e ranking de mix de receita por
+    procedimento.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_profitability(start, end)
+
+
+@router.get("/marketing-channels", response_model=MarketingChannelsResponse)
+async def get_marketing_channels(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> MarketingChannelsResponse:
+    """
+    Raio-X da Receita, frente "Gestão eficiente" — CAC e receita média
+    por paciente (proxy de LTV), abertos por campanha/canal de
+    marketing.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_marketing_channels(start, end)
 
 
 @router.get("/recall-candidates", response_model=RecallCandidatesResponse)

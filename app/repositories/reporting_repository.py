@@ -87,6 +87,94 @@ class ReportingRepository:
         )
         return float((await self.session.execute(stmt)).scalar_one())
 
+    async def marketing_performance_by_campaign(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Raio-X da Receita, frente "Gestão eficiente" — quebra POR
+        CAMPANHA do mesmo cálculo simplificado documentado na DECISÃO no
+        topo do arquivo (nunca um rastreio de coorte rigoroso): até esta
+        rodada, ROI de marketing só existia AGREGADO (gasto total vs.
+        receita total atribuída) — sem abrir por campanha, um canal
+        ótimo escondido atrás de um ruim nunca aparecia.
+
+        Duas métricas por campanha, com denominadores DIFERENTES de
+        propósito:
+          - CAC = gasto NO PERÍODO / pacientes NOVOS adquiridos NO
+            PERÍODO (Patient.created_at dentro da janela).
+          - `avg_revenue_per_patient` (proxy de LTV) = receita TOTAL,
+            de SEMPRE, de TODOS os pacientes já atribuídos a essa
+            campanha (não só os adquiridos no período) / total desses
+            pacientes — "quanto cada paciente trazido por essa campanha
+            já valeu até hoje", não só o que ele gerou nesta janela.
+            Misturar os dois períodos na mesma conta inflaria CAC de
+            campanhas antigas (pacientes já adquiridos há tempo não
+            contam como "novo" no período, mas continuam gerando
+            receita) — por isso são consultas separadas, combinadas em
+            Python por campaign_id.
+        """
+        start, end = _bounds(date_from, date_to)
+
+        spend_stmt = (
+            select(
+                MarketingSpend.source,
+                MarketingSpend.campaign_id,
+                func.max(MarketingSpend.campaign_name),
+                func.coalesce(func.sum(MarketingSpend.amount_spent), 0),
+            )
+            .where(MarketingSpend.spend_date >= date_from, MarketingSpend.spend_date <= date_to)
+            .group_by(MarketingSpend.source, MarketingSpend.campaign_id)
+        )
+        spend_rows = (await self.session.execute(spend_stmt)).all()
+
+        acquired_stmt = (
+            select(Patient.acquisition_campaign_id, func.count())
+            .where(
+                Patient.acquisition_campaign_id.is_not(None),
+                Patient.created_at >= start,
+                Patient.created_at <= end,
+            )
+            .group_by(Patient.acquisition_campaign_id)
+        )
+        acquired_by_campaign = {
+            campaign_id: count for campaign_id, count in (await self.session.execute(acquired_stmt)).all()
+        }
+
+        lifetime_stmt = (
+            select(
+                Patient.acquisition_campaign_id,
+                func.count(func.distinct(Patient.id)),
+                func.coalesce(func.sum(Billing.charged_value), 0),
+            )
+            .select_from(Patient)
+            .join(Appointment, Appointment.patient_id == Patient.id)
+            .join(Billing, Billing.appointment_id == Appointment.id)
+            .where(Patient.acquisition_campaign_id.is_not(None))
+            .group_by(Patient.acquisition_campaign_id)
+        )
+        lifetime_by_campaign = {
+            campaign_id: (int(patient_count), float(revenue))
+            for campaign_id, patient_count, revenue in (await self.session.execute(lifetime_stmt)).all()
+        }
+
+        items: list[dict] = []
+        for source, campaign_id, campaign_name, spend in spend_rows:
+            patients_acquired = acquired_by_campaign.get(campaign_id, 0)
+            lifetime_patients, lifetime_revenue = lifetime_by_campaign.get(campaign_id, (0, 0.0))
+            items.append(
+                {
+                    "source": source,
+                    "campaign_id": campaign_id,
+                    "campaign_name": campaign_name,
+                    "spend": float(spend),
+                    "patients_acquired": patients_acquired,
+                    "cac": (float(spend) / patients_acquired) if patients_acquired > 0 else None,
+                    "lifetime_patients": lifetime_patients,
+                    "lifetime_revenue": lifetime_revenue,
+                    "avg_revenue_per_patient": (lifetime_revenue / lifetime_patients) if lifetime_patients > 0 else None,
+                }
+            )
+        items.sort(key=lambda item: item["spend"], reverse=True)
+        return items
+
     async def no_show_count(self, date_from: date, date_to: date) -> int:
         start, end = _bounds(date_from, date_to)
         stmt = select(func.count()).where(

@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
 from app.models.billing import Billing
+from app.models.contract_item import ContractItem
 from app.models.insurance_plan import InsurancePlan
 
 
@@ -121,6 +122,47 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
+
+    async def payment_gap_without_appeal_summary(self) -> tuple[int, float]:
+        """
+        Raio-X da Receita, frente "Evitando perdas": billing já
+        CONCILIADO com Divergência de Recebimento (operadora pagou menos
+        do que o contratado — mesmo LATERAL JOIN de `payment_gap_total`
+        acima) que ainda não tem NENHUM recurso de glosa aberto
+        (`core.denial_appeals`) — dinheiro que a clínica tem direito de
+        contestar, mas ainda ninguém reclamou.
+
+        Backlog ATUAL, não escopado por período (mesmo raciocínio de
+        `high_risk_pending_count`/`appeals_due_soon_count`): um billing
+        conciliado há 3 semanas com gap ainda sem recurso continua sendo
+        "agora" um problema, não deixa de contar só porque saiu da janela
+        de 7 dias do dashboard.
+        """
+        stmt = text(
+            """
+            SELECT COUNT(*), COALESCE(SUM(GREATEST(ci.agreed_price - b.received_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.received_value IS NOT NULL
+              AND ci.agreed_price IS NOT NULL
+              AND ci.agreed_price > b.received_value
+              AND NOT EXISTS (SELECT 1 FROM core.denial_appeals da WHERE da.billing_id = b.id)
+            """
+        )
+        count, total_gap = (await self.session.execute(stmt)).one()
+        return int(count), float(total_gap)
 
     async def payment_lag_total(self, date_from: date, date_to: date) -> tuple[float | None, int]:
         """
@@ -327,6 +369,91 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return {name: float(total) for name, total in result.all() if total}
+
+    async def revenue_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por convênio —
+        mesma base de `billing_summary().total_billed`
+        (ReportingRepository), sem filtro de status nem LATERAL join
+        (não compara contra contrato, só soma o que foi cobrado). Base
+        do insight de concentração de receita (Raio-X da Receita, frente
+        "Gestão eficiente" — ver smart_insights_engine.py::
+        _revenue_concentration_insight). Mesmo critério de
+        `financial_hole_by_plan`: convênio sem nenhum billing no período
+        simplesmente não aparece no dict.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(InsurancePlan.display_name, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(InsurancePlan.display_name)
+        )
+        result = await self.session.execute(stmt)
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def revenue_by_professional(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por profissional —
+        Raio-X da Receita, frente "Gestão eficiente" (ver
+        AnalyticsService.get_profitability): cruzado com minutos
+        OCUPADOS de agenda (CapacityService, já usado em
+        `professional_utilization_rates` no motor de insights) para
+        calcular receita por hora de agenda ocupada. Billing sem
+        profissional vinculado (`Appointment.professional_id` NULL —
+        comum em dado vindo de ingestão em massa sem essa coluna
+        preenchida) não aparece: não há como atribuir a receita a
+        ninguém em específico.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Appointment.professional_id, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.professional_id.is_not(None))
+            .group_by(Appointment.professional_id)
+        )
+        result = await self.session.execute(stmt)
+        return {str(professional_id): float(total) for professional_id, total in result.all() if total}
+
+    async def revenue_by_procedure(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Faturado do período agrupado por procedimento (código TUSS) —
+        Raio-X da Receita, frente "Gestão eficiente": ranking de mix de
+        receita, maior primeiro. `procedure_name` é "melhor esforço": o
+        nome mais recente cadastrado em QUALQUER contrato com esse
+        código TUSS, de QUALQUER convênio — diferente do preço (que É
+        contrato-específico e varia por convênio), o nome de um
+        procedimento TUSS é padronizado pela ANS, então não precisa vir
+        do MESMO convênio da cobrança para ser um nome válido. None
+        quando nenhum contrato ainda cadastrou esse código (procedimento
+        cobrado sem tabela de preço correspondente).
+        """
+        start, end = _bounds(date_from, date_to)
+        name_subq = (
+            select(ContractItem.procedure_name)
+            .where(ContractItem.tuss_code == Appointment.procedure_code)
+            .order_by(ContractItem.created_at.desc())
+            .limit(1)
+            .correlate(Appointment)
+            .scalar_subquery()
+        )
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.procedure_code, name_subq.label("procedure_name"), func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.procedure_code.is_not(None))
+            .group_by(Appointment.procedure_code)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"procedure_code": code, "procedure_name": name, "billing_count": int(count), "revenue": float(revenue)}
+            for code, name, count, revenue in result.all()
+        ]
 
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado
@@ -1084,6 +1211,108 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
+
+    # Raio-X da Receita, frente "Prevendo movimentos": `inactive_patients_count`
+    # acima só avisa quem sumiu há mais de 1 ano — um alerta TARDIO, depois
+    # que o paciente já foi embora de verdade. Este bloco calcula, por
+    # paciente, o intervalo MÉDIO entre as próprias consultas (histórico de
+    # pelo menos `min_visits` atendimentos não cancelados) via LAG() e
+    # sinaliza quem já está `gap_multiplier`x esse intervalo sem voltar —
+    # MAS ainda não completou `inactive_after_days` (senão já é "inativo",
+    # outra categoria, sem sobreposição). Mesmo raciocínio de risco de
+    # falta (no_show_risk_engine.py): compara contra o PRÓPRIO padrão do
+    # paciente, nunca um corte genérico igual pra todo mundo — um paciente
+    # que sempre volta a cada 30 dias e já está há 70 sem aparecer é um
+    # sinal muito mais cedo do que esperar 1 ano inteiro de silêncio.
+    _EARLY_CHURN_CTE = """
+        WITH visits AS (
+            SELECT patient_id, scheduled_at,
+                   LAG(scheduled_at) OVER (PARTITION BY patient_id ORDER BY scheduled_at) AS prev_at
+            FROM core.appointments
+            WHERE status != 'cancelled'
+        ),
+        patient_stats AS (
+            SELECT
+                patient_id,
+                MAX(scheduled_at) AS last_appointment_at,
+                COUNT(*) AS visit_count,
+                AVG(EXTRACT(EPOCH FROM (scheduled_at - prev_at)) / 86400.0)
+                    FILTER (WHERE prev_at IS NOT NULL) AS avg_interval_days
+            FROM visits
+            GROUP BY patient_id
+        ),
+        at_risk AS (
+            SELECT patient_id, last_appointment_at, avg_interval_days,
+                   EXTRACT(EPOCH FROM (:as_of_ts - last_appointment_at)) / 86400.0 AS days_since_last
+            FROM patient_stats
+            WHERE visit_count >= :min_visits
+              AND avg_interval_days IS NOT NULL
+              AND avg_interval_days > 0
+              AND last_appointment_at >= :cutoff_inactive
+              AND last_appointment_at <= :as_of_ts - (avg_interval_days * :gap_multiplier) * INTERVAL '1 day'
+        )
+    """
+
+    def _early_churn_params(
+        self, as_of: date, *, min_visits: int, gap_multiplier: float, inactive_after_days: int
+    ) -> dict:
+        return {
+            "as_of_ts": datetime.combine(as_of, time.max, tzinfo=timezone.utc),
+            "min_visits": min_visits,
+            "gap_multiplier": gap_multiplier,
+            "cutoff_inactive": datetime.combine(as_of - timedelta(days=inactive_after_days), time.min, tzinfo=timezone.utc),
+        }
+
+    async def count_early_churn_risk_patients(
+        self, as_of: date, *, min_visits: int = 3, gap_multiplier: float = 2.0, inactive_after_days: int = 365
+    ) -> int:
+        stmt = text(self._EARLY_CHURN_CTE + "SELECT COUNT(*) FROM at_risk")
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        return int((await self.session.execute(stmt, params)).scalar_one())
+
+    async def list_early_churn_risk_patients(
+        self,
+        as_of: date,
+        *,
+        min_visits: int = 3,
+        gap_multiplier: float = 2.0,
+        inactive_after_days: int = 365,
+        limit: int = 15,
+    ) -> list[dict]:
+        """Mesmo critério de `count_early_churn_risk_patients`, devolvendo
+        QUEM são — ordenado por quantas vezes o intervalo próprio do
+        paciente já foi ultrapassado (days_since_last / avg_interval_days),
+        maior primeiro: quem já está mais fora do próprio padrão vem no
+        topo, não necessariamente quem está há mais dias em termos
+        absolutos (um paciente que sempre volta a cada 10 dias e já está
+        há 40 sem aparecer — 4x o próprio ritmo — é mais urgente do que
+        um que volta a cada 90 e está há 100, só 1.1x)."""
+        stmt = text(
+            self._EARLY_CHURN_CTE
+            + """
+            SELECT p.id, p.full_name, ar.last_appointment_at, ar.avg_interval_days, ar.days_since_last
+            FROM at_risk ar
+            JOIN core.patients p ON p.id = ar.patient_id
+            ORDER BY (ar.days_since_last / ar.avg_interval_days) DESC
+            LIMIT :limit
+            """
+        )
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        rows = (await self.session.execute(stmt, {**params, "limit": limit})).all()
+        return [
+            {
+                "patient_id": str(row.id),
+                "patient_name": row.full_name,
+                "last_appointment_at": row.last_appointment_at,
+                "avg_interval_days": float(row.avg_interval_days),
+                "days_since_last": float(row.days_since_last),
+            }
+            for row in rows
+        ]
 
     def _recall_candidates_last_appointment(self, as_of: datetime, weekday: int | None, professional_id: uuid.UUID | None):
         """

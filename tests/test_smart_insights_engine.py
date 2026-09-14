@@ -1193,3 +1193,348 @@ def test_payment_lag_insight_no_trend_note_when_previous_sample_is_too_small():
     lag_titles = [i for i in insights if "demorando" in i.title.lower()]
     assert len(lag_titles) == 1
     assert "piorando" not in lag_titles[0].message
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — contrato de convênio vencendo sem renovação
+# ---------------------------------------------------------------------
+
+def test_contract_expiring_insight_fires_with_count_and_soonest_plan():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, expiring_contracts_count=2,
+        soonest_expiring_contract_plan_name="Bradesco Saúde", soonest_expiring_contract_days=20,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "vencendo" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "faturamento"
+    assert "2 contratos" in titles[0].message
+    assert "Bradesco Saúde" in titles[0].message
+    assert "em 20 dias" in titles[0].message
+    assert titles[0].action_href == "/contracts"
+
+
+def test_contract_expiring_insight_singular_wording():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, expiring_contracts_count=1,
+        soonest_expiring_contract_plan_name="Amil", soonest_expiring_contract_days=0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "vencendo" in i.title.lower()]
+    assert len(titles) == 1
+    assert "1 contrato de repasse vencendo" in titles[0].message
+    assert "vence hoje" in titles[0].message
+
+
+def test_contract_expiring_insight_is_critical_within_the_critical_window():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, expiring_contracts_count=1,
+        soonest_expiring_contract_plan_name="Amil", soonest_expiring_contract_days=5,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "vencendo" in i.title.lower()]
+    assert titles[0].severity == "critical"
+
+
+def test_contract_expiring_insight_absent_without_any_expiring_contract():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_contract_expiring_insight_is_current_period_state_never_from_previous():
+    """Estado 'AGORA' — o campo só existe em `current`; um valor
+    diferente em `previous` nunca é lido (mesmo raciocínio de
+    test_stale_open_lotes_insight_is_current_period_state_never_from_previous)."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, expiring_contracts_count=9,
+        soonest_expiring_contract_plan_name="Outro Convênio", soonest_expiring_contract_days=1,
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "vencendo" in i.title.lower()] == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — concentração de receita em poucos convênios
+# ---------------------------------------------------------------------
+
+def test_revenue_concentration_insight_fires_above_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        revenue_by_plan={"Unimed": 6_500.0, "Bradesco Saúde": 3_500.0},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "depende de um único convênio" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "faturamento"
+    assert "Unimed" in titles[0].title
+    assert "65%" in titles[0].message
+    assert titles[0].financial_impact == 6_500.0
+
+
+def test_revenue_concentration_insight_is_critical_above_critical_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        revenue_by_plan={"Unimed": 8_500.0, "Bradesco Saúde": 1_500.0},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "depende de um único convênio" in i.title.lower()]
+    assert titles[0].severity == "critical"
+
+
+def test_revenue_concentration_insight_absent_below_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        revenue_by_plan={"Unimed": 5_000.0, "Bradesco Saúde": 5_000.0},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_revenue_concentration_insight_absent_with_a_single_contracted_plan():
+    """Com 1 só convênio faturado no período, 100% de concentração é a
+    estrutura do negócio (clínica fechada com uma única operadora), não
+    uma anomalia — mesmo raciocínio do piso `_MIN_PLANS_FOR_CONCENTRATION`."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0,
+        revenue_by_plan={"Unimed": 10_000.0},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_revenue_concentration_insight_absent_without_any_billing():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=0.0, revenue_by_plan={},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — ROI de marketing no feed de insights
+# ---------------------------------------------------------------------
+
+def test_marketing_roi_insight_fires_when_spend_outpaces_attributed_revenue():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=600.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "marketing" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "faturamento"
+    assert "-40%" in titles[0].message
+    assert titles[0].financial_impact == 400.0
+
+
+def test_marketing_roi_insight_is_critical_when_revenue_is_below_half_of_spend():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=300.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "marketing" in i.title.lower()]
+    assert titles[0].severity == "critical"
+
+
+def test_marketing_roi_insight_absent_when_roi_is_positive():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=1_500.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_marketing_roi_insight_absent_below_minimum_spend_floor():
+    """Gasto pequeno demais (< _MIN_MARKETING_SPEND_FOR_INSIGHT) com ROI
+    negativo é ruído de teste de campanha, não um padrão — mesmo
+    raciocínio de amostra mínima do resto do arquivo."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=50.0, marketing_revenue_attributed=0.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_marketing_roi_insight_absent_without_any_spend():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_marketing_roi_insight_notes_when_trend_is_worsening():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=500.0,
+    )
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=950.0,
+    )
+    insights = generate_insights(current, previous)
+    titles = [i for i in insights if "marketing" in i.title.lower()]
+    assert "piorando" in titles[0].message
+
+
+def test_marketing_roi_insight_no_trend_note_when_previous_spend_is_below_floor():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=1_000.0, marketing_revenue_attributed=500.0,
+    )
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, marketing_spend_total=10.0, marketing_revenue_attributed=100.0,
+    )
+    insights = generate_insights(current, previous)
+    titles = [i for i in insights if "marketing" in i.title.lower()]
+    assert "piorando" not in titles[0].message
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — glosa paga a menor sem recurso aberto
+# ---------------------------------------------------------------------
+
+def test_payment_gap_without_appeal_insight_fires_with_count_and_value():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, payment_gap_without_appeal_count=3, payment_gap_without_appeal_value=450.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "ninguém contestou" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "critical"
+    assert titles[0].category == "faturamento"
+    assert "3 contas" in titles[0].message
+    assert "450,00" in titles[0].message or "450.00" in titles[0].message
+    assert titles[0].financial_impact == 450.0
+    assert titles[0].action_href == "/denial-appeals"
+
+
+def test_payment_gap_without_appeal_insight_singular_wording():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, payment_gap_without_appeal_count=1, payment_gap_without_appeal_value=150.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "ninguém contestou" in i.title.lower()]
+    assert "1 conta onde" in titles[0].message
+
+
+def test_payment_gap_without_appeal_insight_absent_without_any_backlog():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_payment_gap_without_appeal_insight_is_current_period_state_never_from_previous():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, payment_gap_without_appeal_count=9, payment_gap_without_appeal_value=9_000.0,
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "ninguém contestou" in i.title.lower()] == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — sazonalidade de agenda (ano contra ano)
+# ---------------------------------------------------------------------
+
+def test_yoy_seasonality_insight_fires_above_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 40}, yoy_last_year_appointment_count=60,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mesmo período do ano passado" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "agenda"
+    assert "60 consulta" in titles[0].message
+    assert "agora são 40" in titles[0].message
+    assert "33%" in titles[0].message
+
+
+def test_yoy_seasonality_insight_is_critical_above_critical_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 30}, yoy_last_year_appointment_count=100,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mesmo período do ano passado" in i.title.lower()]
+    assert titles[0].severity == "critical"
+
+
+def test_yoy_seasonality_insight_absent_below_warning_threshold():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 90}, yoy_last_year_appointment_count=100,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_when_current_grew_vs_last_year():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 150}, yoy_last_year_appointment_count=100,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_with_small_last_year_sample():
+    """Amostra pequena no ano passado (clínica nova, ou período de baixo
+    volume histórico) — qualquer variação percentual seria ruído, mesmo
+    raciocínio de amostra mínima do resto do arquivo."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_appointment_counts={0: 1}, yoy_last_year_appointment_count=5,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_yoy_seasonality_insight_absent_without_last_year_data():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# Raio-X da Receita — churn antecipado de paciente
+# ---------------------------------------------------------------------
+
+def test_early_churn_insight_fires_with_count():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=4,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "sumindo do próprio padrão" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "agenda"
+    assert "4 pacientes" in titles[0].message
+    assert titles[0].action_href == "#carteira-inativa"
+
+
+def test_early_churn_insight_singular_wording():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=1,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "sumindo do próprio padrão" in i.title.lower()]
+    assert "1 paciente já" in titles[0].message
+
+
+def test_early_churn_insight_absent_without_any_risk():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_early_churn_insight_is_current_period_state_never_from_previous():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, early_churn_risk_count=9,
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "sumindo do próprio padrão" in i.title.lower()] == []
