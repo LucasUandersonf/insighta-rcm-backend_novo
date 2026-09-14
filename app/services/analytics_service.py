@@ -25,6 +25,7 @@ from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_repository import ContractRepository
+from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
@@ -307,6 +308,7 @@ class AnalyticsService:
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
         contract_repo: ContractRepository,
+        cost_entry_repo: CostEntryRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -317,6 +319,7 @@ class AnalyticsService:
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
         self.contract_repo = contract_repo
+        self.cost_entry_repo = cost_entry_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -1290,6 +1293,18 @@ class AnalyticsService:
         `by_procedure` é independente de profissional — ranking de mix
         de receita por código TUSS (ver
         AnalyticsRepository.revenue_by_procedure).
+
+        Épico F3.1 do Plano Diretor ("Módulo de custos e margem real"):
+        "ProfitabilityPanel hoje mostra receita por hora ocupada — não
+        margem. Sem custo [...] toda conversa de 'rentabilidade' fica
+        pela metade." Ver DECISÃO completa em
+        app/sql/039_cost_entries.sql sobre o modelo de rateio (custo
+        GERAL rateado proporcionalmente à receita de cada profissional
+        no período; custo DIRETO de um profissional carregado 100%
+        nele, sem diluir). `has_cost_data=False` (nenhum CostEntry
+        lançado no período) deixa margem/custo em None em TODA a
+        resposta — nunca inventa 0, que pareceria "sem custo nenhum"
+        em vez de "sem dado de custo ainda".
         """
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         total_billed = billing["total_billed"]
@@ -1319,6 +1334,40 @@ class AnalyticsService:
         # com quem tem valor real na frente.
         by_professional.sort(key=lambda item: (item.revenue_per_hour is None, -(item.revenue_per_hour or 0)))
 
+        cost_entries = await self.cost_entry_repo.list_for_period(date_from=date_from, date_to=date_to)
+        has_cost_data = bool(cost_entries)
+        total_costs: float | None = None
+        net_margin: float | None = None
+        if has_cost_data:
+            total_costs = round(sum(float(e.amount) for e in cost_entries), 2)
+            net_margin = round(total_billed - total_costs, 2)
+
+            general_costs_total = sum(float(e.amount) for e in cost_entries if e.professional_id is None)
+            direct_costs_by_professional: dict[str, float] = {}
+            for e in cost_entries:
+                if e.professional_id is not None:
+                    key = str(e.professional_id)
+                    direct_costs_by_professional[key] = direct_costs_by_professional.get(key, 0.0) + float(e.amount)
+
+            # Rateio proporcional à receita — só entre quem TEM receita
+            # faturada no período (a mesma lista `by_professional` já
+            # filtrada acima). Um custo direto lançado pra um
+            # profissional SEM receita no período ainda soma no
+            # total_costs do tenant, mas não cria uma linha fantasma
+            # aqui — decisão deliberada, não bug (ver DECISÃO no SQL).
+            revenue_base_for_allocation = sum(item.revenue for item in by_professional)
+            for item in by_professional:
+                direct_cost = direct_costs_by_professional.get(str(item.professional_id), 0.0)
+                allocated_general = (
+                    (item.revenue / revenue_base_for_allocation) * general_costs_total
+                    if revenue_base_for_allocation > 0 and general_costs_total > 0
+                    else 0.0
+                )
+                allocated_cost = round(direct_cost + allocated_general, 2)
+                item.allocated_cost = allocated_cost
+                item.net_margin = round(item.revenue - allocated_cost, 2)
+                item.margin_per_hour = (item.net_margin / (item.booked_minutes / 60)) if item.booked_minutes > 0 else None
+
         procedure_rows = await self.analytics_repo.revenue_by_procedure(date_from, date_to)
         by_procedure = [
             ProcedureProfitabilityItem(
@@ -1337,6 +1386,9 @@ class AnalyticsService:
             total_billed=total_billed,
             by_professional=by_professional,
             by_procedure=by_procedure,
+            has_cost_data=has_cost_data,
+            total_costs=total_costs,
+            net_margin=net_margin,
         )
 
     async def get_marketing_channels(self, date_from: date, date_to: date) -> MarketingChannelsResponse:

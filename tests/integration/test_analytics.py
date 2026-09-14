@@ -1785,6 +1785,127 @@ async def test_profitability_computes_revenue_per_hour_by_professional(client, a
     assert item["revenue_per_hour"] == 300.0  # R$300 em 1h de agenda ocupada
 
 
+# ---------------------------------------------------------------------
+# Margem líquida (épico F3.1 do Plano Diretor — módulo de custos)
+# ---------------------------------------------------------------------
+
+
+async def _bill_professional(client, auth_headers, admin_engine, tenant_id, *, full_name, plan_name, plan_key, charged_value, duration_minutes=60):
+    professional_resp = await client.post("/api/v1/professionals", json={"full_name": full_name}, headers=auth_headers)
+    professional_id = professional_resp.json()["id"]
+    plan_id = await _create_insurance_plan(admin_engine, tenant_id, display_name=plan_name, normalized_key=plan_key)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": f"Paciente {full_name}"}, headers=auth_headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "professional_id": professional_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "duration_minutes": duration_minutes,
+        },
+        headers=auth_headers,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=auth_headers,
+    )
+    return professional_id
+
+
+async def test_profitability_has_no_cost_data_by_default(client, auth_headers_a, admin_engine, tenant_a):
+    professional_id = await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Sem Custo", plan_name="Sem Custo Saúde", plan_key="sem_custo_saude", charged_value=300.0
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is False
+    assert body["total_costs"] is None
+    assert body["net_margin"] is None
+    item = next(p for p in body["by_professional"] if p["professional_id"] == professional_id)
+    assert item["allocated_cost"] is None
+    assert item["net_margin"] is None
+    assert item["margin_per_hour"] is None
+
+
+async def test_profitability_computes_margin_with_direct_and_general_costs(client, auth_headers_a, admin_engine, tenant_a):
+    """Um profissional só faturando no período: todo custo GERAL cai
+    100% nele (rateio proporcional à receita, e ele é 100% da receita
+    aqui) + o custo DIRETO lançado especificamente pra ele."""
+    professional_id = await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Margem", plan_name="Margem Saúde", plan_key="margem_saude", charged_value=1000.0
+    )
+    period_month = date.today().replace(day=1).isoformat()
+
+    direct_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "comissao_repasse", "amount": 400.0, "period_month": period_month, "professional_id": professional_id},
+        headers=auth_headers_a,
+    )
+    assert direct_resp.status_code == 201
+    general_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "aluguel", "amount": 200.0, "period_month": period_month},
+        headers=auth_headers_a,
+    )
+    assert general_resp.status_code == 201
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is True
+    assert body["total_costs"] == 600.0
+    assert body["net_margin"] == 400.0  # 1000 faturado - 600 de custo
+
+    item = next(p for p in body["by_professional"] if p["professional_id"] == professional_id)
+    # Direto (400) + 100% do geral (200, único profissional com receita) = 600
+    assert item["allocated_cost"] == 600.0
+    assert item["net_margin"] == 400.0  # 1000 - 600
+    assert item["margin_per_hour"] == 400.0  # 1h de agenda ocupada
+
+
+async def test_cost_entry_crud_and_rbac(client, admin_engine, tenant_a, auth_headers_a):
+    period_month = date.today().replace(day=1).isoformat()
+    create_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "insumo", "description": "Material descartável", "amount": 150.5, "period_month": "2026-09-15"},
+        headers=auth_headers_a,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()
+    # period_month normalizado pro dia 1 (mesmo se o usuário mandar outro dia).
+    assert body["period_month"] == "2026-09-01"
+    assert body["professional_id"] is None
+
+    list_resp = await client.get("/api/v1/cost-entries", headers=auth_headers_a)
+    assert list_resp.status_code == 200
+    assert any(i["id"] == body["id"] for i in list_resp.json()["items"])
+
+    delete_resp = await client.delete(f"/api/v1/cost-entries/{body['id']}", headers=auth_headers_a)
+    assert delete_resp.status_code == 204
+    list_after = await client.get("/api/v1/cost-entries", headers=auth_headers_a)
+    assert all(i["id"] != body["id"] for i in list_after.json()["items"])
+
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@cost-entry-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    forbidden_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "outros", "amount": 10.0, "period_month": period_month},
+        headers=headers,
+    )
+    assert forbidden_resp.status_code == 403
+
+
 async def test_profitability_ranks_procedures_by_revenue_and_reports_share(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Mix Saúde", normalized_key="mix_saude")
     await _create_contract(admin_engine, tenant_a, plan_id, "80808080", 400.0)

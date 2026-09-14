@@ -627,6 +627,13 @@ class ProfessionalProfitabilityItem(BaseModel):
     revenue: float
     booked_minutes: int
     revenue_per_hour: float | None  # None quando booked_minutes == 0 (sem agenda ocupada no período, não faz sentido dividir)
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # todos None quando o tenant ainda não lançou NENHUM custo no
+    # período (ver ProfitabilityResponse.has_cost_data) — nunca 0,
+    # que pareceria "margem de 100%" em vez de "sem dado de custo".
+    allocated_cost: float | None = None
+    net_margin: float | None = None
+    margin_per_hour: float | None = None
 
 
 class ProcedureProfitabilityItem(BaseModel):
@@ -653,6 +660,15 @@ class ProfitabilityResponse(BaseModel):
     total_billed: float
     by_professional: list[ProfessionalProfitabilityItem]
     by_procedure: list[ProcedureProfitabilityItem]
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # ver DECISÃO em AnalyticsService.get_profitability e
+    # app/sql/039_cost_entries.sql. has_cost_data=False é o estado
+    # honesto de "ninguém lançou custo ainda" — total_costs/net_margin
+    # ficam None nesse caso, nunca 0 (que pareceria "sem custo nenhum"
+    # em vez de "sem dado").
+    has_cost_data: bool = False
+    total_costs: float | None = None
+    net_margin: float | None = None
 
 
 class MarketingChannelItem(BaseModel):

@@ -262,6 +262,10 @@ _POST_UPGRADE_SQL_FILES = [
     # próprio .sql. TABLE sem IF NOT EXISTS — precisa do marcador (ver
     # _POST_UPGRADE_MARKER_TABLE).
     "038_insight_outcomes.sql",
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # ver DECISÃO completa no próprio .sql. TABLE sem IF NOT EXISTS —
+    # precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "039_cost_entries.sql",
 ]
 
 _ROLES_SQL = """
@@ -434,6 +438,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "029_platform_users.sql": "platform_users",
     "034_health_score_snapshots.sql": "health_score_snapshots",
     "038_insight_outcomes.sql": "insight_outcomes",
+    "039_cost_entries.sql": "cost_entries",
 }
 
 

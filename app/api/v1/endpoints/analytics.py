@@ -18,6 +18,7 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
 from app.repositories.contract_repository import ContractRepository
+from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
@@ -94,6 +95,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
         ContractRepository(db),
+        CostEntryRepository(db),
     )
 
 
