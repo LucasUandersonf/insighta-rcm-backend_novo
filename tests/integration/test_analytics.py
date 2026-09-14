@@ -1271,8 +1271,8 @@ async def test_smart_insights_flags_stale_open_lotes_from_real_data(client, auth
     assert lote_insight["category"] == "faturamento"
     assert "2 lotes" in lote_insight["message"]
     assert "50 dias" in lote_insight["message"]
-    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
-    assert lote_insight["action_href"] is None
+    # LotesPage.tsx agora existe no frontend — o botão aponta pra ela.
+    assert lote_insight["action_href"] == "/lotes"
 
 
 async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_a, admin_engine, tenant_a):

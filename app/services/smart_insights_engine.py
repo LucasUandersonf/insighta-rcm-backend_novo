@@ -1402,10 +1402,11 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
     operacional (guias dentro do lote ficam paradas, sem virar fatura,
     atrasando o recebimento), não uma perda irreversível de direito.
 
-    Sem botão de ação, DE PROPÓSITO: ainda não existe nenhuma tela de
-    Lotes no frontend (só o endpoint /lotes, hoje consumido só por
-    FaturaService.create_from_lotes internamente) — "nunca inventa
-    destino" (ver DECISÃO na dataclass Insight acima).
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): agora que
+    a tela de gestão de Lotes existe (LotesPage.tsx), o botão de ação
+    aponta pra ela — antes ficava sem ação DE PROPÓSITO ("nunca inventa
+    destino", ver DECISÃO na dataclass Insight acima) porque só existia
+    o endpoint, sem nenhuma tela consumindo.
     """
     if current.stale_open_lotes_count <= 0:
         return None
@@ -1424,6 +1425,8 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
             f"fechar.{age_note} As guias dentro desses lotes ficam paradas — não avançam para fatura enquanto "
             "o lote não é fechado."
         ),
+        action_label="Ver lotes abertos",
+        action_href="/lotes",
     )
 
 

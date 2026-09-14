@@ -1134,8 +1134,8 @@ def test_stale_open_lotes_insight_fires_with_count_and_oldest_age():
     assert lote_titles[0].category == "faturamento"
     assert "3 lotes" in lote_titles[0].message
     assert "45 dias" in lote_titles[0].message
-    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
-    assert lote_titles[0].action_href is None
+    # LotesPage.tsx agora existe no frontend — o botão aponta pra ela.
+    assert lote_titles[0].action_href == "/lotes"
 
 
 def test_stale_open_lotes_insight_singular_wording_and_no_age_note():

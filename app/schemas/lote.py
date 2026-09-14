@@ -32,5 +32,10 @@ class LoteResponse(BaseModel):
     fatura_id: UUID | None
     closed_at: datetime | None
     created_at: datetime
+    # Achado do Parecer Técnico "Boletim Insighta" (revisão 2): campo
+    # calculado (não uma coluna do model Lote), preenchido à mão pelo
+    # service a partir de GuiaRepository.count_by_lote_ids — a tela de
+    # gestão de Lotes precisa mostrar isso na listagem sem N+1 query.
+    guias_count: int = 0
 
     model_config = {"from_attributes": True}
