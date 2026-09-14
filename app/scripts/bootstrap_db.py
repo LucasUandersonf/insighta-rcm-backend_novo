@@ -266,6 +266,11 @@ _POST_UPGRADE_SQL_FILES = [
     # ver DECISÃO completa no próprio .sql. TABLE sem IF NOT EXISTS —
     # precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE).
     "039_cost_entries.sql",
+    # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+    # ver DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "040_tenant_calibration_fields.sql",
 ]
 
 _ROLES_SQL = """

@@ -77,7 +77,7 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             ContractRepository(session),
             CostEntryRepository(session),
         )
-        health_score = await service.get_health_score()
+        health_score = await service.get_health_score(str(tenant.id))
         await HealthScoreSnapshotRepository(session).upsert_snapshot(
             tenant.id, snapshot_month=snapshot_month, score=health_score.score
         )

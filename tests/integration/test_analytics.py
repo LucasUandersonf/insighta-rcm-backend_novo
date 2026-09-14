@@ -190,6 +190,89 @@ async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_head
     assert "média do setor" in lag_insight["message"]
 
 
+async def test_smart_insights_denial_risk_uses_custom_tenant_threshold(client, auth_headers_a, admin_engine, tenant_a):
+    """Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+    — prova que AnalyticsService.get_smart_insights de fato resolve e usa
+    o limiar de risco de glosa configurado no tenant, não só a constante
+    fixa do módulo (ver DECISÃO completa em
+    smart_insights_engine.resolve_denial_risk_thresholds)."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Limiar Customizado"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    # Uma linha de alto risco (200) + uma de baixo risco (800), esta com
+    # CID + tabela de contrato cadastrada casando o valor cobrado (senão
+    # ela também cairia em "medium" por falta de referência contratual,
+    # ver denial_risk_engine._rule_no_contract_reference) -> 20% do
+    # faturamento em risco médio/alto (mesmo valor de
+    # test_denial_risk_pct_warning_band, sem banco). Usar 100% de risco
+    # (uma única linha sem CID) nunca provaria a diferença — o Field de
+    # denial_risk_warning_threshold exige < 100, então qualquer limiar
+    # customizado ainda classificaria 100% como "acima do aviso".
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=800.0)
+    high_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            # cid_code omitido -> billing nasce com denial_risk_level "high"
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": high_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 200.0},
+        headers=auth_headers_a,
+    )
+    low_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": low_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 800.0},
+        headers=auth_headers_a,
+    )
+
+    date_from, date_to = _window()
+
+    # Com os defaults do módulo (15%/40%), 20% de risco dispara "warning".
+    default_response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    default_insight = next(
+        (i for i in default_response.json()["insights"] if "risco de ser recusada" in i["title"].lower()), None
+    )
+    assert default_insight is not None
+    assert default_insight["severity"] == "warning"
+
+    # Limiar customizado mais folgado (warning=25%) -> o MESMO dado (20%)
+    # deixa de disparar o insight.
+    patch_resp = await client.patch(
+        "/api/v1/tenant",
+        json={"denial_risk_warning_threshold": 25.0, "denial_risk_critical_threshold": 50.0},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+
+    custom_response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    custom_insight = next(
+        (i for i in custom_response.json()["insights"] if "risco de ser recusada" in i["title"].lower()), None
+    )
+    assert custom_insight is None
+
+
 async def test_executive_summary_computes_financial_hole_and_margin(client, auth_headers_a, admin_engine, tenant_a):
     await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
     date_from, date_to = _window()

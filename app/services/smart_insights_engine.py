@@ -42,6 +42,7 @@ frequente vira a manchete, os demais entram como "e mais N motivo(s)".
 from dataclasses import dataclass, field
 
 from app.services.report_calculations import compute_roi_pct
+from app.services.threshold_calibration import compute_percentile_pair
 
 # Tradução em português simples de cada motivo técnico do motor de glosa
 # (denial_risk_engine.py) — usada SÓ na composição de frases deste
@@ -77,6 +78,73 @@ _WEEKDAY_DROP_CRITICAL_PCT = 30.0
 _WEEKDAY_DROP_WARNING_PCT = 15.0
 _DENIAL_RISK_PCT_CRITICAL = 40.0
 _DENIAL_RISK_PCT_WARNING = 15.0
+
+# Amostra mínima de MESES de histórico antes de sugerir um limiar de
+# risco de glosa calibrado pela própria clínica (ver DECISÃO completa em
+# threshold_calibration.py — Épico F2.1 do Plano Diretor). Mais baixa que
+# MIN_PATIENTS_FOR_SUGGESTION do no-show (10) porque a unidade aqui é
+# "mês", não "paciente" — pedir 10 meses de histórico antes de qualquer
+# sugestão adiaria demais um recurso que já é opcional (o tenant só vê
+# essa sugestão se pedir).
+MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION = 6
+
+
+@dataclass
+class DenialRiskThresholdSuggestion:
+    warning_threshold: float
+    critical_threshold: float
+    sample_size: int  # quantos meses de histórico entraram no cálculo
+
+
+def resolve_denial_risk_thresholds(tenant) -> tuple[float, float]:
+    """Duck-typed de propósito (mesmo padrão de
+    no_show_risk_engine.resolve_thresholds): aceita qualquer objeto com
+    `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    (Decimal/float/None) ou `None` — centraliza a conversão "None -> default
+    do módulo" para não divergir entre quem chama."""
+    if tenant is None:
+        return _DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL
+    warning = (
+        float(tenant.denial_risk_warning_threshold)
+        if tenant.denial_risk_warning_threshold is not None
+        else _DENIAL_RISK_PCT_WARNING
+    )
+    critical = (
+        float(tenant.denial_risk_critical_threshold)
+        if tenant.denial_risk_critical_threshold is not None
+        else _DENIAL_RISK_PCT_CRITICAL
+    )
+    return warning, critical
+
+
+def suggest_denial_risk_thresholds(monthly_denial_risk_pcts: list[float]) -> DenialRiskThresholdSuggestion | None:
+    """
+    Sugere `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    a partir da distribuição REAL de risco de glosa mês a mês desta
+    clínica (escala 0-100, mesma de `InsightsPeriodInput.denial_risk_pct`)
+    — não um corte genérico igual pra qualquer clínica. Mesmo raciocínio
+    de no_show_risk_engine.suggest_thresholds: mediana vira o aviso
+    ("comportamento típico já merece atenção"), P85 vira o crítico (só os
+    15% piores meses da própria clínica).
+
+    Retorna None com menos de MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION meses
+    qualificados — mesma cautela de nunca inventar confiança que a
+    evidência não dá.
+    """
+    pair = compute_percentile_pair(
+        monthly_denial_risk_pcts, min_sample=MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION, high_percentile=85
+    )
+    if pair is None:
+        return None
+    warning, critical = pair.median, pair.high
+    # Defesa: distribuição concentrada pode fazer P85 empatar/ficar abaixo
+    # da mediana — o motor exige warning < critical (mesma regra de
+    # TenantService.update_own_tenant), nunca sugerimos um par inválido.
+    if critical <= warning:
+        critical = min(warning + 1.0, 99.0)
+    return DenialRiskThresholdSuggestion(
+        warning_threshold=round(warning, 1), critical_threshold=round(critical, 1), sample_size=pair.sample_size
+    )
 
 # Achado do usuário sobre lacunas do módulo de Agenda: volume por dia da
 # semana (weekday_appointment_counts acima) não responde "quinta tem taxa
@@ -1246,17 +1314,30 @@ def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None
     )
 
 
-def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
+def _denial_risk_pct_insight(
+    current: InsightsPeriodInput,
+    *,
+    warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
+) -> Insight | None:
     """
     Traduz o backlog de risco de glosa em uma frase de urgência
     financeira em vez de uma contagem seca — segundo exemplo do briefing
     de redesenho ("risco de até 50% de glosas nas contas atuais").
     Baseado em VALOR (R$), não em contagem de linhas: para a diretoria,
     "quanto dinheiro está em risco" é a pergunta real por trás do número.
+
+    `warning_threshold`/`critical_threshold` (Épico F2.1 do Plano
+    Diretor — "Calibração por especialidade/porte"): opcionais, default
+    nos mesmos valores de sempre (_DENIAL_RISK_PCT_WARNING/_CRITICAL) —
+    quem chama (AnalyticsService.get_smart_insights) resolve o valor
+    configurado do tenant via resolve_denial_risk_thresholds e passa
+    aqui; sem configuração, caem nos defaults. Mesmo padrão não-quebrador
+    já usado em no_show_risk_engine.assess().
     """
-    if current.denial_risk_pct is None or current.denial_risk_pct < _DENIAL_RISK_PCT_WARNING:
+    if current.denial_risk_pct is None or current.denial_risk_pct < warning_threshold:
         return None
-    severity = "critical" if current.denial_risk_pct >= _DENIAL_RISK_PCT_CRITICAL else "warning"
+    severity = "critical" if current.denial_risk_pct >= critical_threshold else "warning"
     return Insight(
         severity=severity,
         category="faturamento",
@@ -1699,6 +1780,8 @@ def generate_insights(
     estimated_no_show_revenue_at_risk: float = 0.0,
     estimated_idle_capacity_revenue_lost: float = 0.0,
     extra_insights: list[Insight] | None = None,
+    denial_risk_warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    denial_risk_critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
@@ -1712,7 +1795,9 @@ def generate_insights(
         _payment_gap_without_appeal_insight(current),
         _stale_open_lotes_insight(current),
         _contract_expiring_insight(current),
-        _denial_risk_pct_insight(current),
+        _denial_risk_pct_insight(
+            current, warning_threshold=denial_risk_warning_threshold, critical_threshold=denial_risk_critical_threshold
+        ),
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),

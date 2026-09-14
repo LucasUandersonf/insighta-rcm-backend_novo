@@ -42,6 +42,28 @@ class Tenant(Base):
     # corte ao longo do tempo em vez de esperar o produto "adivinhar".
     no_show_low_threshold: Mapped[float | None] = mapped_column(Numeric(5, 4))
     no_show_medium_threshold: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+    # ver 040_tenant_calibration_fields.sql e DECISÃO completa em
+    # app/services/threshold_calibration.py.
+    #
+    # `specialty`: metadado DESCRITIVO (texto livre curto, ex:
+    # "odontologia", "psicologia_psiquiatria") — usado hoje só para
+    # contexto/exibição, não para selecionar uma tabela de benchmark por
+    # especialidade que não existe (ver DECISÃO completa no módulo acima
+    # sobre por que a calibração real é pelo histórico da própria clínica,
+    # não por uma tabela fabricada). NULL = clínica ainda não informou.
+    specialty: Mapped[str | None] = mapped_column(String(100))
+    # Limiares de risco de glosa (denial_risk_pct, escala 0-100 — mesma de
+    # smart_insights_engine._denial_risk_pct_insight), mesmo padrão de
+    # no_show_low_threshold/medium_threshold acima: NULL = usa o default
+    # do módulo (_DENIAL_RISK_PCT_WARNING/_CRITICAL).
+    denial_risk_warning_threshold: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    denial_risk_critical_threshold: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    # Tetos (ceilings) da Nota de Saúde Financeira (fração 0-1, mesma
+    # escala de health_score_engine._DENIAL_RATE_CEILING/_NO_SHOW_RATE_CEILING):
+    # NULL = usa o default do módulo.
+    health_score_denial_ceiling: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    health_score_no_show_ceiling: Mapped[float | None] = mapped_column(Numeric(5, 4))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -17,6 +17,7 @@ os N dias imediatamente anteriores ao período pedido (N = duração do
 período atual) generaliza a mesma ideia sem assumir semana fixa — se o
 usuário pedir 7 dias, o resultado JÁ é "semana vs. semana anterior".
 """
+import calendar
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -77,7 +78,12 @@ from app.schemas.analytics import (
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
-from app.services.health_score_engine import compute_health_score
+from app.services.health_score_engine import (
+    compute_health_score,
+    resolve_health_score_ceilings,
+    suggest_denial_rate_ceiling,
+    suggest_no_show_rate_ceiling,
+)
 from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
@@ -86,6 +92,8 @@ from app.services.smart_insights_engine import (
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
+    resolve_denial_risk_thresholds,
+    suggest_denial_risk_thresholds,
 )
 
 # Amostra mínima antes de reportar a taxa de confirmação de um motivo
@@ -242,6 +250,69 @@ def _denial_risk_pct(risk_value_breakdown: dict[str, float]) -> tuple[float | No
     if total <= 0:
         return None, 0.0
     return (at_risk / total) * 100, at_risk
+
+
+# Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+# quantos meses FECHADOS de histórico buscar para sugerir um limiar
+# calibrado pela própria clínica (ver threshold_calibration.py). "Mês
+# fechado" exclui o mês corrente (ainda parcial) de propósito — um mês
+# com só 5 dias faturados teria uma taxa artificialmente instável. 12
+# meses é generoso o bastante para cobrir sazonalidade sem custar muitas
+# queries (cada mês é 1-2 SELECTs pequenos, reaproveitando repositório já
+# existente — não uma SQL nova agregando por mês, já que este cálculo só
+# roda quando alguém pede a sugestão, nunca num dashboard de alta
+# frequência).
+_THRESHOLD_SUGGESTION_LOOKBACK_MONTHS = 12
+
+
+def _preceding_month_bounds(months_back: int) -> tuple[date, date]:
+    """(primeiro dia, último dia) do mês `months_back` meses atrás do mês
+    CORRENTE — months_back=1 é o mês passado (o mais recente FECHADO),
+    nunca o mês corrente em si."""
+    today = date.today()
+    year = today.year
+    month = today.month - months_back
+    while month <= 0:
+        month += 12
+        year -= 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, 1), date(year, month, last_day)
+
+
+async def monthly_denial_risk_pcts(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> list[float]:
+    """Série de denial_risk_pct (escala 0-100) dos últimos `months` meses
+    FECHADOS desta clínica — insumo de
+    smart_insights_engine.suggest_denial_risk_thresholds. Só entram meses
+    com faturamento no período (mesmo critério de _denial_risk_pct: sem
+    base, o mês não tem uma taxa real para contribuir — não é 0%, é
+    ausência de amostra)."""
+    pcts: list[float] = []
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        breakdown = await analytics_repo.denial_risk_value_breakdown(start, end)
+        pct, _value = _denial_risk_pct(breakdown)
+        if pct is not None:
+            pcts.append(pct)
+    return pcts
+
+
+async def monthly_no_show_rates(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> list[float]:
+    """Série de taxa de falta (fração 0-1) dos últimos `months` meses
+    FECHADOS desta clínica — insumo de
+    health_score_engine.suggest_no_show_rate_ceiling. Só entram meses com
+    pelo menos 1 atendimento resolvido (completed/no_show) — mesmo
+    critério de "sem amostra != 0%" do resto do produto."""
+    rates: list[float] = []
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        no_show_count, total = await analytics_repo.overall_no_show_rate(start, end)
+        if total > 0:
+            rates.append(no_show_count / total)
+    return rates
 
 
 def _regroup_text_counts(breakdown: dict[str, int]) -> dict[str, int]:
@@ -998,12 +1069,19 @@ class AnalyticsService:
             if candidates:
                 extra_insights.append(max(candidates, key=lambda i: (i.financial_impact or 0)))
 
+        # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+        # — `tenant` já foi buscado acima (annual_revenue_goal); reaproveita
+        # o mesmo objeto para resolver o limiar de risco de glosa
+        # configurado desta clínica, sem consulta extra.
+        denial_risk_warning_threshold, denial_risk_critical_threshold = resolve_denial_risk_thresholds(tenant)
         insights = generate_insights(
             current_input,
             previous_input,
             estimated_revenue_at_risk,
             estimated_idle_capacity_revenue_lost,
             extra_insights=extra_insights,
+            denial_risk_warning_threshold=denial_risk_warning_threshold,
+            denial_risk_critical_threshold=denial_risk_critical_threshold,
         )
 
         return SmartInsightsResponse(
@@ -1159,16 +1237,24 @@ class AnalyticsService:
             total_considered=len(items),
         )
 
-    async def get_health_score(self) -> HealthScoreResponse:
+    async def get_health_score(self, tenant_id: str) -> HealthScoreResponse:
         """
         Nota de Saúde Financeira — ver DECISÃO completa em
         health_score_engine.py (regras determinísticas, componente sem
         amostra é excluído, nunca vira zero). Janela sempre fixa (ver
         _HEALTH_SCORE_WINDOW_DAYS acima), nunca a do seletor de período.
+
+        `tenant_id` (Épico F2.1 do Plano Diretor — "Calibração por
+        especialidade/porte"): busca o tenant só para resolver os tetos
+        configurados (ver resolve_health_score_ceilings) — mesmo padrão de
+        get_smart_insights reaproveitando `self.tenant_repo`.
         """
         today = date.today()
         window_start_date = today - timedelta(days=_HEALTH_SCORE_WINDOW_DAYS)
         window_start_dt = datetime.combine(window_start_date, datetime.min.time(), tzinfo=timezone.utc)
+
+        tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
+        denial_rate_ceiling, no_show_rate_ceiling = resolve_health_score_ceilings(tenant)
 
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(window_start_date, today)
         denial_risk_pct_0_100, _denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
@@ -1187,6 +1273,8 @@ class AnalyticsService:
             no_show_total=no_show_total,
             appeal_deferred_count=appeal_counts["deferido"],
             appeal_indeferido_count=appeal_counts["indeferido"],
+            denial_rate_ceiling=denial_rate_ceiling,
+            no_show_rate_ceiling=no_show_rate_ceiling,
         )
 
         # Tendência (ver DECISÃO em app/sql/034_health_score_snapshots.sql):

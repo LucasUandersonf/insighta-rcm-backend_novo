@@ -31,6 +31,16 @@ class TenantResponse(BaseModel):
     # Frações 0-1 (ex: 0.10 = 10%), não percentuais.
     no_show_low_threshold: float | None = None
     no_show_medium_threshold: float | None = None
+    # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+    # ver DECISÃO completa em app/models/tenant.py e
+    # 040_tenant_calibration_fields.sql. `specialty` é texto livre curto,
+    # descritivo; os limiares seguem a MESMA convenção de
+    # no_show_low_threshold acima (null = usa o default do módulo).
+    specialty: str | None = None
+    denial_risk_warning_threshold: float | None = None
+    denial_risk_critical_threshold: float | None = None
+    health_score_denial_ceiling: float | None = None
+    health_score_no_show_ceiling: float | None = None
 
     model_config = {"from_attributes": True}
 
@@ -49,13 +59,27 @@ class TenantUpdateRequest(BaseModel):
     (não percentuais — 0.10 = 10%), validadas em (0, 1) pelo Field; a
     consistência CRUZADA (low < medium) depende do valor JÁ SALVO no
     outro campo quando só um dos dois é enviado num PATCH, então é
-    validada no service (TenantService.update_own_tenant), não aqui."""
+    validada no service (TenantService.update_own_tenant), não aqui.
+
+    Épico F2.1 do Plano Diretor — MESMA convenção acima para os novos
+    campos: `denial_risk_*_threshold` são PERCENTUAIS (0-100, mesma
+    escala de denial_risk_pct), `health_score_*_ceiling` são frações 0-1
+    (mesma escala dos ceilings de health_score_engine.py); consistência
+    cruzada (warning < critical) também validada no service, não aqui.
+    `specialty` é texto livre curto, sem validação de vocabulário fechado
+    (mesma decisão de canal_agendamento/motivo_cancelamento — ver
+    RawAppointmentRow)."""
 
     legal_name: str | None = None
     trade_name: str | None = None
     annual_revenue_goal: float | None = Field(default=None, gt=0)
     no_show_low_threshold: float | None = Field(default=None, gt=0, lt=1)
     no_show_medium_threshold: float | None = Field(default=None, gt=0, lt=1)
+    specialty: str | None = Field(default=None, max_length=100)
+    denial_risk_warning_threshold: float | None = Field(default=None, gt=0, lt=100)
+    denial_risk_critical_threshold: float | None = Field(default=None, gt=0, lt=100)
+    health_score_denial_ceiling: float | None = Field(default=None, gt=0, lt=1)
+    health_score_no_show_ceiling: float | None = Field(default=None, gt=0, lt=1)
 
 
 class NoShowThresholdSuggestionResponse(BaseModel):
@@ -68,3 +92,29 @@ class NoShowThresholdSuggestionResponse(BaseModel):
     low_threshold: float | None
     medium_threshold: float | None
     sample_size: int
+
+
+class DenialRiskThresholdSuggestionResponse(BaseModel):
+    """GET /tenant/denial-risk-thresholds/suggested — ver DECISÃO completa
+    em smart_insights_engine.suggest_denial_risk_thresholds. Campos None
+    sem meses de histórico suficientes (menos de
+    MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION)."""
+
+    warning_threshold: float | None
+    critical_threshold: float | None
+    sample_size: int
+
+
+class HealthScoreCeilingSuggestionResponse(BaseModel):
+    """GET /tenant/health-score-ceilings/suggested — ver DECISÃO completa
+    em health_score_engine.suggest_denial_rate_ceiling/
+    suggest_no_show_rate_ceiling. Cada teto é sugerido a partir de uma
+    amostra PRÓPRIA (meses com glosa calculável vs. meses com atendimento
+    concluído/faltado) — por isso cada um tem seu próprio sample_size, os
+    dois podem divergir. Campo None quando a amostra daquele componente
+    específico é insuficiente."""
+
+    denial_ceiling: float | None
+    denial_ceiling_sample_size: int
+    no_show_ceiling: float | None
+    no_show_ceiling_sample_size: int

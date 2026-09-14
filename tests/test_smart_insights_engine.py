@@ -8,12 +8,16 @@ milissegundos, sem subir Postgres.
 import pytest
 
 from app.services.smart_insights_engine import (
+    _DENIAL_RISK_PCT_CRITICAL,
+    _DENIAL_RISK_PCT_WARNING,
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
+    resolve_denial_risk_thresholds,
+    suggest_denial_risk_thresholds,
 )
 
 _EMPTY_PERIOD = InsightsPeriodInput(
@@ -835,6 +839,78 @@ def test_denial_risk_pct_none_when_no_billing_in_period():
         high_risk_no_show_count=0, denial_risk_pct=None, denial_at_risk_value=0.0,
     )
     assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+# limiares de risco de glosa configuráveis por tenant.
+# ---------------------------------------------------------------------
+
+
+def test_custom_denial_risk_thresholds_change_what_gets_flagged():
+    """Com limiares customizados mais folgados, um risco que dispararia
+    'warning' nos defaults deixa de aparecer — prova que generate_insights
+    de fato usa o valor passado, não a constante do módulo."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, denial_risk_pct=20.0, denial_at_risk_value=1000.0,
+    )
+    # Default (_DENIAL_RISK_PCT_WARNING=15.0): 20% dispara warning.
+    assert len(generate_insights(current, _EMPTY_PERIOD)) == 1
+    # Limiar customizado mais alto: 20% fica abaixo do novo "aviso".
+    insights = generate_insights(
+        current, _EMPTY_PERIOD, denial_risk_warning_threshold=25.0, denial_risk_critical_threshold=50.0
+    )
+    assert insights == []
+
+
+def test_custom_denial_risk_thresholds_can_reclassify_severity():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, denial_risk_pct=20.0, denial_at_risk_value=1000.0,
+    )
+    # Default: 20% < _DENIAL_RISK_PCT_CRITICAL (40.0) -> warning.
+    default_insights = generate_insights(current, _EMPTY_PERIOD)
+    assert default_insights[0].severity == "warning"
+    # Limiar crítico customizado mais baixo que 20% -> vira critical.
+    insights = generate_insights(
+        current, _EMPTY_PERIOD, denial_risk_warning_threshold=5.0, denial_risk_critical_threshold=15.0
+    )
+    assert insights[0].severity == "critical"
+
+
+def test_resolve_denial_risk_thresholds_none_tenant_uses_defaults():
+    assert resolve_denial_risk_thresholds(None) == (_DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL)
+
+
+class _FakeTenant:
+    def __init__(self, warning=None, critical=None):
+        self.denial_risk_warning_threshold = warning
+        self.denial_risk_critical_threshold = critical
+
+
+def test_resolve_denial_risk_thresholds_tenant_without_config_uses_defaults():
+    assert resolve_denial_risk_thresholds(_FakeTenant()) == (_DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL)
+
+
+def test_resolve_denial_risk_thresholds_tenant_with_config():
+    assert resolve_denial_risk_thresholds(_FakeTenant(warning=10.0, critical=30.0)) == (10.0, 30.0)
+
+
+def test_suggest_denial_risk_thresholds_below_min_sample_returns_none():
+    assert suggest_denial_risk_thresholds([10.0, 20.0, 30.0]) is None
+
+
+def test_suggest_denial_risk_thresholds_with_enough_months():
+    # 6 meses (MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION), distribuição
+    # crescente simples.
+    monthly_pcts = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
+    suggestion = suggest_denial_risk_thresholds(monthly_pcts)
+    assert suggestion is not None
+    assert suggestion.sample_size == 6
+    assert suggestion.warning_threshold < suggestion.critical_threshold
+    # Mediana de [5,10,15,20,25,30] é 17.5.
+    assert suggestion.warning_threshold == 17.5
 
 
 def test_insights_are_sorted_by_financial_impact_descending():

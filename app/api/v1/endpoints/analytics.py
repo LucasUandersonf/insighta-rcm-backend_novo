@@ -185,7 +185,7 @@ async def get_health_score(
 ) -> HealthScoreResponse:
     # Sem date_from/date_to de propósito — janela é fixa dentro do
     # service (ver DECISÃO em AnalyticsService.get_health_score).
-    return await _build_service(db).get_health_score()
+    return await _build_service(db).get_health_score(current_user.tenant_id)
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)

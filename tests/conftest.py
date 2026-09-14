@@ -130,6 +130,7 @@ _SCHEMA_FILES = [
     "037_billing_glosa_hardening.sql",
     "038_insight_outcomes.sql",
     "039_cost_entries.sql",
+    "040_tenant_calibration_fields.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

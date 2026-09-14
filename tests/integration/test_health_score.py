@@ -283,6 +283,79 @@ async def test_health_score_trend_ignores_reference_snapshot_with_null_score(
     assert response.json()["trend"] is None
 
 
+async def test_health_score_uses_custom_denial_ceiling_configured_on_tenant(client, auth_headers_a, admin_engine, tenant_a):
+    """Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+    — prova que AnalyticsService.get_health_score de fato resolve e usa o
+    teto configurado no tenant, não só a constante fixa do módulo."""
+    from tests.integration.test_analytics import _create_contract
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Teto Customizado"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    # Uma linha de alto risco (300) + uma de baixo risco (700), esta com
+    # CID + tabela de contrato cadastrada casando o valor cobrado (senão
+    # ela também cairia em "medium" por falta de referência contratual,
+    # ver denial_risk_engine._rule_no_contract_reference) -> 30% do
+    # faturamento em risco médio/alto. Acima do teto default (25%) ->
+    # pior nota possível; abaixo de um teto customizado mais folgado ->
+    # nota positiva. Field exige ceiling < 1, então usar 100% de risco
+    # (como no resto do arquivo) nunca provaria a diferença — qualquer
+    # teto abaixo de 1.0 ainda classificaria 100% como "no teto ou acima".
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=700.0)
+    high_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            # cid_code omitido -> billing nasce com denial_risk_level "high"
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": high_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 300.0},
+        headers=auth_headers_a,
+    )
+    low_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": low_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 700.0},
+        headers=auth_headers_a,
+    )
+
+    # Com o teto default (25%), 30% de risco já é a pior nota possível.
+    default_response = await client.get("/api/v1/analytics/health-score", headers=auth_headers_a)
+    default_denial = next(c for c in default_response.json()["components"] if c["key"] == "denial")
+    assert default_denial["rate"] == pytest.approx(0.30)
+    assert default_denial["sub_score"] == 0.0
+
+    # Com um teto customizado mais folgado, o MESMO dado gera nota positiva.
+    patch_resp = await client.patch(
+        "/api/v1/tenant", json={"health_score_denial_ceiling": 0.60}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+
+    response = await client.get("/api/v1/analytics/health-score", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    denial_component = next(c for c in body["components"] if c["key"] == "denial")
+    assert denial_component["rate"] == pytest.approx(0.30)
+    assert denial_component["sub_score"] > 0.0  # já não é mais a pior nota possível
+
+
 async def test_health_score_isolates_between_tenants(client, auth_headers_a, auth_headers_b, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Isolamento"}, headers=auth_headers_a)
