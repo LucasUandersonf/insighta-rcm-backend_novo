@@ -10,6 +10,9 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from app.services import denial_appeal_service as denial_appeal_service_module
+from app.services.denial_appeal_draft_service import DenialAppealDraftError
+
 
 async def _create_insurance_plan(admin_engine, tenant_id, display_name="Amil One", normalized_key="amil_one") -> str:
     import uuid
@@ -241,3 +244,106 @@ async def test_atendimento_cannot_download_appeal_document(client, admin_engine,
 
     response = await client.get(f"/api/v1/denial-appeals/{appeal_id}/document", headers=headers)
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------
+# Rascunho de justificativa via IA (POST /draft-justification)
+# ---------------------------------------------------------------------
+
+
+class _FakeDenialAppealDrafter:
+    """Substitui AnthropicDenialAppealDrafter SÓ para não precisar de
+    ANTHROPIC_API_KEY/rede real neste sandbox — mesma técnica de
+    test_contract_extraction_reconciliation.py. `captured_context` guarda
+    o dict que de fato chegou aqui, pra provar que veio do JOIN real de
+    get_document_context (não de um valor fixo)."""
+
+    captured_context: dict | None = None
+
+    def __init__(self):
+        pass
+
+    async def draft(self, context_row: dict) -> str:
+        _FakeDenialAppealDrafter.captured_context = context_row
+        return "Rascunho gerado: a guia foi corretamente autorizada, conforme dados do caso."
+
+
+class _FakeFailingDrafter:
+    def __init__(self):
+        pass
+
+    async def draft(self, context_row: dict) -> str:
+        raise DenialAppealDraftError("A IA devolveu uma resposta vazia — tente novamente.")
+
+
+async def test_draft_justification_returns_ai_text_grounded_in_real_case_data(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(
+        client, auth_headers_a, billing_id, appeal_type="administrativa", reason="Falta de guia de autorização prévia."
+    )
+
+    response = await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=auth_headers_a)
+    assert response.status_code == 200, response.text
+    assert response.json()["draft"] == "Rascunho gerado: a guia foi corretamente autorizada, conforme dados do caso."
+
+    # Prova que o contexto veio do JOIN real (get_document_context), não
+    # de um valor fixo — mesmos fatos que o PDF usa.
+    context = _FakeDenialAppealDrafter.captured_context
+    assert context is not None
+    assert context["appeal_type"] == "administrativa"
+    assert context["operator_denial_reason"] == "Falta de guia de autorização prévia."
+    assert context["insurance_plan_name"] == "Unimed Nacional"
+
+
+async def test_draft_justification_404_for_unknown_appeal(client, auth_headers_a, monkeypatch):
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    response = await client.post(
+        "/api/v1/denial-appeals/00000000-0000-0000-0000-000000000000/draft-justification", headers=auth_headers_a
+    )
+    assert response.status_code == 404
+
+
+async def test_atendimento_cannot_draft_justification(client, admin_engine, tenant_a, auth_headers_a, monkeypatch):
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeDenialAppealDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft_rbac")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@appeal-draft-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=headers)
+    assert response.status_code == 403
+
+
+async def test_draft_justification_returns_502_when_ai_call_fails(client, auth_headers_a, admin_engine, tenant_a, monkeypatch):
+    """Cobre tanto uma falha de rede/formato quanto ANTHROPIC_API_KEY
+    ausente (o cenário real deste sandbox, sem nenhum monkeypatch) —
+    os dois viram DenialAppealDraftError, que o service converte em 502,
+    nunca um 500 "cru"."""
+    monkeypatch.setattr(denial_appeal_service_module, "AnthropicDenialAppealDrafter", _FakeFailingDrafter)
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft_fail")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    response = await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=auth_headers_a)
+    assert response.status_code == 502
+
+
+async def test_draft_justification_without_api_key_returns_502(client, auth_headers_a, admin_engine, tenant_a):
+    """Sem monkeypatch nenhum: a classe REAL (AnthropicDenialAppealDrafter)
+    roda, ANTHROPIC_API_KEY não está configurada neste sandbox, e o
+    resultado precisa ser um 502 claro — nunca uma exceção não tratada."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional_draft_nokey")
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+    appeal_id = await _create_appeal(client, auth_headers_a, billing_id)
+
+    response = await client.post(f"/api/v1/denial-appeals/{appeal_id}/draft-justification", headers=auth_headers_a)
+    assert response.status_code == 502

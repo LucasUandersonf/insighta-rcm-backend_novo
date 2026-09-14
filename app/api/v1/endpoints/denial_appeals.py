@@ -21,6 +21,7 @@ from app.repositories.webhook_subscription_repository import WebhookSubscription
 from app.schemas.denial_appeal import (
     DenialAppealAttachmentResponse,
     DenialAppealCreateRequest,
+    DenialAppealDraftJustificationResponse,
     DenialAppealFileRequest,
     DenialAppealResolveRequest,
     DenialAppealResponse,
@@ -138,6 +139,26 @@ async def list_denial_appeal_attachments(
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
 ) -> list[DenialAppealAttachmentResponse]:
     return await _build_service(db).list_attachments(appeal_id)
+
+
+@router.post("/{appeal_id}/draft-justification", response_model=DenialAppealDraftJustificationResponse)
+async def draft_denial_appeal_justification(
+    appeal_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
+) -> DenialAppealDraftJustificationResponse:
+    """
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): rascunho
+    da "Justificativa do Recurso" via IA, grounded SOMENTE nos dados
+    factuais do caso — ver DECISÃO completa em
+    app/services/denial_appeal_draft_service.py. _CAN_READ (não
+    escrita), mesmo critério de GET /document logo abaixo: gerar o
+    rascunho não muda o status do recurso nem grava nada — o texto
+    volta como preview editável, só entra no PDF se o usuário mandar
+    (via ?justification= em GET /document).
+    """
+    draft = await _build_service(db).draft_justification(appeal_id)
+    return DenialAppealDraftJustificationResponse(draft=draft)
 
 
 @router.get("/{appeal_id}/document")

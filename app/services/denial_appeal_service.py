@@ -28,6 +28,7 @@ from app.schemas.denial_appeal import (
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.services.appeal_deadline_calculator import compute_deadline
 from app.services.appeal_storage_client import AppealStorageClient, AppealStorageError, build_attachment_key
+from app.services.denial_appeal_draft_service import AnthropicDenialAppealDrafter, DenialAppealDraftError
 from app.services.denial_appeal_pdf_builder import DenialAppealDocumentContext, build_denial_appeal_pdf
 from app.services.webhook_dispatch_service import dispatch_event
 
@@ -293,6 +294,26 @@ class DenialAppealService:
             justification=justification,
         )
         return build_denial_appeal_pdf(context)
+
+    async def draft_justification(self, appeal_id: uuid.UUID) -> str:
+        """
+        Rascunho de justificativa via IA — achado do Parecer Técnico
+        "Boletim Insighta" (revisão 2). MESMO dado factual de
+        build_appeal_document (get_document_context), nunca inventa
+        mérito clínico (ver DECISÃO completa em
+        denial_appeal_draft_service.py). `_get_or_404` primeiro pelo
+        mesmo motivo de sempre: contrato de erro consistente
+        independente de RLS já esconder o appeal de outro tenant.
+        """
+        await self._get_or_404(appeal_id)
+        context_row = await self.repo.get_document_context(appeal_id)
+        assert context_row is not None  # _get_or_404 já confirmou que o appeal existe
+
+        try:
+            drafter = AnthropicDenialAppealDrafter()
+            return await drafter.draft(context_row)
+        except DenialAppealDraftError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     async def _get_or_404(self, appeal_id: uuid.UUID) -> DenialAppeal:
         appeal = await self.repo.get_by_id(appeal_id)

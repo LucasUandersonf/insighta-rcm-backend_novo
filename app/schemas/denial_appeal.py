@@ -48,6 +48,16 @@ class DenialAppealResolveRequest(BaseModel):
     resolution_notes: str | None = None
 
 
+class DenialAppealDraftJustificationResponse(BaseModel):
+    """POST /denial-appeals/{id}/draft-justification — rascunho gerado
+    via IA, SEMPRE grounded nos fatos que get_document_context() já
+    devolve (ver DECISÃO completa em denial_appeal_draft_service.py).
+    Volta como texto editável, nunca gravado sozinho — o usuário revisa/
+    edita e só então o texto entra no PDF via GET /document?justification=."""
+
+    draft: str
+
+
 class DenialAppealAttachmentResponse(BaseModel):
     id: UUID
     filename: str

@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     # exigidos pela operadora para o recurso, não o PDF do contrato nem
     # os lotes de faturamento importados).
     AWS_S3_APPEALS_BUCKET: str | None = None
+    # Achado do Parecer Técnico "Boletim Insighta" (revisão 2) — mesma
+    # credencial ANTHROPIC_API_KEY acima (da plataforma, nunca do
+    # tenant), modelo em variável PRÓPRIA (não reaproveita
+    # CONTRACT_EXTRACTION_MODEL) porque são dois usos com trade-off
+    # diferente: extração de tabela é dado estruturado determinístico,
+    # rascunho de justificativa é texto argumentativo — podem evoluir
+    # pra modelos diferentes sem acoplar as duas features. Ver
+    # app/services/denial_appeal_draft_service.py.
+    DENIAL_APPEAL_DRAFT_MODEL: str = "claude-sonnet-4-5"
 
     # Endpoint S3 customizado — ausente/None em produção real (boto3
     # resolve a AWS sozinho). Existe só para apontar os três buckets
