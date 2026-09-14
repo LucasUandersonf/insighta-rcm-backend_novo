@@ -66,6 +66,21 @@ class ReportingRepository:
             "high_risk_pending_count": int(pending_count),
         }
 
+    async def total_value_saved_all_time(self) -> tuple[float, date | None]:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — "valor protegido anti-glosa": soma de value_saved_by_correction
+        de TODO o histórico (não uma janela), mesmo campo que já
+        alimenta billing_summary por período. `tracking_since` é a data
+        do faturamento MAIS ANTIGO — proxy honesto de "desde quando a
+        clínica está sendo protegida", nunca uma data de cadastro
+        inventada quando não há faturamento nenhum ainda (None nesse
+        caso).
+        """
+        stmt = select(func.coalesce(func.sum(Billing.value_saved_by_correction), 0), func.min(Billing.created_at))
+        total_saved, earliest = (await self.session.execute(stmt)).one()
+        return float(total_saved), (earliest.date() if earliest is not None else None)
+
     async def marketing_spend_total(self, date_from: date, date_to: date) -> float:
         stmt = select(func.coalesce(func.sum(MarketingSpend.amount_spent), 0)).where(
             MarketingSpend.spend_date >= date_from, MarketingSpend.spend_date <= date_to

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.billing import Billing
 from app.models.denial_appeal import DenialAppeal
 
 
@@ -177,3 +178,27 @@ class DenialAppealRepository:
         result = await self.session.execute(stmt, {"appeal_id": appeal_id})
         row = result.mappings().first()
         return dict(row) if row is not None else None
+
+    async def sum_recovered_value(self) -> tuple[float, int]:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — "glosas recuperadas por prazo avisado": soma do charged_value
+        de todo recurso já GANHO (status='deferido') — dinheiro que
+        seria perdido pra glosa se o recurso não tivesse sido protocolado
+        a tempo (o prazo é exatamente o que o produto avisa, ver
+        appeals_due_soon_count/_appeals_due_soon_insight). TODO o
+        histórico, sem janela — mesmo raciocínio de
+        count_resolved_by_status/denial_reason_confirmation_rates:
+        "prova de ROI" é cumulativo desde que a clínica começou a usar o
+        produto, não uma métrica de período.
+
+        Retorna (valor_total_recuperado, quantidade_de_recursos).
+        """
+        stmt = (
+            select(func.coalesce(func.sum(Billing.charged_value), 0), func.count())
+            .select_from(DenialAppeal)
+            .join(Billing, Billing.id == DenialAppeal.billing_id)
+            .where(DenialAppeal.status == "deferido")
+        )
+        total, count = (await self.session.execute(stmt)).one()
+        return float(total), int(count)

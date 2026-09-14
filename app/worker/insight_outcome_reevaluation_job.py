@@ -94,6 +94,7 @@ async def _process_tenant(tenant: Tenant, as_of: datetime) -> int:
             LoteRepository(session),
             ContractRepository(session),
             CostEntryRepository(session),
+            outcome_repo,
         )
         window_end = date.today()
         window_start = window_end - timedelta(days=_REEVALUATION_WINDOW_DAYS - 1)

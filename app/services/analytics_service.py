@@ -29,6 +29,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -70,6 +71,7 @@ from app.schemas.analytics import (
     PlanLossRankingResponse,
     PriorityQueueItem,
     PriorityQueueResponse,
+    ProductRoiResponse,
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
@@ -388,6 +390,7 @@ class AnalyticsService:
         lote_repo: LoteRepository,
         contract_repo: ContractRepository,
         cost_entry_repo: CostEntryRepository,
+        insight_outcome_repo: InsightOutcomeRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -399,6 +402,7 @@ class AnalyticsService:
         self.lote_repo = lote_repo
         self.contract_repo = contract_repo
         self.cost_entry_repo = cost_entry_repo
+        self.insight_outcome_repo = insight_outcome_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -1680,4 +1684,28 @@ class AnalyticsService:
             overall_completion_rate=overall_rate,
             total_considered=total_considered,
             min_sample=DATA_QUALITY_MIN_SAMPLE,
+        )
+
+    async def get_product_roi(self) -> ProductRoiResponse:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — soma três componentes INDEPENDENTES e cumulativos (nunca uma
+        janela de período): valor protegido pelo motor anti-glosa,
+        valor recuperado em recursos de glosa ganhos, e ganho REAL
+        medido em qualquer insight que um gestor fechou o ciclo (F1.2).
+        Ver DECISÃO completa em ProductRoiResponse sobre por que os três
+        continuam separados na resposta, não só um total.
+        """
+        protected_value, tracking_since = await self.reporting_repo.total_value_saved_all_time()
+        recovered_value, recovered_count = await self.appeal_repo.sum_recovered_value()
+        realized_value, realized_count = await self.insight_outcome_repo.sum_realized_delta()
+
+        return ProductRoiResponse(
+            protected_from_denial_value=protected_value,
+            recovered_appeals_value=recovered_value,
+            recovered_appeals_count=recovered_count,
+            realized_insight_outcomes_value=realized_value,
+            realized_insight_outcomes_count=realized_count,
+            total_roi_value=protected_value + recovered_value + realized_value,
+            tracking_since=tracking_since,
         )

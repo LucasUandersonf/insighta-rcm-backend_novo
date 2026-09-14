@@ -43,6 +43,31 @@ class InsightOutcomeRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def sum_realized_delta(self) -> tuple[float, int]:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — "ganho de renegociação realizado" generalizado pra QUALQUER
+        categoria (mesmo espírito de InsightOutcomesRealizedSummary,
+        ver DECISÃO em app/services/insight_outcome_service.py), mas
+        SOMA no banco em vez de materializar linhas (list_resolved_and_reevaluated
+        tem limit=50, adequado pra exibir uma lista, NUNCA pra somar um
+        total: com mais de 50 outcomes reavaliados, o total ficaria
+        errado por baixo). Só conta outcomes JÁ REAVALIADOS com os dois
+        valores presentes — mesmo critério de "nunca soma uma promessa
+        ainda não conferida" do resto do produto.
+
+        Retorna (soma_do_ganho_realizado, quantidade_de_outcomes).
+        """
+        delta_expr = InsightOutcome.financial_impact_snapshot - InsightOutcome.resolved_metric_value
+        stmt = select(func.coalesce(func.sum(delta_expr), 0), func.count()).where(
+            InsightOutcome.status == "resolvido",
+            InsightOutcome.reevaluated_at.is_not(None),
+            InsightOutcome.financial_impact_snapshot.is_not(None),
+            InsightOutcome.resolved_metric_value.is_not(None),
+        )
+        total_delta, count = (await self.session.execute(stmt)).one()
+        return float(total_delta), int(count)
+
     async def list_pending_reevaluation(self, *, as_of: datetime, min_days_since_resolved: int) -> list[InsightOutcome]:
         """Job periódico (F1.2, app/worker/insight_outcome_reevaluation_job.py):
         outcomes marcados 'resolvido' há pelo menos `min_days_since_resolved`

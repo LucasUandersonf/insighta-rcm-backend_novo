@@ -333,6 +333,34 @@ class DenialReasonConfirmationResponse(BaseModel):
     min_sample: int
 
 
+class ProductRoiResponse(BaseModel):
+    """GET /api/v1/analytics/product-roi — Épico F4.4 do Plano Diretor
+    ("Prova de ROI do próprio produto"). Três componentes independentes,
+    TODOS cumulativos desde que a clínica começou a usar o produto
+    (nunca uma janela de período — ver DECISÃO nos repositórios):
+
+    - `protected_from_denial_value`: valor que o motor anti-glosa
+      corrigiu ANTES de enviar ao convênio (Billing.value_saved_by_correction).
+    - `recovered_appeals_value`: valor recuperado em recursos de glosa
+      GANHOS (status='deferido') — dinheiro que seria perdido sem o
+      recurso protocolado a tempo do prazo que o produto avisa.
+    - `realized_insight_outcomes_value`: ganho REAL medido (não
+      prometido) em qualquer insight que um gestor marcou como
+      resolvido e o produto reavaliou depois (F1.2) — inclui, mas não
+      se limita a, ganhos de renegociação de contrato.
+
+    `tracking_since` é a data do faturamento mais antigo — None quando a
+    clínica ainda não tem nenhum faturamento (nunca uma data inventada)."""
+
+    protected_from_denial_value: float
+    recovered_appeals_value: float
+    recovered_appeals_count: int
+    realized_insight_outcomes_value: float
+    realized_insight_outcomes_count: int
+    total_roi_value: float
+    tracking_since: date | None
+
+
 class DataQualityByUserItem(BaseModel):
     """Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
     ver DECISÃO completa em AnalyticsRepository.data_completeness_by_user.

@@ -22,6 +22,7 @@ from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -45,6 +46,7 @@ from app.schemas.analytics import (
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     OrganizationSummaryResponse,
+    ProductRoiResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
     PriorityQueueResponse,
@@ -100,6 +102,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         LoteRepository(db),
         ContractRepository(db),
         CostEntryRepository(db),
+        InsightOutcomeRepository(db),
     )
 
 
@@ -451,3 +454,18 @@ async def get_data_quality(
     """
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_data_quality_by_user(start, end)
+
+
+@router.get("/product-roi", response_model=ProductRoiResponse)
+async def get_product_roi(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ProductRoiResponse:
+    """
+    Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto") —
+    sem date_from/date_to de propósito (mesmo espírito de
+    health-score/denial-reason-confirmation): "prova de ROI" é
+    cumulativo desde que a clínica começou a usar o produto, não uma
+    métrica de período.
+    """
+    return await _build_service(db).get_product_roi()
