@@ -118,3 +118,28 @@ class HealthScoreCeilingSuggestionResponse(BaseModel):
     denial_ceiling_sample_size: int
     no_show_ceiling: float | None
     no_show_ceiling_sample_size: int
+
+
+class AnnualGoalSuggestionResponse(BaseModel):
+    """GET /tenant/annual-goal/suggested — Épico F3.3 do Plano Diretor
+    ("Metas e cenários orientados a dados"): "meta anual sugerida
+    (crescimento histórico + percentil de rede)". Ver DECISÃO completa
+    em app/sql/041_network_revenue_growth_benchmark.sql sobre por que
+    são DUAS sugestões independentes, nunca uma média escondida.
+
+    - `own_trend_suggested_goal` = `trailing_12_months_total` projetado
+      pelo SEU PRÓPRIO crescimento (últimos 12 meses vs os 12 anteriores).
+      None sem faturamento nos 12 meses anteriores (base indefinida).
+    - `network_pace_suggested_goal` = o MESMO faturamento seu, projetado
+      pelo ritmo (mediana) de crescimento de outras clínicas ativas.
+      None abaixo do cohort mínimo de clínicas comparáveis.
+
+    Nenhuma sugestão é aplicada sozinha — o formulário só preenche o
+    campo quando o usuário clica."""
+
+    trailing_12_months_total: float
+    own_growth_rate: float | None
+    own_trend_suggested_goal: float | None
+    network_growth_median: float | None
+    network_pace_suggested_goal: float | None
+    network_cohort_size: int

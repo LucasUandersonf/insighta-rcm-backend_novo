@@ -271,6 +271,12 @@ _POST_UPGRADE_SQL_FILES = [
     # auto-idempotente, roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE.
     "040_tenant_calibration_fields.sql",
+    # Épico F3.3 do Plano Diretor ("Metas e cenários orientados a
+    # dados") — função agregadora cross-tenant, MESMA role
+    # network_benchmark_owner de 032 (ver DECISÃO no próprio .sql).
+    # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
+    # em _POST_UPGRADE_MARKER_TABLE.
+    "041_network_revenue_growth_benchmark.sql",
 ]
 
 _ROLES_SQL = """
@@ -322,6 +328,13 @@ GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchma
 ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner;
 REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_runtime;
+
+-- Meta anual sugerida (ver 041_network_revenue_growth_benchmark.sql) —
+-- MESMA role network_benchmark_owner acima (mesma categoria de dado:
+-- billing/tenants agregado cross-tenant), só GRANT EXECUTE na função nova.
+ALTER FUNCTION core.network_revenue_growth_benchmark(UUID, INT) OWNER TO network_benchmark_owner;
+REVOKE ALL ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) TO app_runtime;
 
 -- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
 -- PRÓPRIA, categoria de dado diferente de network_benchmark_owner

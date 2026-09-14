@@ -2,13 +2,17 @@
 gestão centralizada da clínica/organização + leitura do plano/assinatura
 do SaaS. Upgrade de plano em si é fluxo comercial (fora do MVP — ver
 DECISÃO em app/schemas/tenant.py); aqui só expomos o estado atual."""
+import uuid
+
 from fastapi import APIRouter, Depends
 
-from app.api.deps import CurrentUser, DbSession, require_role
+from app.api.deps import CurrentUser, DbSession, DbSessionNoTenant, require_role
 from app.repositories.analytics_repository import AnalyticsRepository
+from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.tenant import (
     AVAILABLE_PLAN_TIERS,
+    AnnualGoalSuggestionResponse,
     DenialRiskThresholdSuggestionResponse,
     HealthScoreCeilingSuggestionResponse,
     NoShowThresholdSuggestionResponse,
@@ -17,6 +21,7 @@ from app.schemas.tenant import (
 )
 from app.services.analytics_service import monthly_denial_risk_pcts, monthly_no_show_rates
 from app.services.health_score_engine import suggest_denial_rate_ceiling, suggest_no_show_rate_ceiling
+from app.services.network_benchmark_service import NetworkBenchmarkService
 from app.services.no_show_risk_engine import MIN_SPECIFIC_SAMPLES
 from app.services.no_show_risk_engine import suggest_thresholds as suggest_no_show_thresholds
 from app.services.smart_insights_engine import suggest_denial_risk_thresholds
@@ -128,3 +133,22 @@ async def get_suggested_health_score_ceilings(
         no_show_ceiling=no_show_result[0] if no_show_result is not None else None,
         no_show_ceiling_sample_size=no_show_result[1] if no_show_result is not None else len(monthly_no_show),
     )
+
+
+@router.get("/annual-goal/suggested", response_model=AnnualGoalSuggestionResponse)
+async def get_suggested_annual_goal(
+    db: DbSessionNoTenant,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AnnualGoalSuggestionResponse:
+    """
+    Épico F3.3 do Plano Diretor ("Metas e cenários orientados a dados")
+    — "meta anual sugerida (crescimento histórico + percentil de
+    rede)". DbSessionNoTenant (não DbSession) de propósito, mesmo motivo
+    do Comparativo entre clínicas (ver DECISÃO em
+    app/sql/041_network_revenue_growth_benchmark.sql): a função SQL
+    calcula "seu" faturamento e o compara com outras clínicas na MESMA
+    consulta, escapando do RLS de dentro de uma função SECURITY DEFINER,
+    não de uma sessão tenant-aware.
+    """
+    service = NetworkBenchmarkService(NetworkBenchmarkRepository(db))
+    return await service.get_annual_goal_suggestion(uuid.UUID(current_user.tenant_id))
