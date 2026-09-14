@@ -277,6 +277,11 @@ _POST_UPGRADE_SQL_FILES = [
     # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
     # em _POST_UPGRADE_MARKER_TABLE.
     "041_network_revenue_growth_benchmark.sql",
+    # Épico F3.2 do Plano Diretor ("Consolidação multi-unidade") — ver
+    # DECISÃO completa no próprio .sql. CREATE TABLE IF NOT EXISTS +
+    # ADD COLUMN IF NOT EXISTS + DROP/CREATE FUNCTION — auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "042_organizations.sql",
 ]
 
 _ROLES_SQL = """
@@ -335,6 +340,17 @@ GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) T
 ALTER FUNCTION core.network_revenue_growth_benchmark(UUID, INT) OWNER TO network_benchmark_owner;
 REVOKE ALL ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) TO app_runtime;
+
+-- Dashboard consolidado multi-unidade (ver 042_organizations.sql) —
+-- role PRÓPRIA (organization_reporting_owner), categoria de dado
+-- diferente de network_benchmark_owner: NÃO anonimizada (unidades do
+-- MESMO dono, comparadas linha a linha), escopada por organization_id
+-- em vez de "toda a rede".
+GRANT USAGE ON SCHEMA core TO organization_reporting_owner;
+GRANT SELECT ON core.tenants, core.organizations, core.billing, core.appointments TO organization_reporting_owner;
+ALTER FUNCTION core.organization_units_summary(UUID, INT) OWNER TO organization_reporting_owner;
+REVOKE ALL ON FUNCTION core.organization_units_summary(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.organization_units_summary(UUID, INT) TO app_runtime;
 
 -- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
 -- PRÓPRIA, categoria de dado diferente de network_benchmark_owner
@@ -527,9 +543,16 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             logger.info("Criando role contract_price_benchmark_owner...")
             await conn.execute("CREATE ROLE contract_price_benchmark_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
+        organization_reporting_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_reporting_owner')"
+        )
+        if not organization_reporting_owner_exists:
+            logger.info("Criando role organization_reporting_owner...")
+            await conn.execute("CREATE ROLE organization_reporting_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
         logger.info(
             "Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner, "
-            "network_benchmark_owner, contract_price_benchmark_owner)..."
+            "network_benchmark_owner, contract_price_benchmark_owner, organization_reporting_owner)..."
         )
         await conn.execute(_ROLES_SQL)
     finally:

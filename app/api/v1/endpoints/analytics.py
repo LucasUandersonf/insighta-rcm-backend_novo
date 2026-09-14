@@ -23,6 +23,7 @@ from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
+from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -43,6 +44,7 @@ from app.schemas.analytics import (
     ProfitabilityResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
+    OrganizationSummaryResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
     PriorityQueueResponse,
@@ -52,6 +54,7 @@ from app.schemas.analytics import (
 from app.services.analytics_service import AnalyticsService
 from app.services.network_benchmark_service import NetworkBenchmarkService
 from app.services.oportunidades_service import OportunidadesService
+from app.services.organization_service import OrganizationService
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -317,6 +320,25 @@ async def get_network_benchmark(
     # não carrega tenant.
     service = NetworkBenchmarkService(NetworkBenchmarkRepository(db))
     return await service.get_benchmark(uuid.UUID(current_user.tenant_id))
+
+
+@router.get("/organization-summary", response_model=OrganizationSummaryResponse)
+async def get_organization_summary(
+    db: DbSessionNoTenant,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> OrganizationSummaryResponse:
+    """
+    Épico F3.2 do Plano Diretor ("Consolidação multi-unidade") —
+    dashboard consolidado comparando as unidades do MESMO grupo lado a
+    lado. DbSessionNoTenant pelo mesmo motivo do Comparativo entre
+    Clínicas acima (ver DECISÃO em app/sql/042_organizations.sql): a
+    função SQL lê as unidades da MESMA organization_id do tenant
+    solicitante, escapando do RLS de dentro de uma função SECURITY
+    DEFINER. `belongs_to_organization=False` é o estado normal de uma
+    clínica avulsa, nunca um erro.
+    """
+    service = OrganizationService(OrganizationRepository(db))
+    return await service.get_units_summary(uuid.UUID(current_user.tenant_id))
 
 
 @router.get("/oportunidades", response_model=OportunidadesResponse)

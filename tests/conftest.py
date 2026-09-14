@@ -132,6 +132,7 @@ _SCHEMA_FILES = [
     "039_cost_entries.sql",
     "040_tenant_calibration_fields.sql",
     "041_network_revenue_growth_benchmark.sql",
+    "042_organizations.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -215,6 +216,19 @@ GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) T
 ALTER FUNCTION core.network_revenue_growth_benchmark(UUID, INT) OWNER TO network_benchmark_owner_test;
 REVOKE ALL ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) TO app_test_runtime;
+
+-- Dashboard consolidado multi-unidade (ver 042_organizations.sql) —
+-- role PRÓPRIA, mesmo raciocínio de network_benchmark_owner_test acima
+-- (categoria de dado diferente: NÃO anonimizada, escopada por
+-- organization_id).
+DROP ROLE IF EXISTS organization_reporting_owner_test;
+CREATE ROLE organization_reporting_owner_test NOLOGIN NOSUPERUSER;
+ALTER ROLE organization_reporting_owner_test BYPASSRLS;
+GRANT USAGE ON SCHEMA core TO organization_reporting_owner_test;
+GRANT SELECT ON core.tenants, core.organizations, core.billing, core.appointments TO organization_reporting_owner_test;
+ALTER FUNCTION core.organization_units_summary(UUID, INT) OWNER TO organization_reporting_owner_test;
+REVOKE ALL ON FUNCTION core.organization_units_summary(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.organization_units_summary(UUID, INT) TO app_test_runtime;
 
 -- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
 -- PRÓPRIA, mesmo raciocínio de network_benchmark_owner_test acima

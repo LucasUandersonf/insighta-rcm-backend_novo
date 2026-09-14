@@ -21,6 +21,7 @@ from app.models.insurance_plan import InsurancePlan  # noqa: F401
 from app.models.insurance_plan_alias import InsurancePlanAlias  # noqa: F401
 from app.models.marketing_spend import MarketingSpend  # noqa: F401
 from app.models.marketing_webhook_event import MarketingWebhookEvent  # noqa: F401
+from app.models.organization import Organization  # noqa: F401
 from app.models.password_reset_token import PasswordResetToken  # noqa: F401
 from app.models.patient import Patient  # noqa: F401
 from app.models.platform_audit_log import PlatformAuditLog  # noqa: F401

@@ -454,6 +454,39 @@ class NetworkBenchmarkResponse(BaseModel):
     critério da Nota de Saúde Financeira (ver HealthScoreResponse)."""
 
     metrics: list[NetworkBenchmarkMetric]
+
+
+class OrganizationUnitSummary(BaseModel):
+    """Uma unidade (Tenant) do MESMO grupo multi-unidade do solicitante
+    — ver DECISÃO completa em app/sql/042_organizations.sql. AO
+    CONTRÁRIO do Comparativo entre Clínicas, isto NÃO é anonimizado: as
+    unidades pertencem ao mesmo dono, o valor é comparar lado a lado.
+    `denial_risk_pct`/`no_show_rate` são None sem amostra no período
+    (base zero, nunca 0% inventado — mesmo princípio de _denial_risk_pct)."""
+
+    tenant_id: str
+    trade_name: str
+    is_requesting_tenant: bool
+    total_billed: float
+    denial_risk_pct: float | None
+    appointment_count: int
+    no_show_rate: float | None
+
+
+class OrganizationSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/organization-summary — Épico F3.2 do Plano
+    Diretor ("Consolidação multi-unidade"). `belongs_to_organization`
+    False é o estado NORMAL de uma clínica avulsa (a maioria), nunca um
+    erro nem uma lacuna de configuração — `units` fica vazio e os
+    consolidados ficam neutros nesse caso."""
+
+    belongs_to_organization: bool
+    organization_name: str | None
+    window_days: int
+    units: list[OrganizationUnitSummary]
+    consolidated_total_billed: float
+    consolidated_denial_risk_pct: float | None
+    consolidated_no_show_rate: float | None
     window_days: int
 
 
