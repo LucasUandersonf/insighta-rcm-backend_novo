@@ -728,6 +728,73 @@ def test_coparticipation_visibility_does_not_repeat_once_previous_period_also_ha
     assert generate_insights(current, previous) == []
 
 
+# ---------------------------------------------------------------------
+# Raio-X da Receita — coparticipação como sinal CONTÍNUO (achado do
+# Parecer Técnico "Boletim Insighta", revisão 2)
+# ---------------------------------------------------------------------
+
+def test_coparticipation_growth_insight_fires_when_share_increases_with_reliable_sample_both_periods():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, coparticipation_total=1_000.0,
+        coparticipation_billing_count=8, total_billing_count=18,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, coparticipation_total=2_000.0,
+        coparticipation_billing_count=10, total_billing_count=20,
+    )
+    insights = generate_insights(current, previous)
+    titles = [i for i in insights if "fatia de coparticipação" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "faturamento"
+    assert "20%" in titles[0].message
+    assert "10" in titles[0].message  # +10pp (20% - 10%)
+
+
+def test_coparticipation_growth_insight_absent_when_share_is_stable():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=8_000.0, coparticipation_total=800.0,
+        coparticipation_billing_count=8, total_billing_count=18,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, coparticipation_total=1_000.0,
+        coparticipation_billing_count=10, total_billing_count=20,
+    )
+    assert generate_insights(current, previous) == []
+
+
+def test_coparticipation_growth_insight_absent_when_previous_sample_is_too_small():
+    """Mesmo raciocínio inverso do insight de 'estreia': sem amostra
+    confiável no período anterior, não dá pra afirmar que a fatia
+    'cresceu' — pode só ser o dado passando a existir agora, não uma
+    tendência real.
+
+    Amostra pequena no período anterior é EXATAMENTE o gatilho do
+    insight de "estreia" (_coparticipation_visibility_insight), então
+    ele dispara aqui — o que este teste verifica é que o de
+    "tendência" (_coparticipation_growth_insight) não dispara junto."""
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, coparticipation_total=100.0,
+        coparticipation_billing_count=1, total_billing_count=18,
+    )
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, total_billed=10_000.0, coparticipation_total=2_000.0,
+        coparticipation_billing_count=10, total_billing_count=20,
+    )
+    titles = [insight.title for insight in generate_insights(current, previous)]
+    assert "A fatia de coparticipação no seu faturamento está subindo" not in titles
+
+
+def test_coparticipation_growth_insight_absent_without_any_data():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""
@@ -1136,7 +1203,7 @@ def test_payment_lag_insight_critical_above_90_days():
     lag_titles = [i for i in insights if "demorando" in i.title.lower()]
     assert len(lag_titles) == 1
     assert lag_titles[0].severity == "critical"
-    # Acima do benchmark de mercado (77 dias, ANAHP) — a mensagem cita isso.
+    # Acima do benchmark de mercado (~69 dias, ANAHP 2024) — a mensagem cita isso.
     assert "média do setor" in lag_titles[0].message
 
 

@@ -174,7 +174,7 @@ async def test_payment_lag_by_plan_orders_worst_first(client, auth_headers_a, ad
 async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     # 5 billings conciliados, todos acima do limiar de alerta (60 dias)
-    # e do benchmark de mercado (77 dias, ANAHP) — amostra mínima cumprida.
+    # e do benchmark de mercado (~69 dias, ANAHP 2024) — amostra mínima cumprida.
     for _ in range(5):
         await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, plan_id, days_to_receive=95.0)
 
@@ -873,8 +873,14 @@ async def test_denial_risk_distribution_counts_by_level(client, auth_headers_a, 
     assert response.status_code == 200
     body = response.json()
     counts = {item["level"]: item["count"] for item in body["items"]}
+    values = {item["level"]: item["value"] for item in body["items"]}
     assert counts.get("high") == 1
     assert body["total_reviewed"] == sum(counts.values())
+    # Achado do Parecer Técnico "Boletim Insighta": mesma resposta agora
+    # também carrega o valor em R$ por nível — elimina a tela duplicada
+    # que só mostrava isso agregado no card de insight.
+    assert values.get("high") == 150.0
+    assert body["total_value_reviewed"] == sum(values.values())
 
 
 async def test_agenda_metrics_reports_no_show_rate_per_weekday(client, auth_headers_a, admin_engine, tenant_a):
