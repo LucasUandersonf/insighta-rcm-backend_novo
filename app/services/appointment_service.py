@@ -85,6 +85,7 @@ class AppointmentService:
             status="scheduled",
             procedure_code=data.procedure_code,
             cid_code=data.cid_code,
+            visit_intent_tag=data.visit_intent_tag,
             created_by=uuid.UUID(created_by),
         )
 
@@ -165,6 +166,7 @@ class AppointmentService:
                 visit_type=appointment.visit_type,
                 booking_channel=appointment.booking_channel,
                 cancellation_reason=appointment.cancellation_reason,
+                visit_intent_tag=appointment.visit_intent_tag,
             )
             for appointment, patient_name in rows
         ]
@@ -197,6 +199,8 @@ class AppointmentService:
             appointment.local_id = data.local_id
         if data.tipo_paciente is not None:
             appointment.tipo_paciente = data.tipo_paciente
+        if data.visit_intent_tag is not None:
+            appointment.visit_intent_tag = data.visit_intent_tag
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)

@@ -266,3 +266,41 @@ async def test_list_appointments_empty_range_returns_empty_page(client, auth_hea
 async def test_list_appointments_requires_authentication(client):
     response = await client.get("/api/v1/appointments?date_from=2026-01-01&date_to=2026-01-31")
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------
+# "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1):
+# visit_intent_tag, motivo estruturado do agendamento.
+# ---------------------------------------------------------------------
+
+
+async def test_create_appointment_with_visit_intent_tag(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id, visit_intent_tag="urgencia")
+    assert appointment["visit_intent_tag"] == "urgencia"
+
+
+async def test_create_appointment_rejects_unknown_visit_intent_tag(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    response = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "visit_intent_tag": "emergencia",
+        },
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_fills_in_visit_intent_tag_later(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+    assert appointment["visit_intent_tag"] is None
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}", json={"visit_intent_tag": "retorno"}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["visit_intent_tag"] == "retorno"
