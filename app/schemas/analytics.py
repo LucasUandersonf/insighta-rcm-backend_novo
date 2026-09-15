@@ -361,6 +361,54 @@ class ProductRoiResponse(BaseModel):
     tracking_since: date | None
 
 
+class CapitalDecisionBaseDataResponse(BaseModel):
+    """GET /api/v1/analytics/capital-decision-base-data — Épico F3.4 do
+    Plano Diretor ("Decisões de capital: contratar/expandir — simulação
+    de payback de contratação"). Nunca devolve a decisão pronta nem
+    projeta receita futura sozinho — só ancora a simulação (feita no
+    frontend, mesmo espírito de SimuladorPanel.tsx) em receita/margem
+    por hora REALMENTE observada nesta clínica nos últimos `window_days`
+    dias, e no que as OUTRAS unidades do mesmo grupo (quando existe) já
+    faturam — nunca um benchmark de mercado inventado (mesma rejeição já
+    documentada em threshold_calibration.py: não existe uma tabela real
+    de "quanto um profissional de tal especialidade deveria faturar").
+
+    Contratar: `avg_revenue_per_hour`/`avg_margin_per_hour` são a base
+    de receita/margem por hora ocupada de agenda esperada de uma nova
+    contratação — média dos profissionais ATIVOS com receita/hora
+    observável no período, filtrados por `specialty` quando informado E
+    com amostra >= `min_sample`; caem para a média de TODA a clínica
+    quando a especialidade não tem amostra suficiente
+    (`used_fallback_clinic_wide=True`) em vez de devolver None
+    silenciosamente quando existe uma média mais ampla pra usar.
+    `avg_margin_per_hour` fica None quando o tenant ainda não lançou
+    nenhum CostEntry (`has_cost_data=False`, ver F3.1).
+
+    Expandir: `avg_monthly_revenue_per_unit` é a média de faturamento
+    dos últimos `window_days` dias das OUTRAS unidades do mesmo grupo
+    multi-unidade (exclui a própria unidade solicitante) — None quando
+    o tenant não pertence a um grupo (`belongs_to_organization=False`,
+    o estado normal da maioria das clínicas) ou o grupo ainda não tem
+    nenhuma outra unidade."""
+
+    window_days: int
+    period_start: date
+    period_end: date
+
+    available_specialties: list[str]
+    specialty_requested: str | None
+    used_fallback_clinic_wide: bool
+    sample_size: int
+    min_sample: int
+    avg_revenue_per_hour: float | None
+    has_cost_data: bool
+    avg_margin_per_hour: float | None
+
+    belongs_to_organization: bool
+    sibling_units_count: int
+    avg_monthly_revenue_per_unit: float | None
+
+
 class DataQualityByUserItem(BaseModel):
     """Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
     ver DECISÃO completa em AnalyticsRepository.data_completeness_by_user.

@@ -71,6 +71,7 @@ from app.schemas.analytics import (
     PlanLossRankingResponse,
     PriorityQueueItem,
     PriorityQueueResponse,
+    CapitalDecisionBaseDataResponse,
     ProductRoiResponse,
     ProfessionalCapacityMetric,
     RecallCandidateItem,
@@ -1499,6 +1500,98 @@ class AnalyticsService:
             has_cost_data=has_cost_data,
             total_costs=total_costs,
             net_margin=net_margin,
+        )
+
+    # Épico F3.4 do Plano Diretor ("Decisões de capital"): janela mais
+    # longa que o resto do produto (6 meses, não 7/30 dias) de propósito
+    # — receita/hora por especialidade é ruidosa numa janela curta, e
+    # esta é a base de uma decisão de CONTRATAÇÃO, não um dashboard
+    # operacional do dia a dia.
+    _CAPITAL_DECISION_WINDOW_DAYS = 180
+    # Menor que o usual (3, ver DATA_QUALITY_MIN_SAMPLE/MIN_APPEAL_HISTORY_SAMPLE)
+    # de propósito: a população de profissionais de UMA especialidade
+    # numa clínica pequena já é naturalmente pequena — exigir 3 tornaria
+    # o fallback pra média da clínica quase sempre acionado, esvaziando
+    # o propósito de filtrar por especialidade.
+    _CAPITAL_DECISION_MIN_SAMPLE = 2
+
+    async def get_capital_decision_base_data(
+        self,
+        specialty: str | None,
+        *,
+        belongs_to_organization: bool,
+        sibling_monthly_revenues: list[float],
+    ) -> CapitalDecisionBaseDataResponse:
+        """
+        Épico F3.4 do Plano Diretor ("Decisões de capital: contratar/
+        expandir"). Metade "contratar" calculada aqui (receita/margem
+        por hora por especialidade, reaproveitando get_profitability —
+        ver DECISÃO no schema CapitalDecisionBaseDataResponse); metade
+        "expandir" (`belongs_to_organization`/`sibling_monthly_revenues`)
+        já vem PRONTA do endpoint, porque depende de
+        OrganizationRepository, que só existe atrás de uma sessão
+        cross-tenant (DbSessionNoTenant) — mesmo motivo de
+        network_benchmark ser resolvido no endpoint em vez de aqui
+        dentro (ver get_smart_insights/get_priority_queue).
+        """
+        # +2 dias de margem no fim da janela — mesmo motivo do resto do
+        # produto quando cruza receita com agenda (ver `_window()` nos
+        # testes de rentabilidade): um atendimento já faturado pode
+        # estar agendado pra hoje/amanhã, e cortar a janela exatamente
+        # em "hoje" descartaria a receita/hora desse profissional por um
+        # detalhe de fuso, não por falta de dado real.
+        date_to = date.today() + timedelta(days=2)
+        date_from = date_to - timedelta(days=self._CAPITAL_DECISION_WINDOW_DAYS)
+        profitability = await self.get_profitability(date_from, date_to)
+        rated = [p for p in profitability.by_professional if p.revenue_per_hour is not None]
+
+        professionals = await self.professional_repo.list_active()
+        specialty_by_id = {str(p.id): (p.specialty or "").strip() for p in professionals}
+        available_specialties = sorted({s for s in specialty_by_id.values() if s})
+
+        normalized_requested = specialty.strip() if specialty and specialty.strip() else None
+        used_fallback = False
+        pool = rated
+        if normalized_requested is not None:
+            matching = [
+                p
+                for p in rated
+                if specialty_by_id.get(str(p.professional_id), "").lower() == normalized_requested.lower()
+            ]
+            if len(matching) >= self._CAPITAL_DECISION_MIN_SAMPLE:
+                pool = matching
+            else:
+                used_fallback = True  # cai pra média de toda a clínica (pool já é `rated`)
+
+        sample_size = len(pool)
+        avg_revenue_per_hour = (
+            sum(p.revenue_per_hour for p in pool) / sample_size
+            if sample_size >= self._CAPITAL_DECISION_MIN_SAMPLE
+            else None
+        )
+        avg_margin_per_hour = None
+        if profitability.has_cost_data:
+            margin_pool = [p for p in pool if p.margin_per_hour is not None]
+            if len(margin_pool) >= self._CAPITAL_DECISION_MIN_SAMPLE:
+                avg_margin_per_hour = sum(p.margin_per_hour for p in margin_pool) / len(margin_pool)
+
+        return CapitalDecisionBaseDataResponse(
+            window_days=self._CAPITAL_DECISION_WINDOW_DAYS,
+            period_start=date_from,
+            period_end=date_to,
+            available_specialties=available_specialties,
+            specialty_requested=normalized_requested,
+            used_fallback_clinic_wide=used_fallback,
+            sample_size=sample_size,
+            min_sample=self._CAPITAL_DECISION_MIN_SAMPLE,
+            avg_revenue_per_hour=avg_revenue_per_hour,
+            has_cost_data=profitability.has_cost_data,
+            avg_margin_per_hour=avg_margin_per_hour,
+            belongs_to_organization=belongs_to_organization,
+            sibling_units_count=len(sibling_monthly_revenues),
+            avg_monthly_revenue_per_unit=(
+                sum(sibling_monthly_revenues) / len(sibling_monthly_revenues) if sibling_monthly_revenues else None
+            ),
         )
 
     async def get_marketing_channels(self, date_from: date, date_to: date) -> MarketingChannelsResponse:

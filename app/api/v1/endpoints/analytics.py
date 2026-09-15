@@ -32,6 +32,7 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
     DataQualityResponse,
     DenialReasonConfirmationResponse,
@@ -469,3 +470,29 @@ async def get_product_roi(
     métrica de período.
     """
     return await _build_service(db).get_product_roi()
+
+
+@router.get("/capital-decision-base-data", response_model=CapitalDecisionBaseDataResponse)
+async def get_capital_decision_base_data(
+    db: DbSession,
+    db_no_tenant: DbSessionNoTenant,
+    specialty: str | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> CapitalDecisionBaseDataResponse:
+    """
+    Épico F3.4 do Plano Diretor ("Decisões de capital: contratar/
+    expandir — simulação de payback de contratação") — dado-base real
+    pra simulação feita no frontend (CapitalDecisionPanel.tsx), nunca a
+    decisão pronta. db_no_tenant pelo mesmo motivo de
+    /organization-summary: a metade "expandir" olha o faturamento das
+    OUTRAS unidades do mesmo grupo, cross-tenant.
+    """
+    org_summary = await OrganizationService(OrganizationRepository(db_no_tenant)).get_units_summary(
+        uuid.UUID(current_user.tenant_id)
+    )
+    sibling_monthly_revenues = [u.total_billed for u in org_summary.units if not u.is_requesting_tenant]
+    return await _build_service(db).get_capital_decision_base_data(
+        specialty,
+        belongs_to_organization=org_summary.belongs_to_organization,
+        sibling_monthly_revenues=sibling_monthly_revenues,
+    )
