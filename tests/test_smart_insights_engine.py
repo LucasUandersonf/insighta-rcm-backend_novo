@@ -202,7 +202,7 @@ def test_denial_spike_has_action_pointing_to_the_exact_plans_high_risk_billing_q
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label is not None
     assert "Unimed Nacional" in insights[0].action_label
-    assert insights[0].action_href == "/?insurance_plan_id=plan-unimed-123"
+    assert insights[0].action_href == "/painel?insurance_plan_id=plan-unimed-123"
 
 
 def test_financial_hole_insight_carries_financial_impact_for_ranking():

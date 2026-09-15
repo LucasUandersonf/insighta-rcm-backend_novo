@@ -599,8 +599,13 @@ def _high_risk_billing_href(plan_id: str) -> str:
     parâmetro que o Painel usa de verdade (ver
     BillingRepository.list_high_risk_paginated e DashboardPage.tsx,
     frontend) — o `action_label` já nomeia o convênio na própria frase
-    do botão, então o destino não precisa repetir o nome na URL."""
-    return f"/?insurance_plan_id={plan_id}"
+    do botão, então o destino não precisa repetir o nome na URL.
+
+    "Junta Técnica Insighta": o Painel foi movido de "/" para "/painel"
+    (deixou de ser a landing page, virou só destino de drill-down — ver
+    RootRedirect.tsx, frontend) — este é exatamente esse drill-down,
+    então o link precisa acompanhar a rota nova."""
+    return f"/painel?insurance_plan_id={plan_id}"
 
 
 def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
