@@ -9,7 +9,7 @@ por baixo, que filtra as linhas. O ORM só precisa declarar o schema.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,12 +21,19 @@ from app.db.base import Base
 # Dados) e hoje é indistinguível de um procedimento comum na Billing.
 ITEM_TYPE_VALUES = ("procedimento", "material_opme", "taxa", "diaria", "medicamento")
 
+# "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+PAYMENT_METHOD_VALUES = ("dinheiro", "pix", "cartao_debito", "cartao_credito", "boleto")
+
 
 class Billing(Base):
     __tablename__ = "billing"
     __table_args__ = (
         CheckConstraint("quantity > 0", name="billing_quantity_check"),
         CheckConstraint(f"item_type IS NULL OR item_type IN {ITEM_TYPE_VALUES}", name="billing_item_type_check"),
+        CheckConstraint(
+            f"payment_method IS NULL OR payment_method IN {PAYMENT_METHOD_VALUES}", name="billing_payment_method_check"
+        ),
+        CheckConstraint("installments IS NULL OR installments >= 1", name="billing_installments_check"),
         {"schema": "core"},
     )
 
@@ -94,4 +101,9 @@ class Billing(Base):
     clinical_documentation_confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("core.users.id")
     )
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    # Ver PAYMENT_METHOD_VALUES acima e DECISÃO completa em
+    # 049_billing_payment_method.sql.
+    payment_method: Mapped[str | None] = mapped_column(String(20))
+    installments: Mapped[int | None] = mapped_column(SmallInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

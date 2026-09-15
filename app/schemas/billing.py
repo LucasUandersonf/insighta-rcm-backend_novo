@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.text_utils import normalize_item_type, sanitize_member_card_value
+from app.models.billing import PAYMENT_METHOD_VALUES
 
 
 class BillingCreateRequest(BaseModel):
@@ -29,6 +30,9 @@ class BillingCreateRequest(BaseModel):
     member_card_number: str | None = None
     item_type: str | None = None
     coparticipation_value: float | None = Field(default=None, ge=0)
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    payment_method: str | None = None
+    installments: int | None = Field(default=None, ge=1)
 
     @field_validator("charged_value")
     @classmethod
@@ -63,6 +67,13 @@ class BillingCreateRequest(BaseModel):
         # (`normalize_item_type`) de propósito, para não sombrear a
         # função do módulo dentro da classe.
         return normalize_item_type(v)
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v: str | None) -> str | None:
+        if v is not None and v not in PAYMENT_METHOD_VALUES:
+            raise ValueError(f"payment_method deve ser um de: {', '.join(PAYMENT_METHOD_VALUES)}.")
+        return v
 
 
 class BillingResponse(BaseModel):
@@ -101,6 +112,9 @@ class BillingResponse(BaseModel):
     # conferido, nunca um false inventado).
     clinical_documentation_confirmed: bool | None
     clinical_documentation_confirmed_at: datetime | None
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    payment_method: str | None
+    installments: int | None
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
@@ -136,6 +150,8 @@ class BillingSearchItem(BaseModel):
     # coparticipação); precisa saber se a linha é OPME e o estado atual
     # da conferência antes de oferecer o botão "confirmar presente/ausente".
     clinical_documentation_confirmed: bool | None
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    payment_method: str | None
 
 
 class BillingSettleRequest(BaseModel):

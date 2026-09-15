@@ -133,6 +133,8 @@ class BillingService:
             member_card_number=data.member_card_number,
             item_type=data.item_type,
             coparticipation_value=data.coparticipation_value,
+            payment_method=data.payment_method,
+            installments=data.installments,
         )
         saved = await self.billing_repo.add(billing)
         # Sem `diff` — ver DECISÃO em AuditLogRepository.record. O
@@ -193,6 +195,7 @@ class BillingService:
                 coparticipation_value=float(billing.coparticipation_value) if billing.coparticipation_value is not None else None,
                 coparticipation_received=billing.coparticipation_received,
                 clinical_documentation_confirmed=billing.clinical_documentation_confirmed,
+                payment_method=billing.payment_method,
             )
             for billing, patient_name, procedure_code, plan_name in rows
         ]

@@ -312,6 +312,11 @@ _POST_UPGRADE_SQL_FILES = [
     # função), roda em todo deploy sem marcador. Ver DECISÃO completa no
     # próprio .sql.
     "048_network_benchmark_specialty_segment.sql",
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    # Ver DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS +
+    # CHECK guardado por DO $$ — auto-idempotente, roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "049_billing_payment_method.sql",
 ]
 
 _ROLES_SQL = """
