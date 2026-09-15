@@ -140,6 +140,7 @@ _SCHEMA_FILES = [
     "047_professional_planned_absences.sql",
     "048_network_benchmark_specialty_segment.sql",
     "049_billing_payment_method.sql",
+    "050_appointment_addon_upsell.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

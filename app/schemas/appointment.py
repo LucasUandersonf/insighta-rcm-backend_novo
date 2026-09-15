@@ -96,6 +96,12 @@ class AppointmentUpdateRequest(BaseModel):
     # em massa) — editável depois, mesmo raciocínio de procedure_code/
     # cid_code acima.
     visit_intent_tag: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell — capturado no mesmo momento de checkout
+    # (junto com status="completed"), ver DECISÃO em
+    # 050_appointment_addon_upsell.sql.
+    addon_offered_procedure: str | None = None
+    addon_declined: bool | None = None
 
     @field_validator("status")
     @classmethod
@@ -146,6 +152,9 @@ class AppointmentResponse(BaseModel):
     booking_channel: str | None
     # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1).
     visit_intent_tag: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2).
+    addon_offered_procedure: str | None = None
+    addon_declined: bool | None = None
 
     model_config = {"from_attributes": True}
 

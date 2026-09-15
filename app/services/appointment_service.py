@@ -201,6 +201,18 @@ class AppointmentService:
             appointment.tipo_paciente = data.tipo_paciente
         if data.visit_intent_tag is not None:
             appointment.visit_intent_tag = data.visit_intent_tag
+        if data.addon_offered_procedure is not None:
+            appointment.addon_offered_procedure = data.addon_offered_procedure
+        if data.addon_declined is not None:
+            # "Mapa de Dados Insighta" — nunca grava um resultado de oferta
+            # sem o que foi oferecido (nem nesta chamada, nem em uma
+            # anterior) — ver DECISÃO em 050_appointment_addon_upsell.sql.
+            if appointment.addon_offered_procedure is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="addon_declined requer addon_offered_procedure preenchido.",
+                )
+            appointment.addon_declined = data.addon_declined
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)

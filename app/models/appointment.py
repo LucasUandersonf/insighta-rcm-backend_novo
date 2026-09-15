@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -96,4 +96,9 @@ class Appointment(Base):
     # VISIT_INTENT_TAG_VALUES acima e DECISÃO completa em
     # 046_appointment_visit_intent.sql.
     visit_intent_tag: Mapped[str | None] = mapped_column(String(20))
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell. Ver DECISÃO completa em
+    # 050_appointment_addon_upsell.sql.
+    addon_offered_procedure: Mapped[str | None] = mapped_column(Text)
+    addon_declined: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

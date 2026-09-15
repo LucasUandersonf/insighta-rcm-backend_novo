@@ -317,6 +317,11 @@ _POST_UPGRADE_SQL_FILES = [
     # CHECK guardado por DO $$ — auto-idempotente, roda em todo deploy,
     # sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "049_billing_payment_method.sql",
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell. Ver DECISÃO completa no próprio .sql.
+    # ADD COLUMN IF NOT EXISTS — auto-idempotente, roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "050_appointment_addon_upsell.sql",
 ]
 
 _ROLES_SQL = """
