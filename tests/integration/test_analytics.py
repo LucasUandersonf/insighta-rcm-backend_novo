@@ -1956,6 +1956,51 @@ async def test_profitability_computes_margin_with_direct_and_general_costs(clien
     assert item["margin_per_hour"] == 400.0  # 1h de agenda ocupada
 
 
+async def test_profitability_computes_net_margin_pct_and_fixed_cost_pct(client, auth_headers_a, admin_engine, tenant_a):
+    """"Junta Técnica Insighta" (reavaliação de mercado da Sala de
+    Comando, aba Rentabilidade): benchmarks de mercado — margem líquida
+    e custo fixo como % da receita — precisam do PERCENTUAL, não só do
+    valor em R$ já coberto pelo teste de margem acima."""
+    await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Percentual", plan_name="Percentual Saúde", plan_key="percentual_saude", charged_value=1000.0
+    )
+    period_month = date.today().replace(day=1).isoformat()
+
+    # folha_fixa + aluguel = custo FIXO (300); comissao_repasse = variável (100).
+    for category, amount in (("folha_fixa", 200.0), ("aluguel", 100.0), ("comissao_repasse", 100.0)):
+        resp = await client.post(
+            "/api/v1/cost-entries",
+            json={"category": category, "amount": amount, "period_month": period_month},
+            headers=auth_headers_a,
+        )
+        assert resp.status_code == 201, resp.text
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is True
+    assert body["total_costs"] == 400.0
+    assert body["net_margin"] == 600.0  # 1000 - 400
+    assert body["net_margin_pct"] == 60.0  # 600 / 1000 * 100
+    assert body["fixed_cost_pct"] == 30.0  # (200 + 100 fixo, sem contar os 100 de comissão) / 1000 * 100
+
+
+async def test_profitability_margin_pct_none_without_cost_data(client, auth_headers_a, admin_engine, tenant_a):
+    await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Sem Percentual", plan_name="Sem Percentual Saúde", plan_key="sem_percentual_saude", charged_value=300.0
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["net_margin_pct"] is None
+    assert body["fixed_cost_pct"] is None
+
+
 async def test_cost_entry_crud_and_rbac(client, admin_engine, tenant_a, auth_headers_a):
     period_month = date.today().replace(day=1).isoformat()
     create_resp = await client.post(

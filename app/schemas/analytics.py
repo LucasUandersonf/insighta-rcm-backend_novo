@@ -812,6 +812,24 @@ class ProfitabilityResponse(BaseModel):
     # em vez de "sem dado").
     has_cost_data: bool = False
     total_costs: float | None = None
+    # "Junta Técnica Insighta" — 2 referências externas de mercado que a
+    # tela não mostrava antes: margem líquida saudável fica entre 15% e
+    # 30%; custo fixo saudável fica até 60% da receita (ver DECISÃO
+    # completa em AnalyticsService.get_profitability). Um terceiro
+    # benchmark do relatório ("convênio paga 30-50% a menos que
+    # particular pelo mesmo procedimento") ficou de fora de propósito:
+    # `Billing.insurance_plan_id` é NOT NULL neste schema — o produto
+    # não modela uma cobrança genuinamente particular (sem convênio) hoje,
+    # só coparticipação (uma fração de uma cobrança QUE TEM convênio).
+    # Sem essa distinção real no banco, calcular esse benchmark
+    # inventaria um "particular" que não existe — decisão consistente
+    # com o resto do motor: nunca inventar um dado que a evidência não
+    # sustenta. Fica registrado aqui como gap de produto a resolver numa
+    # rodada futura, não como algo silenciosamente ignorado. Ambos None
+    # quando não há dado/amostra suficiente para calcular — nunca 0, que
+    # pareceria "margem zero" em vez de "sem dado".
+    net_margin_pct: float | None = None
+    fixed_cost_pct: float | None = None
     net_margin: float | None = None
 
 

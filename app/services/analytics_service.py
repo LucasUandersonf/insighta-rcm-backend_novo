@@ -1397,6 +1397,16 @@ class AnalyticsService:
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 
+    # "Junta Técnica Insighta" — CostEntry.category ("folha_fixa",
+    # "comissao_repasse", "aluguel", "insumo", "outros" — ver
+    # app/models/cost_entry.py) que representam custo FIXO (não varia
+    # com volume de atendimento) para o benchmark "custo fixo saudável
+    # fica até 60% da receita". "comissao_repasse"/"insumo" são
+    # variáveis por definição (escalam com volume); "outros" fica de
+    # fora de propósito — categoria ambígua, contar como fixo inflaria
+    # o indicador sem base.
+    _FIXED_COST_CATEGORIES = frozenset({"folha_fixa", "aluguel"})
+
     async def get_profitability(self, date_from: date, date_to: date) -> ProfitabilityResponse:
         """
         Raio-X da Receita, frente "Gestão eficiente": até esta rodada, o
@@ -1457,9 +1467,15 @@ class AnalyticsService:
         has_cost_data = bool(cost_entries)
         total_costs: float | None = None
         net_margin: float | None = None
+        net_margin_pct: float | None = None
+        fixed_cost_pct: float | None = None
         if has_cost_data:
             total_costs = round(sum(float(e.amount) for e in cost_entries), 2)
             net_margin = round(total_billed - total_costs, 2)
+            if total_billed > 0:
+                net_margin_pct = round(net_margin / total_billed * 100, 1)
+                fixed_costs_total = sum(float(e.amount) for e in cost_entries if e.category in self._FIXED_COST_CATEGORIES)
+                fixed_cost_pct = round(fixed_costs_total / total_billed * 100, 1)
 
             general_costs_total = sum(float(e.amount) for e in cost_entries if e.professional_id is None)
             direct_costs_by_professional: dict[str, float] = {}
@@ -1506,6 +1522,8 @@ class AnalyticsService:
             by_professional=by_professional,
             by_procedure=by_procedure,
             has_cost_data=has_cost_data,
+            net_margin_pct=net_margin_pct,
+            fixed_cost_pct=fixed_cost_pct,
             total_costs=total_costs,
             net_margin=net_margin,
         )
