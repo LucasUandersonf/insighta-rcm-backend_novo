@@ -155,6 +155,7 @@ class AppointmentResponse(BaseModel):
     # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2).
     addon_offered_procedure: str | None = None
     addon_declined: bool | None = None
+    visit_satisfaction_score: int | None = None
 
     model_config = {"from_attributes": True}
 

@@ -8,6 +8,7 @@ from app.models.announcement import Announcement  # noqa: F401
 from app.models.announcement_read import AnnouncementRead  # noqa: F401
 from app.models.api_key import ApiKey  # noqa: F401
 from app.models.appointment import Appointment  # noqa: F401
+from app.models.appointment_satisfaction_token import AppointmentSatisfactionToken  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
 from app.models.billing import Billing  # noqa: F401
 from app.models.contract import Contract  # noqa: F401

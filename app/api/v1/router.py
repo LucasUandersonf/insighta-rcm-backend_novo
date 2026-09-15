@@ -30,6 +30,7 @@ from app.api.v1.endpoints import (
     patients,
     platform,
     professionals,
+    public_satisfaction,
     report_recipients,
     reports,
     support_requests,
@@ -58,6 +59,7 @@ api_router.include_router(faturas.router)
 api_router.include_router(glosas.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(professionals.router)
+api_router.include_router(public_satisfaction.router)
 api_router.include_router(locais.router)
 api_router.include_router(capacity.router)
 api_router.include_router(ingestion.router)

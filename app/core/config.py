@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # enumeração de e-mail por força bruta de tentativas.
     REGISTER_RATE_LIMIT: str = "5/minute"
     PASSWORD_RESET_RATE_LIMIT: str = "5/minute"
+    # Mesma proteção nos 2 endpoints públicos do link de avaliação de
+    # satisfação (ver 052_appointment_satisfaction.sql) — limite mais
+    # generoso que o de reset de senha porque aqui não há e-mail para
+    # enumerar (o token já nasce com alta entropia), só o abuso comum de
+    # qualquer formulário público.
+    SATISFACTION_RATE_LIMIT: str = "20/minute"
     # None = contagem em memória do processo (só funciona com 1 instância
     # da aplicação). Setar para "redis://host:6379" quando houver mais de
     # uma instância atrás de um load balancer — ver DECISÃO em
@@ -205,6 +211,12 @@ class Settings(BaseSettings):
     # quanto mais tempo válido, maior a janela de uso indevido se o
     # e-mail for interceptado).
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
+    # Validade do link público de avaliação de satisfação pós-atendimento
+    # (ver 052_appointment_satisfaction.sql) — bem mais longa que o token
+    # de reset de senha de propósito: a recepção pode enviar o link horas
+    # ou dias depois da consulta (não é um fluxo de segurança sensível a
+    # segundos), e o paciente pode simplesmente não responder na hora.
+    SATISFACTION_TOKEN_EXPIRE_DAYS: int = 14
 
     # --- Login com Google ("Sign in with Google") — OPCIONAL ---
     # Client ID do OAuth 2.0 criado no Google Cloud Console (APIs &

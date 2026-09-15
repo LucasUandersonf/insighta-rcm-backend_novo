@@ -1,20 +1,27 @@
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import HTTPException, status
 
+from app.core.config import get_settings
+from app.core.security import generate_satisfaction_token
 from app.models.appointment import Appointment
+from app.models.appointment_satisfaction_token import AppointmentSatisfactionToken
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.appointment_satisfaction_token_repository import AppointmentSatisfactionTokenRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentListItem, AppointmentResponse, AppointmentUpdateRequest
+from app.schemas.appointment_satisfaction import SatisfactionLinkResponse
 from app.schemas.pagination import PaginatedResponse
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 from app.services.no_show_risk_engine import resolve_thresholds
 from app.services.webhook_dispatch_service import dispatch_event
+
+settings = get_settings()
 
 
 class AppointmentService:
@@ -25,6 +32,7 @@ class AppointmentService:
         professional_repo: ProfessionalRepository,
         local_repo: LocalRepository,
         tenant_repo: TenantRepository,
+        satisfaction_token_repo: AppointmentSatisfactionTokenRepository,
         webhook_repo: WebhookSubscriptionRepository | None = None,
     ):
         self.appointment_repo = appointment_repo
@@ -32,6 +40,7 @@ class AppointmentService:
         self.professional_repo = professional_repo
         self.local_repo = local_repo
         self.tenant_repo = tenant_repo
+        self.satisfaction_token_repo = satisfaction_token_repo
         # Opcional (default None) — mesmo critério de BillingService.webhook_repo:
         # recurso opt-in do tenant, não obrigatório como audit_repo em
         # outros services. Só usado aqui via POST /appointments (criação
@@ -216,3 +225,34 @@ class AppointmentService:
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)
+
+    async def generate_satisfaction_link(self, appointment_id: uuid.UUID) -> SatisfactionLinkResponse:
+        """"Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2),
+        pilar Satisfação/NPS: gera um link público de uso único (ver
+        DECISÃO completa em 052_appointment_satisfaction.sql sobre por
+        que não é uma mensagem automática de WhatsApp) — a recepção
+        copia `url` e envia manualmente ao paciente pelo canal que já
+        usa. Só faz sentido para um atendimento já REALIZADO: pedir
+        satisfação de uma consulta que ainda vai acontecer (ou que o
+        paciente faltou) não tem o que avaliar."""
+        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        if appointment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento não encontrado neste tenant.")
+        if appointment.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Só é possível gerar link de avaliação para um atendimento já realizado (status 'completed').",
+            )
+
+        raw_token, token_hash = generate_satisfaction_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.SATISFACTION_TOKEN_EXPIRE_DAYS)
+        await self.satisfaction_token_repo.add(
+            AppointmentSatisfactionToken(
+                id=uuid.uuid4(),
+                appointment_id=appointment.id,
+                tenant_id=appointment.tenant_id,
+                token_hash=token_hash,
+                expires_at=expires_at,
+            )
+        )
+        return SatisfactionLinkResponse(url=f"{settings.FRONTEND_BASE_URL}/satisfacao/{raw_token}", expires_at=expires_at)

@@ -142,6 +142,7 @@ _SCHEMA_FILES = [
     "049_billing_payment_method.sql",
     "050_appointment_addon_upsell.sql",
     "051_professional_contract_commission.sql",
+    "052_appointment_satisfaction.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

@@ -328,6 +328,12 @@ _POST_UPGRADE_SQL_FILES = [
     # auto-idempotente, roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE.
     "051_professional_contract_commission.sql",
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Satisfação/NPS. Ver DECISÃO completa no próprio .sql. ADD COLUMN
+    # IF NOT EXISTS + CHECK guardado por DO $$ + CREATE TABLE IF NOT
+    # EXISTS (sem CREATE POLICY, tabela sem RLS) — tudo auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "052_appointment_satisfaction.sql",
 ]
 
 _ROLES_SQL = """
