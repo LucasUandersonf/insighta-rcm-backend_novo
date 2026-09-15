@@ -292,6 +292,11 @@ _POST_UPGRADE_SQL_FILES = [
     # auto-idempotente, roda em todo deploy, sem entrar em
     # _POST_UPGRADE_MARKER_TABLE.
     "044_opme_documentation_confirmation.sql",
+    # "Mapa de Dados Insighta" — Domínio Paciente (Onda 1). Ver DECISÃO
+    # completa no próprio .sql. ADD COLUMN IF NOT EXISTS + CHECK guardado
+    # por DO $$ — auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "045_patient_relationship_fields.sql",
 ]
 
 _ROLES_SQL = """

@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from app.models.patient import Patient
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
-from app.schemas.patient import PatientCreateRequest, PatientResponse
+from app.schemas.patient import PatientCreateRequest, PatientResponse, PatientUpdateRequest
 
 # Placeholder usado por anonymize_patient() — nunca um nome real, nunca
 # vazio (um `full_name` vazio quebraria qualquer tela que assume o campo
@@ -20,6 +20,19 @@ class PatientService:
         self.audit_repo = audit_repo
 
     async def create_patient(self, tenant_id: str, actor_user_id: uuid.UUID | None, data: PatientCreateRequest) -> PatientResponse:
+        if data.referred_by_patient_id is not None:
+            # Ver DECISÃO em 045_patient_relationship_fields.sql: a FK
+            # sozinha não impede referenciar um paciente de OUTRO
+            # tenant, então a validação real é aqui — busca pelo MESMO
+            # repositório com RLS ativo (só enxerga o tenant atual). Não
+            # encontrado = ou não existe, ou é de outro tenant; nos dois
+            # casos, 422.
+            referrer = await self.repo.get_by_id(data.referred_by_patient_id)
+            if referrer is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Paciente indicador não encontrado neste tenant.",
+                )
         patient = Patient(
             id=uuid.uuid4(),
             tenant_id=uuid.UUID(tenant_id),
@@ -28,6 +41,10 @@ class PatientService:
             birth_date=data.birth_date,
             acquisition_source=data.acquisition_source,
             acquisition_campaign_id=data.acquisition_campaign_id,
+            referred_by_patient_id=data.referred_by_patient_id,
+            communication_consent=data.communication_consent,
+            preferred_time_window=data.preferred_time_window,
+            zip_code=data.zip_code,
         )
         saved = await self.repo.add(patient)
         # DECISÃO — sem `diff`: ver DECISÃO completa em
@@ -66,6 +83,12 @@ class PatientService:
         patient.birth_date = None
         patient.acquisition_source = None
         patient.acquisition_campaign_id = None
+        # "Mapa de Dados Insighta" — zip_code é dado pessoal de
+        # localização, entra na mesma eliminação. communication_consent/
+        # preferred_time_window/referred_by_patient_id NÃO identificam o
+        # titular sozinhos e referred_by_patient_id ainda sustenta o
+        # histórico de indicação de OUTROS pacientes — preservados.
+        patient.zip_code = None
         patient.anonymized_at = datetime.now(timezone.utc)
         await self.repo.save(patient)
 
@@ -79,6 +102,41 @@ class PatientService:
             entity_type="patient",
             entity_id=patient.id,
         )
+        return PatientResponse.model_validate(patient)
+
+    async def update_patient(self, patient_id: uuid.UUID, data: PatientUpdateRequest) -> PatientResponse:
+        """
+        "Mapa de Dados Insighta" — Domínio Paciente (Onda 1): estes 4
+        campos raramente são conhecidos no primeiro cadastro (quem
+        indicou, consentimento de contato, preferência de horário, CEP)
+        — este endpoint deixa completá-los depois, sem reabrir o
+        cadastro inteiro. Mesmo contrato parcial de
+        ProfessionalService.update_professional: só `is not None` é
+        aplicado, nunca limpa um campo já preenchido de volta pra NULL.
+        """
+        patient = await self.repo.get_by_id(patient_id)
+        if patient is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paciente não encontrado neste tenant.")
+
+        if data.referred_by_patient_id is not None:
+            if data.referred_by_patient_id == patient.id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Um paciente não pode ser indicado por si mesmo."
+                )
+            referrer = await self.repo.get_by_id(data.referred_by_patient_id)
+            if referrer is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Paciente indicador não encontrado neste tenant.",
+                )
+            patient.referred_by_patient_id = data.referred_by_patient_id
+        if data.communication_consent is not None:
+            patient.communication_consent = data.communication_consent
+        if data.preferred_time_window is not None:
+            patient.preferred_time_window = data.preferred_time_window
+        if data.zip_code is not None:
+            patient.zip_code = data.zip_code
+        await self.repo.save(patient)
         return PatientResponse.model_validate(patient)
 
     async def list_patients(self, limit: int = 50, offset: int = 0) -> list[PatientResponse]:

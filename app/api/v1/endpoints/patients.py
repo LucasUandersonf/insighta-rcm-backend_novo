@@ -23,7 +23,7 @@ from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.pagination import PaginatedResponse
-from app.schemas.patient import PatientCreateRequest, PatientResponse
+from app.schemas.patient import PatientCreateRequest, PatientResponse, PatientUpdateRequest
 from app.services.patient_service import PatientService
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -62,6 +62,23 @@ async def list_patients(
     anterior deste endpoint."""
     items, total = await _build_service(db).list_patients_paginated(limit=limit, offset=offset)
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.patch("/{patient_id}", response_model=PatientResponse)
+async def update_patient(
+    patient_id: uuid.UUID,
+    payload: PatientUpdateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> PatientResponse:
+    """
+    "Mapa de Dados Insighta" — Domínio Paciente (Onda 1): completa
+    depois os campos relacionais que raramente são conhecidos no
+    primeiro cadastro (quem indicou, consentimento de contato,
+    preferência de horário, CEP). Mesmo RBAC de criar paciente
+    (recepção lida com isso no dia a dia).
+    """
+    return await _build_service(db).update_patient(patient_id, payload)
 
 
 @router.post("/{patient_id}/anonymize", response_model=PatientResponse)
