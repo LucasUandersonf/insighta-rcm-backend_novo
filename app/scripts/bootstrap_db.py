@@ -302,6 +302,11 @@ _POST_UPGRADE_SQL_FILES = [
     # guardado por DO $$ — auto-idempotente, roda em todo deploy, sem
     # entrar em _POST_UPGRADE_MARKER_TABLE.
     "046_appointment_visit_intent.sql",
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 1). CREATE
+    # TABLE sem CREATE POLICY idempotente — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE), não roda incondicionalmente em todo
+    # deploy. Ver DECISÃO completa no próprio .sql.
+    "047_professional_planned_absences.sql",
 ]
 
 _ROLES_SQL = """
@@ -493,6 +498,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "034_health_score_snapshots.sql": "health_score_snapshots",
     "038_insight_outcomes.sql": "insight_outcomes",
     "039_cost_entries.sql": "cost_entries",
+    "047_professional_planned_absences.sql": "professional_planned_absences",
 }
 
 

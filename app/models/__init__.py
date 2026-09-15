@@ -29,6 +29,7 @@ from app.models.platform_risk_alert import PlatformRiskAlert  # noqa: F401
 from app.models.platform_user import PlatformUser  # noqa: F401
 from app.models.professional import Professional  # noqa: F401
 from app.models.professional_availability import ProfessionalAvailability  # noqa: F401
+from app.models.professional_planned_absence import ProfessionalPlannedAbsence  # noqa: F401
 from app.models.report_recipient import ReportRecipient  # noqa: F401
 from app.models.support_request import SupportRequest  # noqa: F401
 from app.models.tenant import Tenant  # noqa: F401

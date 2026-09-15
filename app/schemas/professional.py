@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import date, datetime, time
 from uuid import UUID
 
 from pydantic import BaseModel, model_validator
@@ -53,6 +53,32 @@ class ProfessionalUpdateRequest(BaseModel):
     availability: list[AvailabilityBlockRequest] | None = None
 
 
+class PlannedAbsenceCreateRequest(BaseModel):
+    """"Mapa de Dados Insighta" — Domínio Profissional (Onda 1): férias/
+    licença FUTURA planejada — diferente da grade semanal (que é
+    recorrente), aqui é um intervalo de datas específico."""
+
+    start_date: date
+    end_date: date
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def check_order(self) -> "PlannedAbsenceCreateRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date deve ser igual ou posterior a start_date.")
+        return self
+
+
+class PlannedAbsenceResponse(BaseModel):
+    id: UUID
+    start_date: date
+    end_date: date
+    reason: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ProfessionalResponse(BaseModel):
     id: UUID
     full_name: str
@@ -60,5 +86,7 @@ class ProfessionalResponse(BaseModel):
     specialty: str | None
     is_active: bool
     availability: list[AvailabilityBlockResponse] = []
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 1).
+    planned_absences: list[PlannedAbsenceResponse] = []
 
     model_config = {"from_attributes": True}

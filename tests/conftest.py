@@ -137,6 +137,7 @@ _SCHEMA_FILES = [
     "044_opme_documentation_confirmation.sql",
     "045_patient_relationship_fields.sql",
     "046_appointment_visit_intent.sql",
+    "047_professional_planned_absences.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

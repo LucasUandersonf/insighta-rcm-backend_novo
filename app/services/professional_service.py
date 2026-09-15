@@ -4,9 +4,17 @@ from fastapi import HTTPException, status
 
 from app.models.professional import Professional
 from app.models.professional_availability import ProfessionalAvailability
+from app.models.professional_planned_absence import ProfessionalPlannedAbsence
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
+from app.repositories.professional_planned_absence_repository import ProfessionalPlannedAbsenceRepository
 from app.repositories.professional_repository import ProfessionalRepository
-from app.schemas.professional import ProfessionalCreateRequest, ProfessionalResponse, ProfessionalUpdateRequest
+from app.schemas.professional import (
+    PlannedAbsenceCreateRequest,
+    PlannedAbsenceResponse,
+    ProfessionalCreateRequest,
+    ProfessionalResponse,
+    ProfessionalUpdateRequest,
+)
 
 """
 DECISÃO — sem relationship() do SQLAlchemy entre Professional e
@@ -26,9 +34,15 @@ verboso, mas sem armadilha de carregamento implícito.
 
 
 class ProfessionalService:
-    def __init__(self, professional_repo: ProfessionalRepository, availability_repo: ProfessionalAvailabilityRepository):
+    def __init__(
+        self,
+        professional_repo: ProfessionalRepository,
+        availability_repo: ProfessionalAvailabilityRepository,
+        planned_absence_repo: ProfessionalPlannedAbsenceRepository,
+    ):
         self.professional_repo = professional_repo
         self.availability_repo = availability_repo
+        self.planned_absence_repo = planned_absence_repo
 
     async def create_professional(self, tenant_id: str, data: ProfessionalCreateRequest) -> ProfessionalResponse:
         professional = await self.professional_repo.add(
@@ -52,6 +66,7 @@ class ProfessionalService:
             )
         # Recarrega a grade para devolver na resposta já com os blocos criados.
         professional.availability = await self.availability_repo.list_by_professional(professional.id)
+        professional.planned_absences = []  # profissional recém-criado nunca tem ausência lançada ainda
         return ProfessionalResponse.model_validate(professional)
 
     async def update_professional(
@@ -79,6 +94,7 @@ class ProfessionalService:
             )
         else:
             professional.availability = await self.availability_repo.list_by_professional(professional.id)
+        professional.planned_absences = await self.planned_absence_repo.list_by_professional(professional.id)
 
         return ProfessionalResponse.model_validate(professional)
 
@@ -87,8 +103,41 @@ class ProfessionalService:
         # Uma query batelada em vez de N queries dentro do loop (ver
         # DECISÃO em ProfessionalAvailabilityRepository.list_by_professionals).
         availability_by_professional = await self.availability_repo.list_by_professionals([p.id for p in items])
+        absences_by_professional = await self.planned_absence_repo.list_by_professionals([p.id for p in items])
         results = []
         for professional in items:
             professional.availability = availability_by_professional.get(professional.id, [])
+            professional.planned_absences = absences_by_professional.get(professional.id, [])
             results.append(ProfessionalResponse.model_validate(professional))
         return results
+
+    async def add_planned_absence(
+        self, tenant_id: str, professional_id: uuid.UUID, data: PlannedAbsenceCreateRequest
+    ) -> PlannedAbsenceResponse:
+        """"Mapa de Dados Insighta" — Domínio Profissional (Onda 1):
+        registra uma ausência futura planejada (férias, licença) —
+        alimenta previsão de capacidade futura (ver DECISÃO completa em
+        047_professional_planned_absences.sql). Diferente da grade
+        semanal (`availability`, substituída por inteiro a cada PATCH),
+        ausências são lançadas UMA a uma — um novo período de férias não
+        deveria apagar um anterior já cadastrado."""
+        professional = await self.professional_repo.get_by_id(professional_id)
+        if professional is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profissional não encontrado neste tenant.")
+
+        absence = await self.planned_absence_repo.add(
+            ProfessionalPlannedAbsence(
+                tenant_id=uuid.UUID(tenant_id),
+                professional_id=professional_id,
+                start_date=data.start_date,
+                end_date=data.end_date,
+                reason=data.reason,
+            )
+        )
+        return PlannedAbsenceResponse.model_validate(absence)
+
+    async def remove_planned_absence(self, professional_id: uuid.UUID, absence_id: uuid.UUID) -> None:
+        absence = await self.planned_absence_repo.get_by_id(absence_id)
+        if absence is None or absence.professional_id != professional_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ausência planejada não encontrada.")
+        await self.planned_absence_repo.delete(absence)
