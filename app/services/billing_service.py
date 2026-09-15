@@ -256,6 +256,14 @@ class BillingService:
         billing.coparticipation_received = data.received
         billing.coparticipation_confirmed_at = datetime.now(timezone.utc)
         billing.coparticipation_confirmed_by = actor_user_id
+        # "Mapa de Dados Insighta" — só grava forma de pagamento/parcelas
+        # quando de fato foi recebido; `received=False` não tem "como foi
+        # pago" pra registrar (nada foi pago).
+        if data.received:
+            if data.payment_method is not None:
+                billing.payment_method = data.payment_method
+            if data.installments is not None:
+                billing.installments = data.installments
         await self.billing_repo.save(billing)
         await self.audit_repo.record(
             tenant_id=uuid.UUID(tenant_id),

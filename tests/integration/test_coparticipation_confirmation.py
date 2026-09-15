@@ -125,6 +125,55 @@ async def test_atendimento_can_confirm_coparticipation(client, admin_engine, ten
     assert resp.status_code == 200
 
 
+# ---------------------------------------------------------------------
+# "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1):
+# confirmar coparticipação recebida é o checkout real do particular —
+# ponto de captura natural pra COMO o paciente pagou.
+# ---------------------------------------------------------------------
+
+
+async def test_confirm_coparticipation_received_captures_payment_method(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+
+    resp = await client.post(
+        f"/api/v1/billing/{billing_id}/confirm-coparticipation",
+        json={"received": True, "payment_method": "cartao_credito", "installments": 2},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["payment_method"] == "cartao_credito"
+    assert body["installments"] == 2
+
+
+async def test_confirm_coparticipation_not_received_ignores_payment_method(client, auth_headers_a, admin_engine, tenant_a):
+    """Nada foi pago -> não há como registrar "como foi pago", mesmo que
+    o campo venha preenchido no corpo da requisição por engano."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+
+    resp = await client.post(
+        f"/api/v1/billing/{billing_id}/confirm-coparticipation",
+        json={"received": False, "payment_method": "pix"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["payment_method"] is None
+
+
+async def test_confirm_coparticipation_rejects_unknown_payment_method(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    billing_id = await _create_billing(client, auth_headers_a, plan_id)
+
+    resp = await client.post(
+        f"/api/v1/billing/{billing_id}/confirm-coparticipation",
+        json={"received": True, "payment_method": "criptomoeda"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422
+
+
 async def test_confirmation_is_audited(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     billing_id = await _create_billing(client, auth_headers_a, plan_id)

@@ -172,9 +172,26 @@ class BillingCoparticipationConfirmationRequest(BaseModel):
     confirma (ou não) que a coparticipação cobrada foi de fato recebida
     do paciente. `received=False` é um vazamento de receita PROVADO
     (diferente de nunca ter sido confirmado, que é o estado NULL padrão
-    — ver DECISÃO completa em 043_coparticipation_confirmation.sql)."""
+    — ver DECISÃO completa em 043_coparticipation_confirmation.sql).
+
+    `payment_method`/`installments` são opcionais — "Mapa de Dados
+    Insighta" (Domínio Financeiro particular, Onda 1): este é o momento
+    real de checkout do particular (recepção confirmando o que o
+    paciente pagou na hora), o ponto de captura natural pra COMO ele
+    pagou, não só QUANTO. Só fazem sentido quando `received=True` — o
+    service ignora os dois quando `received=False` (nada foi pago, não
+    há forma de pagamento pra registrar)."""
 
     received: bool
+    payment_method: str | None = None
+    installments: int | None = Field(default=None, ge=1)
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v: str | None) -> str | None:
+        if v is not None and v not in PAYMENT_METHOD_VALUES:
+            raise ValueError(f"payment_method deve ser um de: {', '.join(PAYMENT_METHOD_VALUES)}.")
+        return v
 
 
 class BillingClinicalDocumentationConfirmationRequest(BaseModel):
