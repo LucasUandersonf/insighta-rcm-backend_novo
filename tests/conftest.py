@@ -134,6 +134,7 @@ _SCHEMA_FILES = [
     "041_network_revenue_growth_benchmark.sql",
     "042_organizations.sql",
     "043_coparticipation_confirmation.sql",
+    "044_opme_documentation_confirmation.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

@@ -856,6 +856,12 @@ class AnalyticsService:
         coparticipation_unconfirmed_value, coparticipation_unconfirmed_count = (
             await self.analytics_repo.coparticipation_unconfirmed_summary(date_from, date_to)
         )
+        # Épico F2.3 — mesmo raciocínio de coparticipation_unconfirmed_*
+        # acima: "estado AGORA", só o período atual é lido por
+        # _opme_documentation_unconfirmed_insight.
+        opme_documentation_unconfirmed_value, opme_documentation_unconfirmed_count = (
+            await self.analytics_repo.opme_documentation_unconfirmed_summary(date_from, date_to)
+        )
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
@@ -898,6 +904,8 @@ class AnalyticsService:
             total_billing_count=total_billing_count,
             coparticipation_unconfirmed_value=coparticipation_unconfirmed_value,
             coparticipation_unconfirmed_count=coparticipation_unconfirmed_count,
+            opme_documentation_unconfirmed_value=opme_documentation_unconfirmed_value,
+            opme_documentation_unconfirmed_count=opme_documentation_unconfirmed_count,
             stale_open_lotes_count=stale_open_lotes[0],
             oldest_open_lote_age_days=stale_open_lotes[1],
             avg_days_to_receive=payment_lag_days,

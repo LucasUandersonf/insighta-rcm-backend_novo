@@ -23,6 +23,7 @@ from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.billing import (
+    BillingClinicalDocumentationConfirmationRequest,
     BillingCoparticipationConfirmationRequest,
     BillingCreateRequest,
     BillingResponse,
@@ -131,3 +132,24 @@ async def confirm_coparticipation(
     fato recebida do paciente.
     """
     return await _build_service(db).confirm_coparticipation(current_user.tenant_id, UUID(current_user.id), billing_id, payload)
+
+
+@router.post("/{billing_id}/confirm-clinical-documentation", response_model=BillingResponse)
+async def confirm_clinical_documentation(
+    billing_id: UUID,
+    payload: BillingClinicalDocumentationConfirmationRequest,
+    db: DbSession,
+    # financeiro/admin/owner — mesmo RBAC do resto de billing.py (não
+    # `atendimento`, diferente de confirm-coparticipation): conferir
+    # prescrição/evolução no prontuário é uma tarefa de auditoria de
+    # faturamento antes de enviar a guia, não algo feito na recepção.
+    current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
+) -> BillingResponse:
+    """
+    Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    × conta") — versão restrita (sem NLP): confirma (ou não) que existe
+    registro de prescrição/evolução sustentando este item OPME.
+    """
+    return await _build_service(db).confirm_clinical_documentation(
+        current_user.tenant_id, UUID(current_user.id), billing_id, payload
+    )

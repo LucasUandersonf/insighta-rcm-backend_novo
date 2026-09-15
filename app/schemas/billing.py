@@ -96,6 +96,11 @@ class BillingResponse(BaseModel):
     # nunca um false inventado).
     coparticipation_received: bool | None
     coparticipation_confirmed_at: datetime | None
+    # Épico F2.3 — ver DECISÃO completa em
+    # 044_opme_documentation_confirmation.sql (NULL = ainda não
+    # conferido, nunca um false inventado).
+    clinical_documentation_confirmed: bool | None
+    clinical_documentation_confirmed_at: datetime | None
 
     model_config = {"from_attributes": True}  # permite construir a partir do ORM model
 
@@ -126,6 +131,11 @@ class BillingSearchItem(BaseModel):
     # antes de oferecer o botão "confirmar recebida/não recebida".
     coparticipation_value: float | None
     coparticipation_received: bool | None
+    # Épico F2.3 — a tela de auditoria documental (OPME) usa o MESMO
+    # BillingSearchPicker das outras (settle, denial-appeal,
+    # coparticipação); precisa saber se a linha é OPME e o estado atual
+    # da conferência antes de oferecer o botão "confirmar presente/ausente".
+    clinical_documentation_confirmed: bool | None
 
 
 class BillingSettleRequest(BaseModel):
@@ -149,3 +159,14 @@ class BillingCoparticipationConfirmationRequest(BaseModel):
     — ver DECISÃO completa em 043_coparticipation_confirmation.sql)."""
 
     received: bool
+
+
+class BillingClinicalDocumentationConfirmationRequest(BaseModel):
+    """Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+    prontuário × conta"). Confirma (ou não) que existe registro de
+    prescrição/evolução sustentando este item OPME. `found=False` é um
+    risco de glosa documental PROVADO (diferente de nunca ter sido
+    conferido, que é o estado NULL padrão — ver DECISÃO completa em
+    044_opme_documentation_confirmation.sql)."""
+
+    found: bool

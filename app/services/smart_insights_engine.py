@@ -213,6 +213,15 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
+# conta") — amostra mínima de linhas OPME não conferidas antes de virar
+# card, mesmo raciocínio de _MIN_COPARTICIPATION_SAMPLE: 1-2 linhas
+# esquecidas é ruído operacional do dia a dia, não um padrão. Menor que
+# o de coparticipação de propósito: OPME já é, por natureza, uma fatia
+# pequena e de ALTO valor do faturamento — exigir 5 quase nunca
+# disparava em clínicas menores.
+_MIN_OPME_DOCUMENTATION_SAMPLE = 2
+
 # Raio-X da Receita — achado do Parecer Técnico "Boletim Insighta"
 # (revisão 2, 14/09): _coparticipation_visibility_insight só dispara UMA
 # vez (a "estreia" do dado); nada acompanhava a fatia de coparticipação
@@ -441,6 +450,14 @@ class InsightsPeriodInput:
     # de confirmação do período anterior" com sentido de negócio.
     coparticipation_unconfirmed_value: float = 0.0
     coparticipation_unconfirmed_count: int = 0
+    # Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+    # prontuário × conta") — de todo item OPME cobrado, quanto ainda não
+    # foi conferido como tendo prescrição/evolução no prontuário (ver
+    # AnalyticsRepository.opme_documentation_unconfirmed_summary).
+    # Estado "AGORA", mesmo raciocínio de coparticipation_unconfirmed_*
+    # acima: só o período atual recebe o valor real.
+    opme_documentation_unconfirmed_value: float = 0.0
+    opme_documentation_unconfirmed_count: int = 0
     # Lotes de faturamento (core.lotes) com status='aberto' há mais de
     # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
     # — ver AnalyticsService._period_insights_input e
@@ -954,6 +971,38 @@ def _coparticipation_unconfirmed_insight(current: InsightsPeriodInput) -> Insigh
             "confirmar cada um — cobrado no papel não é o mesmo que recebido de verdade."
         ),
         financial_impact=current.coparticipation_unconfirmed_value,
+    )
+
+
+def _opme_documentation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    × conta") — versão RESTRITA explicitamente pedida no roadmap: "checar
+    presença de registro de prescrição/evolução para procedimentos de
+    alto valor (OPME), sem NLP semântico". Este insight nunca lê nem
+    interpreta prontuário nenhum — só soma o que foi cobrado como OPME
+    (item_type='material_opme') mas ainda não foi CONFERIDO por um
+    humano como tendo prescrição/evolução no prontuário
+    (Billing.clinical_documentation_confirmed NULL) ou conferido que NÃO
+    tem (FALSE) — um risco de glosa documental real, mesma mecânica de
+    _coparticipation_unconfirmed_insight acima.
+    """
+    if (
+        current.opme_documentation_unconfirmed_count < _MIN_OPME_DOCUMENTATION_SAMPLE
+        or current.opme_documentation_unconfirmed_value <= 0
+    ):
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem item de material especial (OPME) sem conferência documental",
+        message=(
+            f"R$ {current.opme_documentation_unconfirmed_value:,.2f} em {current.opme_documentation_unconfirmed_count} "
+            "item(ns) de OPME (órtese/prótese/material especial) neste período ainda não foram conferidos quanto à "
+            "presença de prescrição/evolução no prontuário. OPME é uma das maiores fontes de glosa de alto valor — "
+            "vale confirmar o registro clínico ANTES de enviar a guia ao convênio."
+        ),
+        financial_impact=current.opme_documentation_unconfirmed_value,
     )
 
 
@@ -1854,6 +1903,7 @@ def generate_insights(
         _coparticipation_visibility_insight(current, previous),
         _coparticipation_growth_insight(current, previous),
         _coparticipation_unconfirmed_insight(current),
+        _opme_documentation_unconfirmed_insight(current),
         _revenue_concentration_insight(current),
         _marketing_roi_insight(current, previous),
     ):

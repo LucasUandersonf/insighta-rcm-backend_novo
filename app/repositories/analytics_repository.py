@@ -1028,6 +1028,31 @@ class AnalyticsRepository:
         unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
         return float(unconfirmed_total), int(unconfirmed_count)
 
+    async def opme_documentation_unconfirmed_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+        prontuário × conta") — de todo item OPME cobrado no período
+        (item_type='material_opme'), quanto ainda NÃO foi conferido como
+        tendo prescrição/evolução no prontuário
+        (clinical_documentation_confirmed NULL — nunca conferido) OU foi
+        conferido que NÃO tem (FALSE — risco de glosa documental
+        provado). Mesmo formato de coparticipation_unconfirmed_summary
+        acima — ver DECISÃO completa em
+        044_opme_documentation_confirmation.sql.
+
+        Retorna (valor_nao_conferido, contagem) — alimenta
+        smart_insights_engine.py::_opme_documentation_unconfirmed_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0), func.count()).where(
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.item_type == "material_opme",
+            Billing.clinical_documentation_confirmed.is_not(True),
+        )
+        unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
+        return float(unconfirmed_total), int(unconfirmed_count)
+
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/
         'high') faturado no período — alimenta o insight "X% do valor

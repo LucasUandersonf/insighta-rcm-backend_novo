@@ -837,6 +837,44 @@ def test_coparticipation_unconfirmed_insight_absent_without_any_unconfirmed_valu
     assert generate_insights(current, _EMPTY_PERIOD) == []
 
 
+# ---------------------------------------------------------------------
+# Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
+# conta") — quanto do que foi cobrado como OPME ainda não foi conferido
+# quanto à presença de prescrição/evolução no prontuário.
+# ---------------------------------------------------------------------
+
+
+def test_opme_documentation_unconfirmed_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=1600.0, opme_documentation_unconfirmed_count=2,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 1600.0
+    assert "sem conferência documental" in insights[0].title.lower()
+
+
+def test_opme_documentation_unconfirmed_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=800.0, opme_documentation_unconfirmed_count=1,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_opme_documentation_unconfirmed_insight_absent_without_any_unconfirmed_value():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=0.0, opme_documentation_unconfirmed_count=0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""

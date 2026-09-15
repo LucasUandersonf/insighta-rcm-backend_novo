@@ -81,4 +81,17 @@ class Billing(Base):
     coparticipation_received: Mapped[bool | None] = mapped_column(Boolean)
     coparticipation_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     coparticipation_confirmed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("core.users.id"))
+    # Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    # × conta"). Versão RESTRITA (sem NLP semântico): confirmação de que
+    # existe registro de prescrição/evolução sustentando este item OPME
+    # (item_type == 'material_opme'). NULL = ainda não conferido (estado
+    # inicial, nunca DEFAULT false — mesmo princípio de
+    # coparticipation_received acima, ver DECISÃO completa em
+    # 044_opme_documentation_confirmation.sql), FALSE = conferido e o
+    # registro NÃO foi encontrado (risco de glosa documental provado).
+    clinical_documentation_confirmed: Mapped[bool | None] = mapped_column(Boolean)
+    clinical_documentation_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    clinical_documentation_confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("core.users.id")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
