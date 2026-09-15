@@ -5,6 +5,7 @@ from app.services.health_score_engine import (
     _NO_SHOW_RATE_CEILING,
     compute_health_score,
     resolve_health_score_ceilings,
+    resolve_no_show_ceiling_for_period,
     suggest_denial_rate_ceiling,
     suggest_no_show_rate_ceiling,
 )
@@ -159,3 +160,77 @@ def test_suggest_no_show_rate_ceiling_with_enough_months():
     value, sample_size = result
     assert sample_size == 6
     assert value >= 0.25
+
+
+# ---------------------------------------------------------------------
+# "Junta Técnica Insighta" — calibração do teto de falta por
+# especialidade DENTRO do mesmo tenant (nunca uma tabela de benchmark
+# externa por especialidade médica).
+# ---------------------------------------------------------------------
+
+
+def test_single_specialty_period_keeps_the_flat_default_ceiling():
+    # Só 1 especialidade contribuiu no período -> não há "mistura" pra
+    # calibrar, o teto continua o de sempre (comportamento inalterado
+    # pra maioria das clínicas, de especialidade única).
+    ceiling = resolve_no_show_ceiling_for_period(
+        None,
+        counts_by_specialty={"Urologia": (10, 40)},
+        monthly_rates_by_specialty={"Urologia": [0.05] * 6},
+    )
+    assert ceiling == _NO_SHOW_RATE_CEILING
+
+
+def test_no_specialty_data_keeps_the_flat_default_ceiling():
+    ceiling = resolve_no_show_ceiling_for_period(None, counts_by_specialty={}, monthly_rates_by_specialty={})
+    assert ceiling == _NO_SHOW_RATE_CEILING
+
+
+def test_explicit_tenant_ceiling_always_wins_over_specialty_mix():
+    # Mesmo com 2+ especialidades no período, um teto configurado
+    # manualmente pelo gestor nunca é sobrescrito pela calibração
+    # automática (mesmo princípio de "escolha explícita sempre vence"
+    # do resto do produto).
+    tenant = _FakeTenant(no_show_ceiling=0.55)
+    ceiling = resolve_no_show_ceiling_for_period(
+        tenant,
+        counts_by_specialty={"Urologia": (20, 80), "Pneumologia": (5, 100)},
+        monthly_rates_by_specialty={"Urologia": [0.25] * 6, "Pneumologia": [0.10] * 6},
+    )
+    assert ceiling == 0.55
+
+
+def test_multi_specialty_period_blends_each_specialtys_own_ceiling_weighted_by_volume():
+    # Urologia (25% de falta histórica, P90 puxa pra ~0.25) domina o
+    # volume do período (80 de 100 atendimentos) -> o teto ponderado
+    # deveria ficar bem mais perto do teto da Urologia do que do teto,
+    # bem mais baixo, da Pneumologia (10%).
+    ceiling = resolve_no_show_ceiling_for_period(
+        None,
+        counts_by_specialty={"Urologia": (20, 80), "Pneumologia": (5, 20)},
+        monthly_rates_by_specialty={
+            "Urologia": [0.20, 0.22, 0.24, 0.25, 0.26, 0.28],
+            "Pneumologia": [0.08, 0.09, 0.10, 0.11, 0.12, 0.13],
+        },
+    )
+    assert ceiling is not None
+    # Entre os dois tetos individuais, mas puxado pro lado de maior volume.
+    assert 0.20 < ceiling < 0.26
+    # E mais perto do teto de Urologia (maior peso) do que da média simples.
+    simple_average = (0.28 + 0.13) / 2  # aproximação grosseira dos P90 de cada série
+    assert abs(ceiling - 0.28) < abs(ceiling - simple_average)
+
+
+def test_specialty_without_enough_own_history_falls_back_to_default_ceiling_for_its_share():
+    # Pneumologia tem volume no período mas SEM histórico mensal
+    # suficiente (menos de MIN_MONTHS_FOR_CEILING_SUGGESTION meses) ->
+    # essa fatia usa o default de 40%, nunca inventa uma confiança que a
+    # amostra não sustenta.
+    ceiling = resolve_no_show_ceiling_for_period(
+        None,
+        counts_by_specialty={"Urologia": (20, 50), "Pneumologia": (5, 50)},
+        monthly_rates_by_specialty={"Urologia": [0.20] * 6, "Pneumologia": [0.05, 0.06]},
+    )
+    assert ceiling is not None
+    expected = (0.20 * 50 + _NO_SHOW_RATE_CEILING * 50) / 100
+    assert abs(ceiling - expected) < 1e-9

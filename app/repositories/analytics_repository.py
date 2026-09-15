@@ -1474,6 +1474,42 @@ class AnalyticsRepository:
         no_show, total = (await self.session.execute(stmt)).one()
         return int(no_show or 0), int(total or 0)
 
+    async def no_show_rate_by_specialty(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
+        """
+        Mesmo cálculo de `overall_no_show_rate` acima, mas quebrado por
+        `Professional.specialty` — "Junta Técnica Insighta" (calibração de
+        risco de falta por especialidade DENTRO da mesma clínica
+        multiespecialidade, não uma tabela de benchmark externa por
+        especialidade médica — ver DECISÃO em threshold_calibration.py
+        sobre por que a Insighta nunca inventaria essa autoridade).
+        Alimenta health_score_engine.resolve_no_show_ceiling_for_period.
+
+        Só entram atendimentos com profissional identificado E com
+        `specialty` preenchido — um agendamento sem profissional vinculado
+        ou um profissional sem especialidade cadastrada não tem como
+        contribuir pra nenhum grupo (continua contando na taxa AGREGADA de
+        `overall_no_show_rate`, só fica de fora desta quebra).
+        """
+        from app.models.professional import Professional
+
+        start, end = _bounds(date_from, date_to)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(Professional.specialty, no_show_expr, total_expr)
+            .select_from(Appointment)
+            .join(Professional, Professional.id == Appointment.professional_id)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show")),
+                Professional.specialty.is_not(None),
+            )
+            .group_by(Professional.specialty)
+        )
+        result = await self.session.execute(stmt)
+        return {specialty: (int(no_show or 0), int(total or 0)) for specialty, no_show, total in result.all()}
+
     async def data_completeness_by_user(
         self, date_from: date, date_to: date, *, min_sample: int = 5
     ) -> list[tuple[str, str, int, int]]:

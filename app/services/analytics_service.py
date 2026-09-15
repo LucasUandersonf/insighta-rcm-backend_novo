@@ -86,6 +86,7 @@ from app.services.capacity_service import CapacityService, estimate_idle_capacit
 from app.services.health_score_engine import (
     compute_health_score,
     resolve_health_score_ceilings,
+    resolve_no_show_ceiling_for_period,
     suggest_denial_rate_ceiling,
     suggest_no_show_rate_ceiling,
 )
@@ -324,6 +325,26 @@ async def monthly_no_show_rates(
         if total > 0:
             rates.append(no_show_count / total)
     return rates
+
+
+async def monthly_no_show_rates_by_specialty(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> dict[str, list[float]]:
+    """Mesma série de `monthly_no_show_rates` acima, quebrada por
+    especialidade do profissional — "Junta Técnica Insighta": insumo de
+    health_score_engine.resolve_no_show_ceiling_for_period (calibração
+    por especialidade DENTRO do próprio histórico da clínica, nunca um
+    benchmark externo — ver DECISÃO em threshold_calibration.py). Só
+    entram meses com pelo menos 1 atendimento resolvido NAQUELA
+    especialidade — mesmo critério "sem amostra != 0%" de sempre."""
+    rates_by_specialty: dict[str, list[float]] = {}
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        counts = await analytics_repo.no_show_rate_by_specialty(start, end)
+        for specialty, (no_show_count, total) in counts.items():
+            if total > 0:
+                rates_by_specialty.setdefault(specialty, []).append(no_show_count / total)
+    return rates_by_specialty
 
 
 def _regroup_text_counts(breakdown: dict[str, int]) -> dict[str, int]:
@@ -1279,13 +1300,18 @@ class AnalyticsService:
         especialidade/porte"): busca o tenant só para resolver os tetos
         configurados (ver resolve_health_score_ceilings) — mesmo padrão de
         get_smart_insights reaproveitando `self.tenant_repo`.
+
+        "Junta Técnica Insighta": o teto de falta (`no_show_rate_ceiling`)
+        agora também considera a MISTURA de especialidades do período —
+        ver DECISÃO completa em
+        health_score_engine.resolve_no_show_ceiling_for_period.
         """
         today = date.today()
         window_start_date = today - timedelta(days=_HEALTH_SCORE_WINDOW_DAYS)
         window_start_dt = datetime.combine(window_start_date, datetime.min.time(), tzinfo=timezone.utc)
 
         tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
-        denial_rate_ceiling, no_show_rate_ceiling = resolve_health_score_ceilings(tenant)
+        denial_rate_ceiling, _default_no_show_rate_ceiling = resolve_health_score_ceilings(tenant)
 
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(window_start_date, today)
         denial_risk_pct_0_100, _denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
@@ -1297,6 +1323,19 @@ class AnalyticsService:
         denial_risk_pct = denial_risk_pct_0_100 / 100 if denial_risk_pct_0_100 is not None else None
         no_show_count, no_show_total = await self.analytics_repo.overall_no_show_rate(window_start_date, today)
         appeal_counts = await self.appeal_repo.count_resolved_by_status(since=window_start_dt)
+
+        no_show_rate_ceiling = _default_no_show_rate_ceiling
+        if no_show_total > 0 and (tenant is None or tenant.health_score_no_show_ceiling is None):
+            # Só busca a quebra por especialidade quando de fato existe um
+            # componente de falta pra calcular E o gestor não configurou um
+            # teto manual (que sempre vence, ver resolve_no_show_ceiling_for_period)
+            # — evita 2 queries extras num tenant novo sem atendimento
+            # resolvido ainda, ou que já fez a própria calibração.
+            counts_by_specialty = await self.analytics_repo.no_show_rate_by_specialty(window_start_date, today)
+            monthly_rates_by_specialty = await monthly_no_show_rates_by_specialty(self.analytics_repo)
+            no_show_rate_ceiling = resolve_no_show_ceiling_for_period(
+                tenant, counts_by_specialty=counts_by_specialty, monthly_rates_by_specialty=monthly_rates_by_specialty
+            )
 
         result = compute_health_score(
             denial_risk_pct=denial_risk_pct,

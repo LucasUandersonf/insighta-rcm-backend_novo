@@ -14,6 +14,50 @@ import pytest
 from sqlalchemy import text
 
 
+def _month_back_date(months_back: int) -> datetime:
+    """Um dia (dia 10, meio do mês, nunca vira o mês por engano) dentro do
+    mês `months_back` meses atrás do mês corrente — mesma convenção de
+    app.services.analytics_service._preceding_month_bounds, reimplementada
+    aqui pra semear histórico mensal sem importar uma função privada do
+    service."""
+    today = date.today()
+    year, month = today.year, today.month - months_back
+    while month <= 0:
+        month += 12
+        year -= 1
+    return datetime(year, month, 10, 12, 0, tzinfo=timezone.utc)
+
+
+async def _create_professional(admin_engine, tenant_id, *, specialty: str) -> str:
+    professional_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.professionals (id, tenant_id, full_name, specialty) VALUES (:id, :t, :name, :specialty)"),
+            {"id": professional_id, "t": tenant_id, "name": f"Dr(a). {specialty}", "specialty": specialty},
+        )
+    return professional_id
+
+
+async def _seed_appointments(admin_engine, tenant_id, patient_id, professional_id, *, scheduled_at, no_show_count, completed_count):
+    async with admin_engine.begin() as conn:
+        for _ in range(no_show_count):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.appointments (tenant_id, patient_id, professional_id, scheduled_at, status) "
+                    "VALUES (:t, :p, :prof, :dt, 'no_show')"
+                ),
+                {"t": tenant_id, "p": patient_id, "prof": professional_id, "dt": scheduled_at},
+            )
+        for _ in range(completed_count):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.appointments (tenant_id, patient_id, professional_id, scheduled_at, status) "
+                    "VALUES (:t, :p, :prof, :dt, 'completed')"
+                ),
+                {"t": tenant_id, "p": patient_id, "prof": professional_id, "dt": scheduled_at},
+            )
+
+
 async def _create_insurance_plan(admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional") -> str:
     plan_id = str(uuid.uuid4())
     async with admin_engine.begin() as conn:
@@ -382,3 +426,77 @@ async def test_health_score_isolates_between_tenants(client, auth_headers_a, aut
     # Tenant B não tem nenhum dado próprio -> nunca deveria enxergar o
     # billing de risco alto do tenant A (RLS).
     assert response_b.json()["score"] is None
+
+
+# ---------------------------------------------------------------------
+# "Junta Técnica Insighta" — teto de falta calibrado por especialidade
+# DENTRO do mesmo tenant (ver DECISÃO completa em
+# health_score_engine.resolve_no_show_ceiling_for_period). O motor puro já
+# é coberto sem banco em test_health_score_engine.py — este teste prova a
+# FIAÇÃO ponta a ponta: que AnalyticsService.get_health_score de fato
+# busca a quebra por especialidade e o histórico mensal reais do banco.
+# ---------------------------------------------------------------------
+
+
+async def test_health_score_no_show_ceiling_is_calibrated_by_specialty_mix(client, auth_headers_a, admin_engine, tenant_a):
+    """
+    Pneumologia (baixa falta histórica, 10%) domina o volume do período
+    (80 de 100 atendimentos); Urologia (falta histórica alta, 30%) é
+    minoria (20 de 100). A taxa de falta OBSERVADA no período é 20% —
+    abaixo do teto fixo de 40% (nota positiva, sub_score 50 se o teto
+    continuasse fixo), mas ACIMA do teto ponderado pela mistura real desta
+    clínica (0,10*80 + 0,30*20) / 100 = 0,14 -> sub_score deveria cair pra
+    0 (pior nota possível), exatamente o "risco real que passava batido"
+    citado pela junta técnica pra uma clínica de especialidade de baixa
+    falta.
+    """
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Multiespecialidade"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    pneumologia_id = await _create_professional(admin_engine, tenant_a, specialty="Pneumologia")
+    urologia_id = await _create_professional(admin_engine, tenant_a, specialty="Urologia")
+
+    # Histórico dos últimos 6 meses FECHADOS fora da janela de 90 dias do
+    # score atual (meses 7 a 12 atrás) — 10%/mês pra Pneumologia, 30%/mês
+    # pra Urologia, cada um com amostra suficiente (10 atendimentos/mês
+    # >= MIN_MONTHS_FOR_CEILING_SUGGESTION em número de MESES, não de
+    # atendimentos por mês).
+    for months_back in range(7, 13):
+        when = _month_back_date(months_back)
+        await _seed_appointments(admin_engine, tenant_a, patient_id, pneumologia_id, scheduled_at=when, no_show_count=1, completed_count=9)
+        await _seed_appointments(admin_engine, tenant_a, patient_id, urologia_id, scheduled_at=when, no_show_count=3, completed_count=7)
+
+    # Período atual (dentro da janela de 90 dias) — mesma taxa agregada de
+    # 20% em ambas as especialidades, só o VOLUME é bem desbalanceado.
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    await _seed_appointments(admin_engine, tenant_a, patient_id, pneumologia_id, scheduled_at=yesterday, no_show_count=16, completed_count=64)
+    await _seed_appointments(admin_engine, tenant_a, patient_id, urologia_id, scheduled_at=yesterday, no_show_count=4, completed_count=16)
+
+    response = await client.get("/api/v1/analytics/health-score", headers=auth_headers_a)
+    assert response.status_code == 200
+    no_show_component = next(c for c in response.json()["components"] if c["key"] == "no_show")
+    assert no_show_component["rate"] == pytest.approx(0.20)  # taxa agregada continua a mesma de sempre
+    assert no_show_component["sub_score"] == 0.0  # mas o teto ponderado por especialidade já a considera pior caso
+
+
+async def test_health_score_no_show_ceiling_stays_flat_for_single_specialty_clinic(client, auth_headers_a, admin_engine, tenant_a):
+    """Controle: SÓ Pneumologia no período (sem mistura de
+    especialidade) -> o teto continua o default fixo de 40%, mesmo
+    comportamento de antes desta calibração (a maioria das clínicas é de
+    especialidade única)."""
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Especialidade Única"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+    pneumologia_id = await _create_professional(admin_engine, tenant_a, specialty="Pneumologia")
+
+    for months_back in range(7, 13):
+        when = _month_back_date(months_back)
+        await _seed_appointments(admin_engine, tenant_a, patient_id, pneumologia_id, scheduled_at=when, no_show_count=1, completed_count=9)
+
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    await _seed_appointments(admin_engine, tenant_a, patient_id, pneumologia_id, scheduled_at=yesterday, no_show_count=20, completed_count=80)
+
+    response = await client.get("/api/v1/analytics/health-score", headers=auth_headers_a)
+    assert response.status_code == 200
+    no_show_component = next(c for c in response.json()["components"] if c["key"] == "no_show")
+    assert no_show_component["rate"] == pytest.approx(0.20)
+    assert no_show_component["sub_score"] == pytest.approx(50.0)  # 100*(1 - 0.20/0.40), teto default inalterado
