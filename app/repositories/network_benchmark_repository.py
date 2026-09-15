@@ -20,10 +20,17 @@ class NetworkBenchmarkRow:
     your_denial_sample: int
     network_denial_median: float | None  # None = cohort abaixo do mínimo, nunca "0%"
     denial_cohort_size: int
+    # "Mapa de Dados Insighta" — pilar Comparativo & rede: True quando o
+    # cohort foi filtrado pela MESMA Tenant.specialty do solicitante
+    # (ver DECISÃO completa em 048_network_benchmark_specialty_segment.sql);
+    # False = usou o cohort geral (sem specialty própria, ou cohort
+    # segmentado abaixo do mínimo).
+    denial_cohort_is_segmented: bool
     your_no_show_rate: float | None
     your_no_show_sample: int
     network_no_show_median: float | None
     no_show_cohort_size: int
+    no_show_cohort_is_segmented: bool
 
 
 @dataclass
@@ -67,8 +74,10 @@ class NetworkBenchmarkRepository:
             your_denial_sample=int(row.your_denial_sample),
             network_denial_median=float(row.network_denial_median) if row.network_denial_median is not None else None,
             denial_cohort_size=int(row.denial_cohort_size),
+            denial_cohort_is_segmented=bool(row.denial_cohort_is_segmented),
             your_no_show_rate=float(row.your_no_show_rate) if row.your_no_show_rate is not None else None,
             your_no_show_sample=int(row.your_no_show_sample),
             network_no_show_median=float(row.network_no_show_median) if row.network_no_show_median is not None else None,
             no_show_cohort_size=int(row.no_show_cohort_size),
+            no_show_cohort_is_segmented=bool(row.no_show_cohort_is_segmented),
         )

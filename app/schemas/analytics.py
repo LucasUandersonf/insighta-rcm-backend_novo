@@ -522,6 +522,10 @@ class NetworkBenchmarkMetric(BaseModel):
     your_sample: int
     network_median: float | None
     cohort_size: int
+    # "Mapa de Dados Insighta" — pilar Comparativo & rede: True quando o
+    # cohort foi filtrado pela MESMA especialidade da clínica (ver
+    # DECISÃO completa em 048_network_benchmark_specialty_segment.sql).
+    cohort_is_segmented_by_specialty: bool
 
 
 class NetworkBenchmarkResponse(BaseModel):

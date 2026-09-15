@@ -46,6 +46,7 @@ class NetworkBenchmarkService:
                     your_sample=row.your_denial_sample,
                     network_median=row.network_denial_median,
                     cohort_size=row.denial_cohort_size,
+                    cohort_is_segmented_by_specialty=row.denial_cohort_is_segmented,
                 ),
                 NetworkBenchmarkMetric(
                     key="no_show",
@@ -54,6 +55,7 @@ class NetworkBenchmarkService:
                     your_sample=row.your_no_show_sample,
                     network_median=row.network_no_show_median,
                     cohort_size=row.no_show_cohort_size,
+                    cohort_is_segmented_by_specialty=row.no_show_cohort_is_segmented,
                 ),
             ],
             window_days=_WINDOW_DAYS,

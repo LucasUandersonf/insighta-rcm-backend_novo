@@ -307,6 +307,11 @@ _POST_UPGRADE_SQL_FILES = [
     # _POST_UPGRADE_MARKER_TABLE), não roda incondicionalmente em todo
     # deploy. Ver DECISÃO completa no próprio .sql.
     "047_professional_planned_absences.sql",
+    # "Mapa de Dados Insighta" — pilar Comparativo & rede. DROP + CREATE
+    # FUNCTION — idempotente por construção (sempre substitui a mesma
+    # função), roda em todo deploy sem marcador. Ver DECISÃO completa no
+    # próprio .sql.
+    "048_network_benchmark_specialty_segment.sql",
 ]
 
 _ROLES_SQL = """
