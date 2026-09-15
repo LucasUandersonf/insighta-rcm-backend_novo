@@ -348,13 +348,17 @@ async def get_organization_summary(
 @router.get("/oportunidades", response_model=OportunidadesResponse)
 async def get_oportunidades(
     db: DbSessionNoTenant,
+    tenant_db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
 ) -> OportunidadesResponse:
     # DbSessionNoTenant pelo mesmo motivo do Comparativo acima (ver
     # DECISÃO em app/sql/033_network_contract_price_benchmark.sql): esta
     # rota também escapa do RLS de propósito para cruzar preço de
-    # contrato entre clínicas.
-    service = OportunidadesService(ContractPriceBenchmarkRepository(db))
+    # contrato entre clínicas. `tenant_db` (RLS normal) é usado só para
+    # ler os PRÓPRIOS contratos deste tenant (renovação vencendo) — ver
+    # DECISÃO em OportunidadesService.get_oportunidades ("Junta Técnica
+    # Insighta").
+    service = OportunidadesService(ContractPriceBenchmarkRepository(db), ContractRepository(tenant_db))
     return await service.get_oportunidades(uuid.UUID(current_user.tenant_id))
 
 

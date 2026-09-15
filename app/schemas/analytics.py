@@ -590,6 +590,16 @@ class OportunidadeItem(BaseModel):
     gap_value: float  # network_median_price - your_price, sempre > 0
     gap_pct: float  # gap_value / your_price
     estimated_monthly_opportunity: float  # gap_value * monthly_volume
+    # "Junta Técnica Insighta" — junta o ranking de oportunidade com o
+    # alerta de renovação de contrato (ver DECISÃO completa em
+    # OportunidadesService.get_oportunidades): quando o CONVÊNIO desta
+    # linha tem um contrato vencendo nos próximos
+    # CONTRACT_RENEWAL_PREP_HORIZON_DAYS sem renovação já cadastrada,
+    # ambos vêm preenchidos — é o momento de levar o gap de preço PARA a
+    # negociação de renovação, não duas conversas separadas. None = sem
+    # contrato vencendo nesse horizonte (ou já tem renovação cadastrada).
+    days_until_contract_renewal: int | None = None
+    contract_valid_until: date | None = None
 
 
 class OportunidadesResponse(BaseModel):
