@@ -239,3 +239,54 @@ async def test_atendimento_cannot_add_planned_absence(client, admin_engine, tena
         headers=headers,
     )
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------
+# "Mapa de Dados Insighta" — Domínio Profissional (Onda 2):
+# contract_type/commission_rate, alimenta a Rentabilidade por
+# profissional para quem é remunerado por comissão (PJ/autônomo/
+# cooperado), não custo fixo (CLT).
+# ---------------------------------------------------------------------
+
+
+async def test_create_professional_with_contract_type_and_commission_rate(client, auth_headers_a):
+    create_resp = await client.post(
+        "/api/v1/professionals",
+        json={"full_name": "Dra. Comissionada", "contract_type": "pj", "commission_rate": 35.5},
+        headers=auth_headers_a,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()
+    assert body["contract_type"] == "pj"
+    assert body["commission_rate"] == 35.5
+
+
+async def test_create_professional_rejects_unknown_contract_type(client, auth_headers_a):
+    response = await client.post(
+        "/api/v1/professionals",
+        json={"full_name": "Dra. Inválida", "contract_type": "estagiario"},
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_professional_rejects_commission_rate_out_of_range(client, auth_headers_a):
+    response = await client.post(
+        "/api/v1/professionals",
+        json={"full_name": "Dra. Fora do Range", "contract_type": "pj", "commission_rate": 150},
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_fills_in_contract_type_and_commission_rate_later(client, auth_headers_a):
+    professional_id = await _create_professional(client, auth_headers_a, full_name="Dr. Fica CLT")
+    patch_resp = await client.patch(
+        f"/api/v1/professionals/{professional_id}",
+        json={"contract_type": "clt", "commission_rate": 0},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    body = patch_resp.json()
+    assert body["contract_type"] == "clt"
+    assert body["commission_rate"] == 0

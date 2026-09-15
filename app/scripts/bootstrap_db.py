@@ -322,6 +322,12 @@ _POST_UPGRADE_SQL_FILES = [
     # ADD COLUMN IF NOT EXISTS — auto-idempotente, roda em todo deploy,
     # sem entrar em _POST_UPGRADE_MARKER_TABLE.
     "050_appointment_addon_upsell.sql",
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 2), pilar
+    # Rentabilidade por profissional. Ver DECISÃO completa no próprio
+    # .sql. ADD COLUMN IF NOT EXISTS + CHECK guardado por DO $$ —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "051_professional_contract_commission.sql",
 ]
 
 _ROLES_SQL = """

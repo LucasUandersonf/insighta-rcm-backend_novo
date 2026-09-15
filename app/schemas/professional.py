@@ -1,7 +1,9 @@
 from datetime import date, datetime, time
 from uuid import UUID
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+from app.models.professional import CONTRACT_TYPE_VALUES
 
 
 class AvailabilityBlockRequest(BaseModel):
@@ -22,10 +24,27 @@ class ProfessionalCreateRequest(BaseModel):
     full_name: str
     professional_registry: str | None = None
     specialty: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 2).
+    contract_type: str | None = None
+    commission_rate: float | None = None
     # Grade semanal já cadastrada de uma vez, junto com o profissional —
     # evita duas chamadas de API para o caso comum (cadastrar profissional
     # já com seus horários fixos).
     availability: list[AvailabilityBlockRequest] = []
+
+    @field_validator("contract_type")
+    @classmethod
+    def validate_contract_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in CONTRACT_TYPE_VALUES:
+            raise ValueError(f"contract_type deve ser um de: {', '.join(CONTRACT_TYPE_VALUES)}")
+        return v
+
+    @field_validator("commission_rate")
+    @classmethod
+    def validate_commission_rate(cls, v: float | None) -> float | None:
+        if v is not None and not (0 <= v <= 100):
+            raise ValueError("commission_rate deve estar entre 0 e 100.")
+        return v
 
 
 class AvailabilityBlockResponse(BaseModel):
@@ -50,7 +69,24 @@ class ProfessionalUpdateRequest(BaseModel):
     professional_registry: str | None = None
     specialty: str | None = None
     is_active: bool | None = None
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 2).
+    contract_type: str | None = None
+    commission_rate: float | None = None
     availability: list[AvailabilityBlockRequest] | None = None
+
+    @field_validator("contract_type")
+    @classmethod
+    def validate_contract_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in CONTRACT_TYPE_VALUES:
+            raise ValueError(f"contract_type deve ser um de: {', '.join(CONTRACT_TYPE_VALUES)}")
+        return v
+
+    @field_validator("commission_rate")
+    @classmethod
+    def validate_commission_rate(cls, v: float | None) -> float | None:
+        if v is not None and not (0 <= v <= 100):
+            raise ValueError("commission_rate deve estar entre 0 e 100.")
+        return v
 
 
 class PlannedAbsenceCreateRequest(BaseModel):
@@ -88,5 +124,8 @@ class ProfessionalResponse(BaseModel):
     availability: list[AvailabilityBlockResponse] = []
     # "Mapa de Dados Insighta" — Domínio Profissional (Onda 1).
     planned_absences: list[PlannedAbsenceResponse] = []
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 2).
+    contract_type: str | None = None
+    commission_rate: float | None = None
 
     model_config = {"from_attributes": True}

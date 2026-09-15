@@ -52,6 +52,8 @@ class ProfessionalService:
                 full_name=data.full_name,
                 professional_registry=data.professional_registry,
                 specialty=data.specialty,
+                contract_type=data.contract_type,
+                commission_rate=data.commission_rate,
             )
         )
         for block in data.availability:
@@ -84,6 +86,10 @@ class ProfessionalService:
             professional.specialty = data.specialty
         if data.is_active is not None:
             professional.is_active = data.is_active
+        if data.contract_type is not None:
+            professional.contract_type = data.contract_type
+        if data.commission_rate is not None:
+            professional.commission_rate = data.commission_rate
         await self.professional_repo.save(professional)
 
         if data.availability is not None:
