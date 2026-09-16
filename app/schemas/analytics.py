@@ -958,3 +958,68 @@ class ReturnRateResponse(BaseModel):
     return_count: int
     first_visit_count: int
     untagged_count: int  # completed sem visit_type informado — nunca soma no denominador da taxa
+
+
+class AverageTicketChannelItem(BaseModel):
+    """Uma linha do ticket médio por canal de agendamento — ver
+    AnalyticsRepository.revenue_by_booking_channel."""
+
+    channel: str
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketProcedureItem(BaseModel):
+    """Uma linha do ticket médio por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure."""
+
+    procedure_code: str
+    procedure_name: str | None
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketResponse(BaseModel):
+    """GET /api/v1/analytics/average-ticket — achado do Dossiê Insighta
+    RCM: nenhuma agregação de ticket médio existia, apesar do dado
+    (`Billing.charged_value`) estar pronto desde sempre. `overall` segue
+    o mesmo formato PeriodKPI (tendência contra o período anterior de
+    mesma duração) do resto da Sala de Comando; None quando
+    `billing_count == 0`, nunca uma média inventada sobre zero
+    lançamentos."""
+
+    period_start: date
+    period_end: date
+    overall: PeriodKPI | None
+    billing_count: int
+    by_channel: list[AverageTicketChannelItem]
+    by_procedure: list[AverageTicketProcedureItem]
+
+
+class PatientRevenueItem(BaseModel):
+    """Uma linha do Pareto de receita por paciente — ver
+    AnalyticsRepository.revenue_by_patient. `cumulative_share_pct` é a
+    soma acumulada de `share_pct` até esta linha (na ordem em que a
+    lista já vem, maior receita primeiro) — a leitura direta de "os N
+    primeiros pacientes desta lista somam X% do faturado"."""
+
+    patient_id: UUID
+    full_name: str
+    revenue: float
+    share_pct: float
+    cumulative_share_pct: float
+
+
+class PatientRevenueParetoResponse(BaseModel):
+    """GET /api/v1/analytics/patient-revenue-pareto — achado do Dossiê
+    Insighta RCM: dimensão de concentração de receita DIFERENTE da que
+    já existe por convênio (`_revenue_concentration_insight`) — aqui o
+    risco é depender de poucos PACIENTES, não de poucos convênios.
+    `top_n_share_pct` é `None` só quando `total_billed <= 0` (nenhum
+    faturamento no período — nunca uma % inventada sobre zero)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    items: list[PatientRevenueItem]  # top N por receita, maior primeiro
+    top_n_share_pct: float | None

@@ -39,6 +39,9 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    AverageTicketChannelItem,
+    AverageTicketProcedureItem,
+    AverageTicketResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
     DataFreshnessItem,
@@ -69,6 +72,8 @@ from app.schemas.analytics import (
     PeriodKPI,
     FinancialHoleBillingItem,
     FinancialHoleBillingsResponse,
+    PatientRevenueItem,
+    PatientRevenueParetoResponse,
     PaymentLagByPlanItem,
     PaymentLagByPlanResponse,
     PlanLossItem,
@@ -1504,6 +1509,97 @@ class AnalyticsService:
             return_count=return_count,
             first_visit_count=first_visit_count,
             untagged_count=untagged_count,
+        )
+
+    async def get_average_ticket(self, date_from: date, date_to: date) -> AverageTicketResponse:
+        """
+        Achado do Dossiê Insighta RCM — nenhuma agregação de ticket
+        médio existia (geral/canal/procedimento), apesar do dado
+        (`Billing.charged_value`) estar pronto desde sempre. `overall`
+        segue tendência contra o período anterior de mesma duração
+        (mesmo formato PeriodKPI do resto da Sala de Comando).
+        """
+        previous = _previous_period(date_from, date_to)
+        total, count = await self.analytics_repo.billing_ticket_summary(date_from, date_to)
+
+        overall = None
+        if count > 0:
+            current_avg = total / count
+            previous_total, previous_count = await self.analytics_repo.billing_ticket_summary(
+                previous.start, previous.end
+            )
+            # Sem amostra no período anterior, nunca inventa "sem
+            # variação" como base de comparação (mesmo raciocínio de
+            # get_return_rate/get_satisfaction_summary acima).
+            previous_avg = previous_total / previous_count if previous_count > 0 else current_avg
+            delta_pct = _delta_pct(current_avg, previous_avg) if previous_count > 0 else None
+            overall = PeriodKPI(value=round(current_avg, 2), previous_value=round(previous_avg, 2), delta_pct=delta_pct)
+
+        channel_rows = await self.analytics_repo.revenue_by_booking_channel(date_from, date_to)
+        by_channel = [
+            AverageTicketChannelItem(
+                channel=row["channel"],
+                billing_count=row["billing_count"],
+                average_ticket=round(row["revenue"] / row["billing_count"], 2),
+            )
+            for row in channel_rows
+        ]
+
+        procedure_rows = await self.analytics_repo.revenue_by_procedure(date_from, date_to)
+        by_procedure = [
+            AverageTicketProcedureItem(
+                procedure_code=row["procedure_code"],
+                procedure_name=row["procedure_name"],
+                billing_count=row["billing_count"],
+                average_ticket=round(row["revenue"] / row["billing_count"], 2),
+            )
+            for row in procedure_rows
+            if row["billing_count"] > 0
+        ]
+
+        return AverageTicketResponse(
+            period_start=date_from,
+            period_end=date_to,
+            overall=overall,
+            billing_count=count,
+            by_channel=by_channel,
+            by_procedure=by_procedure,
+        )
+
+    async def get_patient_revenue_pareto(self, date_from: date, date_to: date) -> PatientRevenueParetoResponse:
+        """
+        Achado do Dossiê Insighta RCM — Pareto de receita por PACIENTE,
+        dimensão diferente da concentração por convênio que já existe no
+        motor de insights (ver smart_insights_engine.py::
+        _revenue_concentration_insight) — aqui o risco é depender de
+        poucos PACIENTES, não de poucos convênios. `top_n_share_pct` é
+        `None` só quando `total_billed <= 0` (nenhum faturamento no
+        período — nunca uma % inventada sobre zero).
+        """
+        total, _count = await self.analytics_repo.billing_ticket_summary(date_from, date_to)
+        rows = await self.analytics_repo.revenue_by_patient(date_from, date_to)
+
+        items: list[PatientRevenueItem] = []
+        cumulative_pct = 0.0
+        for row in rows:
+            share_pct = (row["revenue"] / total) * 100 if total > 0 else 0.0
+            cumulative_pct += share_pct
+            items.append(
+                PatientRevenueItem(
+                    patient_id=row["patient_id"],
+                    full_name=row["full_name"],
+                    revenue=row["revenue"],
+                    share_pct=round(share_pct, 2),
+                    cumulative_share_pct=round(cumulative_pct, 2),
+                )
+            )
+
+        return PatientRevenueParetoResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_billed=total,
+            items=items,
+            top_n_share_pct=round(cumulative_pct, 2) if total > 0 else None,
         )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:

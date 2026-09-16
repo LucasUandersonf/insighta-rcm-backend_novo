@@ -33,6 +33,7 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    AverageTicketResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
     DataFreshnessResponse,
@@ -49,6 +50,7 @@ from app.schemas.analytics import (
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     OrganizationSummaryResponse,
+    PatientRevenueParetoResponse,
     ProductRoiResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
@@ -258,6 +260,38 @@ async def get_return_rate(
     """
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_return_rate(start, end)
+
+
+@router.get("/average-ticket", response_model=AverageTicketResponse)
+async def get_average_ticket(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AverageTicketResponse:
+    """
+    Achado do Dossiê Insighta RCM — ticket médio geral/canal/procedimento
+    (`Billing.charged_value`), mesmo período/seletor do resto da Sala de
+    Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_average_ticket(start, end)
+
+
+@router.get("/patient-revenue-pareto", response_model=PatientRevenueParetoResponse)
+async def get_patient_revenue_pareto(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PatientRevenueParetoResponse:
+    """
+    Achado do Dossiê Insighta RCM — Pareto de receita por paciente,
+    dimensão diferente da concentração por convênio que já existe no
+    motor de insights. Mesmo período/seletor do resto da Sala de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_patient_revenue_pareto(start, end)
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)

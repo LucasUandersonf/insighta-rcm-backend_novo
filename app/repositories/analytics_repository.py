@@ -455,6 +455,77 @@ class AnalyticsRepository:
             for code, name, count, revenue in result.all()
         ]
 
+    async def billing_ticket_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Achado do Dossiê Insighta RCM — (total faturado, contagem de
+        lançamentos) no período, insumo do ticket médio GERAL. Sem
+        filtro de canal/procedimento: todo Billing conta, mesmo o que
+        não tem `booking_channel`/`procedure_code` preenchido (diferente
+        das quebras por canal/procedimento abaixo, que excluem o que
+        não tem essa coluna — aqui a pergunta é "quanto, em média, cada
+        lançamento vale", não "por canal/procedimento").
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0), func.count()).where(
+            Billing.created_at >= start, Billing.created_at <= end
+        )
+        total, count = (await self.session.execute(stmt)).one()
+        return float(total), int(count)
+
+    async def revenue_by_booking_channel(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `revenue_by_procedure` acima, mas agrupado por
+        `Appointment.booking_channel` (telefone/whatsapp/site/presencial)
+        — insumo do ticket médio por canal. Billing cujo agendamento não
+        tem canal preenchido fica de fora, mesmo motivo de
+        `revenue_by_procedure`.
+        """
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.booking_channel, func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.booking_channel.is_not(None))
+            .group_by(Appointment.booking_channel)
+            .order_by(revenue_expr.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"channel": channel, "billing_count": int(count), "revenue": float(revenue)}
+            for channel, count, revenue in result.all()
+        ]
+
+    async def revenue_by_patient(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — Pareto de receita por PACIENTE:
+        dimensão diferente da concentração por CONVÊNIO que já existe
+        (`revenue_by_plan`/`_revenue_concentration_insight`) — aqui o
+        risco é "poucos pacientes sustentam a maior parte do
+        faturamento", não "poucos convênios". Maior faturamento primeiro
+        (mesmo critério de `revenue_by_procedure`).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Patient.id, Patient.full_name)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"patient_id": str(patient_id), "full_name": full_name, "revenue": float(revenue)}
+            for patient_id, full_name, revenue in result.all()
+        ]
+
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado
         com denial_risk_level medium/high), agrupada por convênio em vez
