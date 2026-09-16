@@ -76,6 +76,7 @@ from app.schemas.analytics import (
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
+    SatisfactionSummaryResponse,
     SmartInsightResponse,
     SmartInsightsResponse,
     UpcomingRiskAppointmentItem,
@@ -124,6 +125,10 @@ DATA_QUALITY_MIN_SAMPLE = 5
 # dá amostra mínima razoável para o componente de recurso de glosa
 # (resolução de recurso é lenta, poucos por semana).
 _HEALTH_SCORE_WINDOW_DAYS = 90
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) — mesma
+# janela fixa de 90 dias da Nota de Saúde Financeira, mesmo raciocínio:
+# indicador de tendência, não retrato de um dia só.
+_SATISFACTION_WINDOW_DAYS = 90
 
 # Referência da tendência do anel de saúde: "como eu estava há 3 meses"
 # — mesma janela de 90 dias, por consistência com a própria nota (que já
@@ -1372,6 +1377,56 @@ class AnalyticsService:
             ],
             window_days=_HEALTH_SCORE_WINDOW_DAYS,
             trend=trend,
+        )
+
+    async def get_satisfaction_summary(self) -> SatisfactionSummaryResponse:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 2) — resumo de NPS/satisfação pós-atendimento. Janela
+        fixa (mesmo padrão de get_health_score, ver DECISÃO em
+        _SATISFACTION_WINDOW_DAYS acima) — não segue o seletor de período
+        da tela.
+
+        Tendência contra a janela ANTERIOR de mesma duração (mesmo
+        formato PeriodKPI usado no resto da Sala de Comando, ver
+        ExecutiveSummaryResponse) — não uma fotografia gravada tipo
+        Health Score, porque aqui a amostra já é naturalmente pequena
+        (nem todo atendimento é avaliado); comparar contra o período
+        imediatamente anterior é mais honesto do que esperar meses de
+        histórico acumulado só para ter UMA comparação.
+        """
+        today = date.today()
+        window_start = today - timedelta(days=_SATISFACTION_WINDOW_DAYS)
+        previous_window_end = window_start - timedelta(days=1)
+        previous_window_start = previous_window_end - timedelta(days=_SATISFACTION_WINDOW_DAYS)
+
+        current = await self.analytics_repo.satisfaction_score_breakdown(window_start, today)
+        current_count = sum(current.values())
+
+        average_score = None
+        if current_count > 0:
+            current_avg = sum(score * count for score, count in current.items()) / current_count
+            previous = await self.analytics_repo.satisfaction_score_breakdown(previous_window_start, previous_window_end)
+            previous_count = sum(previous.values())
+            if previous_count > 0:
+                previous_avg = sum(score * count for score, count in previous.items()) / previous_count
+                delta_pct = ((current_avg - previous_avg) / previous_avg) * 100 if previous_avg != 0 else None
+            else:
+                # Sem janela anterior pra comparar — nunca inventa "0% de
+                # variação" (mesmo raciocínio de "amostra ausente != sem
+                # mudança" do resto do produto). previous_value só existe
+                # aqui porque o schema exige um float; delta_pct=None é o
+                # sinal real de "sem comparação", o único que o frontend lê.
+                previous_avg = current_avg
+                delta_pct = None
+
+            average_score = PeriodKPI(value=round(current_avg, 2), previous_value=round(previous_avg, 2), delta_pct=delta_pct)
+
+        return SatisfactionSummaryResponse(
+            average_score=average_score,
+            response_count=current_count,
+            distribution={i: current.get(i, 0) for i in range(1, 6)},
+            window_days=_SATISFACTION_WINDOW_DAYS,
         )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:

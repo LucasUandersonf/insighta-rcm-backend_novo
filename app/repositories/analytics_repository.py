@@ -1450,6 +1450,29 @@ class AnalyticsRepository:
             for patient_id, full_name, last_appointment_at, professional_name in result.all()
         ]
 
+    async def satisfaction_score_breakdown(self, date_from: date, date_to: date) -> dict[int, int]:
+        """
+        Distribuição de `Appointment.visit_satisfaction_score` (1-5) no
+        período — "Equilíbrio Insighta" (Balanced Scorecard, perna
+        Cliente, mecanismo 2). Só atendimentos JÁ avaliados entram (score
+        preenchido); quem nunca respondeu não conta como "nota baixa",
+        simplesmente não aparece — mesmo princípio de "amostra ausente
+        != valor ruim" do resto do produto. Alimenta
+        AnalyticsService.get_satisfaction_summary.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Appointment.visit_satisfaction_score, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.visit_satisfaction_score.is_not(None),
+            )
+            .group_by(Appointment.visit_satisfaction_score)
+        )
+        result = await self.session.execute(stmt)
+        return {int(score): count for score, count in result.all()}
+
     async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
         """
         Taxa de falta agregada do período inteiro (não por dia da semana

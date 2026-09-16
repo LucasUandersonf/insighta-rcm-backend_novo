@@ -639,6 +639,21 @@ class HealthScoreResponse(BaseModel):
     trend: HealthScoreTrendResponse | None = None
 
 
+class SatisfactionSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/satisfaction-summary — "Equilíbrio Insighta"
+    (Balanced Scorecard, perna Cliente, mecanismo 2). Janela sempre fixa
+    (mesmo padrão de HealthScoreResponse) — não segue o seletor de
+    período da tela, de propósito: é um indicador de tendência, não um
+    retrato de um dia só."""
+
+    average_score: PeriodKPI | None  # None = nenhuma avaliação recebida ainda no período
+    response_count: int
+    # {1: n, 2: n, 3: n, 4: n, 5: n} — sempre as 5 chaves, mesmo com
+    # contagem 0, pra frontend nunca precisar preencher buraco.
+    distribution: dict[int, int]
+    window_days: int
+
+
 class InactivePatientItem(BaseModel):
     """Uma linha da "Carteira de pacientes inativos" — ver DECISÃO em
     AnalyticsRepository.list_inactive_patients. Só pacientes com pelo

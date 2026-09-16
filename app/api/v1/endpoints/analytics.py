@@ -52,6 +52,7 @@ from app.schemas.analytics import (
     PlanLossRankingResponse,
     PriorityQueueResponse,
     RecallCandidatesResponse,
+    SatisfactionSummaryResponse,
     SmartInsightsResponse,
 )
 from app.services.analytics_service import AnalyticsService
@@ -194,6 +195,18 @@ async def get_health_score(
     # Sem date_from/date_to de propósito — janela é fixa dentro do
     # service (ver DECISÃO em AnalyticsService.get_health_score).
     return await _build_service(db).get_health_score(current_user.tenant_id)
+
+
+@router.get("/satisfaction-summary", response_model=SatisfactionSummaryResponse)
+async def get_satisfaction_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> SatisfactionSummaryResponse:
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) — sem
+    # date_from/date_to de propósito, mesmo espírito de health-score:
+    # janela fixa dentro do service (ver DECISÃO em
+    # AnalyticsService.get_satisfaction_summary).
+    return await _build_service(db).get_satisfaction_summary()
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)
