@@ -918,3 +918,27 @@ class UpsellFunnelResponse(BaseModel):
     total_accepted: int
     overall_acceptance_rate: float | None  # None quando total_offered == 0
     items: list[UpsellFunnelItem]
+
+
+class DataFreshnessItem(BaseModel):
+    """Um data_type ("faturamento"/"agenda"/"glosa") e a última vez que
+    um arquivo desse tipo foi importado com sucesso."""
+
+    data_type: str
+    last_ingested_at: datetime
+
+
+class DataFreshnessResponse(BaseModel):
+    """GET /api/v1/analytics/data-freshness — achado do Dossiê Insighta
+    RCM ("Como o dado entra no sistema"): nenhuma tela fora do histórico
+    de upload mostrava "desde quando" os números da Sala de Comando
+    refletem a realidade. `items` só lista data_type que já tiveram pelo
+    menos uma ingestão com sucesso (nunca uma data inventada para um
+    tipo nunca importado). `stalest_at` é o PIOR caso entre os tipos já
+    importados (o mais antigo dos "mais recentes") — a manchete honesta
+    de frescor: se algum tipo está desatualizado, o indicador não deve
+    esconder isso atrás da média ou do tipo mais fresco. None quando
+    `items` está vazio (nenhuma ingestão bem-sucedida ainda)."""
+
+    items: list[DataFreshnessItem]
+    stalest_at: datetime | None

@@ -29,6 +29,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -40,6 +41,8 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DataFreshnessItem,
+    DataFreshnessResponse,
     DataQualityByUserItem,
     DataQualityResponse,
     DenialReasonConfirmationItem,
@@ -420,6 +423,7 @@ class AnalyticsService:
         contract_repo: ContractRepository,
         cost_entry_repo: CostEntryRepository,
         insight_outcome_repo: InsightOutcomeRepository,
+        ingestion_repo: IngestionRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -432,6 +436,7 @@ class AnalyticsService:
         self.contract_repo = contract_repo
         self.cost_entry_repo = cost_entry_repo
         self.insight_outcome_repo = insight_outcome_repo
+        self.ingestion_repo = ingestion_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -1439,6 +1444,23 @@ class AnalyticsService:
             distribution={i: current.get(i, 0) for i in range(1, 6)},
             window_days=_SATISFACTION_WINDOW_DAYS,
         )
+
+    async def get_data_freshness(self) -> DataFreshnessResponse:
+        """
+        Achado do Dossiê Insighta RCM ("Como o dado entra no sistema") —
+        `IngestionFile.processed_at` já existia, mas nenhuma tela fora do
+        histórico de upload mostrava "desde quando" os números da Sala de
+        Comando refletem a realidade. Sem date_from/date_to (mesmo
+        espírito de health-score/inactive-patients): é sempre "agora",
+        nunca uma janela de período.
+        """
+        by_type = await self.ingestion_repo.most_recent_ingestion_by_data_type()
+        items = [
+            DataFreshnessItem(data_type=data_type, last_ingested_at=last_ingested_at)
+            for data_type, last_ingested_at in sorted(by_type.items())
+        ]
+        stalest_at = min(by_type.values()) if by_type else None
+        return DataFreshnessResponse(items=items, stalest_at=stalest_at)
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:
         """

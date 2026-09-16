@@ -21,6 +21,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
@@ -34,6 +35,7 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
+    DataFreshnessResponse,
     DataQualityResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
@@ -106,6 +108,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         ContractRepository(db),
         CostEntryRepository(db),
         InsightOutcomeRepository(db),
+        IngestionRepository(db),
     )
 
 
@@ -225,6 +228,19 @@ async def get_satisfaction_summary(
     # janela fixa dentro do service (ver DECISÃO em
     # AnalyticsService.get_satisfaction_summary).
     return await _build_service(db).get_satisfaction_summary()
+
+
+@router.get("/data-freshness", response_model=DataFreshnessResponse)
+async def get_data_freshness(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DataFreshnessResponse:
+    """
+    Achado do Dossiê Insighta RCM ("Como o dado entra no sistema") — sem
+    date_from/date_to de propósito (mesmo espírito de health-score): é
+    sempre "agora", nunca uma janela de período.
+    """
+    return await _build_service(db).get_data_freshness()
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)
