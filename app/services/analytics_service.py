@@ -102,6 +102,7 @@ from app.schemas.analytics import (
     WeekdayBucket,
     WeekdayCancellationRateBucket,
     WeekdayNoShowRateBucket,
+    WeekdaySqueezeInBucket,
 )
 from app.services import rfm_engine
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
@@ -763,6 +764,19 @@ class AnalyticsService:
             for weekday, (cancelled, total) in sorted(weekday_cancellation_counts.items(), key=lambda item: item[0])
         ]
 
+        # Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+        # agenda mais recebe encaixe.
+        weekday_squeeze_in_counts = await self.analytics_repo.weekday_squeeze_in_breakdown(date_from, date_to)
+        weekday_squeeze_in_buckets = [
+            WeekdaySqueezeInBucket(
+                weekday=weekday,
+                squeeze_in_count=squeeze_in,
+                total_informed=total,
+                squeeze_in_rate=(squeeze_in / total) if total > 0 else None,
+            )
+            for weekday, (squeeze_in, total) in sorted(weekday_squeeze_in_counts.items(), key=lambda item: item[0])
+        ]
+
         # Quantos profissionais ativos ainda não têm NENHUM bloco de grade
         # cadastrado — checagem INDEPENDENTE da janela de período pedida
         # de propósito: `available_minutes <= 0` (usado por
@@ -801,6 +815,7 @@ class AnalyticsService:
             weekday_histogram=weekday_buckets,
             weekday_no_show_rates=weekday_no_show_buckets,
             weekday_cancellation_rates=weekday_cancellation_buckets,
+            weekday_squeeze_in_rates=weekday_squeeze_in_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
             patient_no_show_ranking=[

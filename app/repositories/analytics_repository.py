@@ -1067,6 +1067,35 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(weekday): (int(cancelled), int(total)) for weekday, cancelled, total in result.all()}
 
+    async def weekday_squeeze_in_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+        agenda mais recebe encaixe (Appointment.is_squeeze_in). Diferente
+        de weekday_cancellation_rate_breakdown: o denominador aqui é só
+        quem tem is_squeeze_in INFORMADO (IS NOT NULL) — um agendamento
+        sem essa informação (a imensa maioria hoje, e todo dado vindo de
+        ingestão que não distingue isso) não pode contar nem a favor nem
+        contra a taxa, senão ela "afunda" artificialmente por falta de
+        dado, não por falta de encaixe de verdade.
+
+        Retorna {weekday: (squeeze_in_count, total_informed)}.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        squeeze_in_expr = func.sum(case((Appointment.is_squeeze_in.is_(True), 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, squeeze_in_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.is_squeeze_in.is_not(None),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(squeeze_in), int(total)) for weekday, squeeze_in, total in result.all()}
+
     async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
         """
         Equivalente a `weekday_no_show_rate_breakdown`, mas por CANAL de

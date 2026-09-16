@@ -37,6 +37,7 @@ from app.api.v1.endpoints import (
     support_requests,
     tenant,
     users,
+    waitlist,
     webhooks,
 )
 
@@ -49,6 +50,7 @@ api_router.include_router(analytics.router)
 api_router.include_router(billing.router)
 api_router.include_router(patients.router)
 api_router.include_router(appointments.router)
+api_router.include_router(waitlist.router)
 api_router.include_router(contracts.router)
 api_router.include_router(insurance_companies.router)
 api_router.include_router(denial_appeals.router)

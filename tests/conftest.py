@@ -146,6 +146,8 @@ _SCHEMA_FILES = [
     "053_network_churn_benchmark.sql",
     "054_insurance_plan_type.sql",
     "055_patient_outreach_log.sql",
+    "056_appointment_squeeze_in.sql",
+    "057_waitlist_entries.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

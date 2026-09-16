@@ -95,6 +95,7 @@ class AppointmentService:
             procedure_code=data.procedure_code,
             cid_code=data.cid_code,
             visit_intent_tag=data.visit_intent_tag,
+            is_squeeze_in=data.is_squeeze_in,
             created_by=uuid.UUID(created_by),
         )
 
@@ -222,6 +223,8 @@ class AppointmentService:
                     detail="addon_declined requer addon_offered_procedure preenchido.",
                 )
             appointment.addon_declined = data.addon_declined
+        if data.is_squeeze_in is not None:
+            appointment.is_squeeze_in = data.is_squeeze_in
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)

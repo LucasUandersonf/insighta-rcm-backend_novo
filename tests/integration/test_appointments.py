@@ -382,3 +382,31 @@ async def test_patch_allows_addon_declined_when_procedure_was_set_earlier(client
     )
     assert second_patch.status_code == 200, second_patch.text
     assert second_patch.json()["addon_declined"] is True
+
+
+# ---------------------------------------------------------------------
+# Onda 5 do Plano de Ação, item 15 ("agenda avançada"): Appointment.is_squeeze_in.
+# ---------------------------------------------------------------------
+
+
+async def test_new_appointment_has_no_squeeze_in_info_by_default(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+    assert appointment["is_squeeze_in"] is None
+
+
+async def test_create_appointment_already_marked_as_squeeze_in(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id, is_squeeze_in=True)
+    assert appointment["is_squeeze_in"] is True
+
+
+async def test_patch_marks_appointment_as_squeeze_in(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}", json={"is_squeeze_in": True}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["is_squeeze_in"] is True

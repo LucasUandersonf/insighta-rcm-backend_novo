@@ -345,6 +345,8 @@ _POST_UPGRADE_SQL_FILES = [
     # DO $$ — auto-idempotente, roda em todo deploy, sem marcador.
     "054_insurance_plan_type.sql",
     "055_patient_outreach_log.sql",
+    "056_appointment_squeeze_in.sql",
+    "057_waitlist_entries.sql",
 ]
 
 _ROLES_SQL = """

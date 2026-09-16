@@ -188,6 +188,18 @@ class WeekdayCancellationRateBucket(BaseModel):
     cancellation_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
 
 
+class WeekdaySqueezeInBucket(BaseModel):
+    """Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    agenda mais recebe encaixe. Ver DECISÃO completa em
+    AnalyticsRepository.weekday_squeeze_in_breakdown sobre o
+    denominador (só quem tem is_squeeze_in informado)."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    squeeze_in_count: int
+    total_informed: int  # só agendamentos com is_squeeze_in preenchido (não NULL)
+    squeeze_in_rate: float | None  # None quando total_informed == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -231,6 +243,9 @@ class AgendaMetricsResponse(BaseModel):
     # weekday_no_show_rates acima, agora para cancelamento: "quinta tem
     # taxa de cancelamento X%".
     weekday_cancellation_rates: list[WeekdayCancellationRateBucket]
+    # Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    # agenda mais recebe encaixe (Appointment.is_squeeze_in).
+    weekday_squeeze_in_rates: list[WeekdaySqueezeInBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em
