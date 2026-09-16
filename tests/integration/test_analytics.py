@@ -340,6 +340,54 @@ async def test_financial_hole_billings_lists_the_underpriced_line(client, auth_h
     assert item["hole_value"] == 50.0
 
 
+async def test_financial_hole_billings_audits_particular_pricing_table_too(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 3 item 11 do Plano de Ação ("particular como cidadão de
+    primeira classe") — prova que o motor de divergência de cobrança
+    (financial_hole_billings) já funciona genericamente pra um Contract
+    ligado a um InsurancePlan plan_type="particular" (uma tabela de
+    preço particular negociada, não convênio de verdade), SEM nenhum
+    código de produção novo: a query em
+    AnalyticsRepository._FINANCIAL_HOLE_BILLINGS_FROM só faz JOIN por
+    insurance_plan_id/contract_id, nunca filtra por plan_type — a mesma
+    auditoria de "cobrou menos do que devia" que já existe pra convênio
+    cobre cobrança particular incorreta de graça."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Tabela Particular", normalized_key="tabela_particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=300.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Particular Cobrado a Menor"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": particular_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": particular_plan, "charged_value": 220.0},
+        headers=auth_headers_a,
+    )
+    assert billing_resp.status_code == 201
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_count"] == 1
+    assert body["total_hole_value"] == 80.0  # 300 (tabela particular) - 220 (cobrado)
+    item = body["items"][0]
+    assert item["insurance_plan_name"] == "Tabela Particular"
+    assert item["hole_value"] == 80.0
+
+
 async def test_financial_hole_billings_shows_procedure_name_when_registered(client, admin_engine, tenant_a, auth_headers_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     contract_id = str(uuid.uuid4())
