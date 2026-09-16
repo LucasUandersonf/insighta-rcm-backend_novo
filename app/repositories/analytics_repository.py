@@ -1028,6 +1028,41 @@ class AnalyticsRepository:
         unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
         return float(unconfirmed_total), int(unconfirmed_count)
 
+    async def coparticipation_payment_method_summary(self, date_from: date, date_to: date) -> tuple[float, int, float]:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 5) — de toda coparticipação já CONFIRMADA COMO
+        RECEBIDA no período com `Billing.payment_method` preenchido
+        (BillingService.confirm_coparticipation só grava payment_method
+        quando received=True — nunca existe payment_method sem
+        confirmação prévia), quanto foi via forma de pagamento "a prazo"
+        (boleto/cartão de crédito — ver
+        smart_insights_engine._COPARTICIPATION_DELAYED_PAYMENT_METHODS)
+        contra o total com forma de pagamento conhecida. Billing sem
+        payment_method informado fica de fora dos dois lados — "não sei
+        como foi pago" não é "pago de forma arriscada".
+
+        Retorna (valor_a_prazo, contagem_a_prazo, valor_total_com_forma_conhecida)
+        — alimenta smart_insights_engine.py::_coparticipation_delayed_payment_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        base_filter = (
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.coparticipation_value.is_not(None),
+            Billing.coparticipation_value > 0,
+            Billing.payment_method.is_not(None),
+        )
+        delayed_expr = func.coalesce(
+            func.sum(case((Billing.payment_method.in_(("boleto", "cartao_credito")), Billing.coparticipation_value), else_=0)),
+            0,
+        )
+        delayed_count_expr = func.count(case((Billing.payment_method.in_(("boleto", "cartao_credito")), 1)))
+        known_total_expr = func.coalesce(func.sum(Billing.coparticipation_value), 0)
+        stmt = select(delayed_expr, delayed_count_expr, known_total_expr).where(*base_filter)
+        delayed_value, delayed_count, known_total = (await self.session.execute(stmt)).one()
+        return float(delayed_value), int(delayed_count), float(known_total)
+
     async def opme_documentation_unconfirmed_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
         """
         Épico F2.3 do Plano Diretor ("Auditoria documental leve —

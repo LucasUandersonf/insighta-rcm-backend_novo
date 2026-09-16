@@ -230,6 +230,17 @@ _MIN_OPME_DOCUMENTATION_SAMPLE = 2
 # no resto do arquivo.
 _COPARTICIPATION_GROWTH_INCREASE_PP = 5.0
 
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo 5)
+# — Billing.payment_method/installments ("Mapa de Dados Insighta" Onda
+# 1) foram capturados de propósito para um "futuro insight de
+# inadimplência de particular" (ver COMMENT ON COLUMN em
+# 049_billing_payment_method.sql) — este é esse insight. Boleto e cartão
+# de crédito são as duas formas onde o dinheiro NÃO entra no caixa na
+# hora do atendimento (diferente de dinheiro/pix/débito, liquidação
+# imediata) — mesma régua de risco que qualquer corretor financeiro
+# usaria, não uma calibração inventada.
+_COPARTICIPATION_DELAYED_PAYMENT_METHODS = frozenset({"boleto", "cartao_credito"})
+
 # "O que resta em aberto" da Auditoria de Templates e Insights: peça
 # natural do mesmo padrão que Guia/coparticipação já fecharam —
 # core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
@@ -450,6 +461,16 @@ class InsightsPeriodInput:
     # de confirmação do período anterior" com sentido de negócio.
     coparticipation_unconfirmed_value: float = 0.0
     coparticipation_unconfirmed_count: int = 0
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    # 5) — de toda coparticipação com payment_method PREENCHIDO, quanto
+    # foi via forma de pagamento "a prazo" (boleto/cartão de crédito, ver
+    # _COPARTICIPATION_DELAYED_PAYMENT_METHODS) contra o total com forma
+    # conhecida (denominador — nunca o total geral, que inclui billings
+    # sem payment_method informado ainda). Estado "AGORA", mesmo
+    # raciocínio de coparticipation_unconfirmed_* acima.
+    coparticipation_delayed_payment_value: float = 0.0
+    coparticipation_delayed_payment_count: int = 0
+    coparticipation_known_payment_method_value: float = 0.0
     # Épico F2.3 do Plano Diretor ("Auditoria documental leve —
     # prontuário × conta") — de todo item OPME cobrado, quanto ainda não
     # foi conferido como tendo prescrição/evolução no prontuário (ver
@@ -976,6 +997,46 @@ def _coparticipation_unconfirmed_insight(current: InsightsPeriodInput) -> Insigh
             "confirmar cada um — cobrado no papel não é o mesmo que recebido de verdade."
         ),
         financial_impact=current.coparticipation_unconfirmed_value,
+    )
+
+
+def _coparticipation_delayed_payment_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    5) — fecha uma lacuna DIFERENTE da que
+    _coparticipation_unconfirmed_insight já fecha.
+
+    IMPORTANTE — payment_method só existe em billing JÁ confirmado como
+    recebido: BillingService.confirm_coparticipation só grava
+    payment_method/installments quando `received=True` (não há "como foi
+    pago" pra registrar quando nada foi pago). Então este insight NÃO é
+    "recepção esqueceu de confirmar" (isso já é
+    _coparticipation_unconfirmed_insight) — é "mesmo o que já foi
+    marcado como recebido pode não ser dinheiro de verdade no caixa
+    ainda": boleto marcado como recebido na hora do atendimento ainda
+    pode não compensar; cartão de crédito parcelado ainda pode ser
+    cancelado/estornado antes de quitar todas as parcelas. Os dois
+    insights são complementares, não duplicados: um cobre "ninguém
+    confirmou ainda", o outro cobre "confirmou, mas de um jeito que
+    ainda carrega risco de não fechar".
+    """
+    if current.coparticipation_delayed_payment_count < _MIN_COPARTICIPATION_SAMPLE:
+        return None
+    if current.coparticipation_known_payment_method_value <= 0:
+        return None
+    pct = (current.coparticipation_delayed_payment_value / current.coparticipation_known_payment_method_value) * 100
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Coparticipação marcada como recebida, mas em forma de pagamento que ainda pode não fechar",
+        message=(
+            f"R$ {current.coparticipation_delayed_payment_value:,.2f} ({pct:.0f}% da coparticipação já confirmada "
+            f"como recebida, com forma de pagamento informada) foram marcados como recebidos em "
+            f"{current.coparticipation_delayed_payment_count} atendimento(s) via boleto ou cartão de crédito "
+            "parcelado — diferente de dinheiro, PIX ou débito, esse valor pode ainda não ter entrado de verdade "
+            "no caixa (boleto pode não compensar, parcela pode ser cancelada antes de quitar)."
+        ),
+        financial_impact=current.coparticipation_delayed_payment_value,
     )
 
 
@@ -1908,6 +1969,7 @@ def generate_insights(
         _coparticipation_visibility_insight(current, previous),
         _coparticipation_growth_insight(current, previous),
         _coparticipation_unconfirmed_insight(current),
+        _coparticipation_delayed_payment_insight(current),
         _opme_documentation_unconfirmed_insight(current),
         _revenue_concentration_insight(current),
         _marketing_roi_insight(current, previous),

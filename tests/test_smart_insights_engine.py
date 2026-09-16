@@ -838,6 +838,67 @@ def test_coparticipation_unconfirmed_insight_absent_without_any_unconfirmed_valu
 
 
 # ---------------------------------------------------------------------
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo 5)
+# — quanto da coparticipação foi cobrado por uma forma de pagamento que
+# não garante recebimento (boleto/cartão de crédito parcelado), diferente
+# do insight de "ninguém confirmou ainda" acima.
+# ---------------------------------------------------------------------
+
+
+def test_coparticipation_delayed_payment_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=300.0, coparticipation_delayed_payment_count=5,
+        coparticipation_known_payment_method_value=500.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 300.0
+    assert "60%" in insights[0].message
+    assert "boleto" in insights[0].message.lower()
+
+
+def test_coparticipation_delayed_payment_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=60.0, coparticipation_delayed_payment_count=2,
+        coparticipation_known_payment_method_value=100.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_delayed_payment_insight_absent_without_any_known_payment_method():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=0.0, coparticipation_delayed_payment_count=0,
+        coparticipation_known_payment_method_value=0.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_delayed_payment_insight_is_independent_from_unconfirmed_insight():
+    """Os dois cobrem lacunas DIFERENTES — nada impede os dois
+    dispararem juntos no mesmo período (confirmação manual e forma de
+    pagamento são sinais independentes)."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=250.0, coparticipation_unconfirmed_count=5,
+        coparticipation_delayed_payment_value=300.0, coparticipation_delayed_payment_count=5,
+        coparticipation_known_payment_method_value=500.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = {i.title.lower() for i in insights}
+    assert len(insights) == 2
+    assert any("ainda não foi confirmada" in t for t in titles)
+    assert any("ainda pode não fechar" in t for t in titles)
+
+
+# ---------------------------------------------------------------------
 # Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
 # conta") — quanto do que foi cobrado como OPME ainda não foi conferido
 # quanto à presença de prescrição/evolução no prontuário.

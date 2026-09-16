@@ -884,6 +884,12 @@ class AnalyticsService:
         coparticipation_unconfirmed_value, coparticipation_unconfirmed_count = (
             await self.analytics_repo.coparticipation_unconfirmed_summary(date_from, date_to)
         )
+        # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) —
+        # mesmo raciocínio de "estado AGORA" acima, para
+        # _coparticipation_delayed_payment_insight.
+        coparticipation_delayed_payment_value, coparticipation_delayed_payment_count, coparticipation_known_payment_method_value = (
+            await self.analytics_repo.coparticipation_payment_method_summary(date_from, date_to)
+        )
         # Épico F2.3 — mesmo raciocínio de coparticipation_unconfirmed_*
         # acima: "estado AGORA", só o período atual é lido por
         # _opme_documentation_unconfirmed_insight.
@@ -932,6 +938,9 @@ class AnalyticsService:
             total_billing_count=total_billing_count,
             coparticipation_unconfirmed_value=coparticipation_unconfirmed_value,
             coparticipation_unconfirmed_count=coparticipation_unconfirmed_count,
+            coparticipation_delayed_payment_value=coparticipation_delayed_payment_value,
+            coparticipation_delayed_payment_count=coparticipation_delayed_payment_count,
+            coparticipation_known_payment_method_value=coparticipation_known_payment_method_value,
             opme_documentation_unconfirmed_value=opme_documentation_unconfirmed_value,
             opme_documentation_unconfirmed_count=opme_documentation_unconfirmed_count,
             stale_open_lotes_count=stale_open_lotes[0],
