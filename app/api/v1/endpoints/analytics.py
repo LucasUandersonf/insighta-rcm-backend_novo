@@ -50,6 +50,7 @@ from app.schemas.analytics import (
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     OrganizationSummaryResponse,
+    PatientDemographicsResponse,
     PatientRevenueParetoResponse,
     ProductRoiResponse,
     PaymentLagByPlanResponse,
@@ -292,6 +293,22 @@ async def get_patient_revenue_pareto(
     """
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_patient_revenue_pareto(start, end)
+
+
+@router.get("/patient-demographics", response_model=PatientDemographicsResponse)
+async def get_patient_demographics(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PatientDemographicsResponse:
+    """
+    Achado do Dossiê Insighta RCM — faixa etária/demografia da carteira
+    ativa, a partir de `Patient.birth_date`. Mesmo período/seletor do
+    resto da Sala de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_patient_demographics(start, end)
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)

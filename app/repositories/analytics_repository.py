@@ -526,6 +526,33 @@ class AnalyticsRepository:
             for patient_id, full_name, revenue in result.all()
         ]
 
+    async def active_patient_birth_dates(self, date_from: date, date_to: date) -> tuple[list[date], int]:
+        """
+        Achado do Dossiê Insighta RCM — insumo de faixa etária/
+        demografia: `Patient.birth_date` de cada paciente DISTINTO com
+        pelo menos 1 atendimento concluído no período. Retorna (lista de
+        datas de nascimento conhecidas, contagem de pacientes SEM
+        birth_date cadastrado) — bucketing por faixa etária fica pro
+        service (mesma divisão de responsabilidade do resto do produto:
+        repositório devolve dado bruto, quem decide o corte é a camada
+        de cima).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Patient.id, Patient.birth_date)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Appointment.scheduled_at >= start, Appointment.scheduled_at <= end, Appointment.status == "completed")
+            .distinct()
+        )
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        birth_dates = [birth_date for _patient_id, birth_date in rows if birth_date is not None]
+        unknown_age_count = sum(1 for _patient_id, birth_date in rows if birth_date is None)
+        return birth_dates, unknown_age_count
+
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado
         com denial_risk_level medium/high), agrupada por convênio em vez

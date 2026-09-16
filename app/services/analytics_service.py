@@ -37,6 +37,7 @@ from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
+    AgeBucketItem,
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
     AverageTicketChannelItem,
@@ -72,6 +73,7 @@ from app.schemas.analytics import (
     PeriodKPI,
     FinancialHoleBillingItem,
     FinancialHoleBillingsResponse,
+    PatientDemographicsResponse,
     PatientRevenueItem,
     PatientRevenueParetoResponse,
     PaymentLagByPlanItem,
@@ -250,6 +252,27 @@ def _delta_pct(current: float, previous: float) -> float | None:
     if previous == 0:
         return None
     return ((current - previous) / previous) * 100
+
+
+# Achado do Dossiê Insighta RCM — faixa etária/demografia. Vocabulário
+# fechado, mesmo espírito de VISIT_TYPE_VALUES/PREFERRED_TIME_WINDOW_VALUES:
+# cortes clássicos de demografia de clínica (pediatria/adulto jovem/meia
+# idade/terceira idade), nunca um corte fino que exigiria dado que o
+# produto não coleta (renda, por exemplo).
+_AGE_BUCKETS: list[tuple[str, int, int | None]] = [
+    ("0-17", 0, 17),
+    ("18-30", 18, 30),
+    ("31-45", 31, 45),
+    ("46-60", 46, 60),
+    ("60+", 61, None),
+]
+
+
+def _age_bucket_label(age: int) -> str:
+    for label, low, high in _AGE_BUCKETS:
+        if age >= low and (high is None or age <= high):
+            return label
+    return _AGE_BUCKETS[0][0]  # idade negativa (birth_date futuro, dado inconsistente) — nunca deveria ocorrer
 
 
 def _elapsed_year_fraction(as_of: date) -> float:
@@ -1600,6 +1623,30 @@ class AnalyticsService:
             total_billed=total,
             items=items,
             top_n_share_pct=round(cumulative_pct, 2) if total > 0 else None,
+        )
+
+    async def get_patient_demographics(self, date_from: date, date_to: date) -> PatientDemographicsResponse:
+        """
+        Achado do Dossiê Insighta RCM — faixa etária/demografia:
+        nenhuma agregação lia `Patient.birth_date` para calcular idade
+        da carteira ativa. Idade calculada NA DATA DE HOJE (não na data
+        do atendimento) — "quantos anos o paciente tem agora". Paciente
+        sem `birth_date` cadastrado nunca entra numa faixa por padrão
+        (fica fora, reportado separado em `unknown_age_count`).
+        """
+        birth_dates, unknown_age_count = await self.analytics_repo.active_patient_birth_dates(date_from, date_to)
+
+        today = date.today()
+        bucket_counts: dict[str, int] = {label: 0 for label, _low, _high in _AGE_BUCKETS}
+        for birth_date in birth_dates:
+            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            bucket_counts[_age_bucket_label(age)] += 1
+
+        return PatientDemographicsResponse(
+            period_start=date_from,
+            period_end=date_to,
+            buckets=[AgeBucketItem(label=label, patient_count=bucket_counts[label]) for label, _low, _high in _AGE_BUCKETS],
+            unknown_age_count=unknown_age_count,
         )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:

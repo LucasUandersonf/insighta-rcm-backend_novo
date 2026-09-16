@@ -1023,3 +1023,26 @@ class PatientRevenueParetoResponse(BaseModel):
     total_billed: float
     items: list[PatientRevenueItem]  # top N por receita, maior primeiro
     top_n_share_pct: float | None
+
+
+class AgeBucketItem(BaseModel):
+    """Uma faixa etária e quantos pacientes distintos com atendimento
+    concluído no período caem nela — ver
+    AnalyticsRepository.active_patient_birth_dates."""
+
+    label: str  # "0-17" | "18-30" | "31-45" | "46-60" | "60+"
+    patient_count: int
+
+
+class PatientDemographicsResponse(BaseModel):
+    """GET /api/v1/analytics/patient-demographics — achado do Dossiê
+    Insighta RCM: faixa etária calculada a partir de `Patient.birth_date`
+    (idade NA DATA DE HOJE, não na data do atendimento), nunca lida
+    antes. Conta pacientes DISTINTOS com pelo menos 1 atendimento
+    concluído no período. `unknown_age_count` são pacientes sem
+    `birth_date` cadastrado — nunca jogados numa faixa por padrão."""
+
+    period_start: date
+    period_end: date
+    buckets: list[AgeBucketItem]  # sempre as 5 faixas, mesmo com contagem 0
+    unknown_age_count: int
