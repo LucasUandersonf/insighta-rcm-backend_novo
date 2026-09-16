@@ -29,6 +29,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -36,12 +37,19 @@ from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
+    AgeBucketItem,
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    AverageTicketChannelItem,
+    AverageTicketProcedureItem,
+    AverageTicketResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DataFreshnessItem,
+    DataFreshnessResponse,
     DataQualityByUserItem,
     DataQualityResponse,
+    ReturnRateResponse,
     DenialReasonConfirmationItem,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
@@ -65,6 +73,9 @@ from app.schemas.analytics import (
     PeriodKPI,
     FinancialHoleBillingItem,
     FinancialHoleBillingsResponse,
+    PatientDemographicsResponse,
+    PatientRevenueItem,
+    PatientRevenueParetoResponse,
     PaymentLagByPlanItem,
     PaymentLagByPlanResponse,
     PlanLossItem,
@@ -83,6 +94,7 @@ from app.schemas.analytics import (
     UpsellFunnelItem,
     UpsellFunnelResponse,
     WeekdayBucket,
+    WeekdayCancellationRateBucket,
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
@@ -241,6 +253,27 @@ def _delta_pct(current: float, previous: float) -> float | None:
     if previous == 0:
         return None
     return ((current - previous) / previous) * 100
+
+
+# Achado do Dossiê Insighta RCM — faixa etária/demografia. Vocabulário
+# fechado, mesmo espírito de VISIT_TYPE_VALUES/PREFERRED_TIME_WINDOW_VALUES:
+# cortes clássicos de demografia de clínica (pediatria/adulto jovem/meia
+# idade/terceira idade), nunca um corte fino que exigiria dado que o
+# produto não coleta (renda, por exemplo).
+_AGE_BUCKETS: list[tuple[str, int, int | None]] = [
+    ("0-17", 0, 17),
+    ("18-30", 18, 30),
+    ("31-45", 31, 45),
+    ("46-60", 46, 60),
+    ("60+", 61, None),
+]
+
+
+def _age_bucket_label(age: int) -> str:
+    for label, low, high in _AGE_BUCKETS:
+        if age >= low and (high is None or age <= high):
+            return label
+    return _AGE_BUCKETS[0][0]  # idade negativa (birth_date futuro, dado inconsistente) — nunca deveria ocorrer
 
 
 def _elapsed_year_fraction(as_of: date) -> float:
@@ -420,6 +453,7 @@ class AnalyticsService:
         contract_repo: ContractRepository,
         cost_entry_repo: CostEntryRepository,
         insight_outcome_repo: InsightOutcomeRepository,
+        ingestion_repo: IngestionRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -432,6 +466,7 @@ class AnalyticsService:
         self.contract_repo = contract_repo
         self.cost_entry_repo = cost_entry_repo
         self.insight_outcome_repo = insight_outcome_repo
+        self.ingestion_repo = ingestion_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -633,6 +668,19 @@ class AnalyticsService:
             for weekday, (no_show, total) in sorted(weekday_no_show_counts.items(), key=lambda item: item[0])
         ]
 
+        # Achado do Dossiê Insighta RCM — mesmo espírito do bloco acima,
+        # agora para cancelamento: "quinta tem taxa de cancelamento X%".
+        weekday_cancellation_counts = await self.analytics_repo.weekday_cancellation_rate_breakdown(date_from, date_to)
+        weekday_cancellation_buckets = [
+            WeekdayCancellationRateBucket(
+                weekday=weekday,
+                cancellation_count=cancelled,
+                total_appointments=total,
+                cancellation_rate=(cancelled / total) if total > 0 else None,
+            )
+            for weekday, (cancelled, total) in sorted(weekday_cancellation_counts.items(), key=lambda item: item[0])
+        ]
+
         # Quantos profissionais ativos ainda não têm NENHUM bloco de grade
         # cadastrado — checagem INDEPENDENTE da janela de período pedida
         # de propósito: `available_minutes <= 0` (usado por
@@ -670,6 +718,7 @@ class AnalyticsService:
             peak_hours=peak_hours,
             weekday_histogram=weekday_buckets,
             weekday_no_show_rates=weekday_no_show_buckets,
+            weekday_cancellation_rates=weekday_cancellation_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
             patient_no_show_ranking=[
@@ -1438,6 +1487,181 @@ class AnalyticsService:
             response_count=current_count,
             distribution={i: current.get(i, 0) for i in range(1, 6)},
             window_days=_SATISFACTION_WINDOW_DAYS,
+        )
+
+    async def get_data_freshness(self) -> DataFreshnessResponse:
+        """
+        Achado do Dossiê Insighta RCM ("Como o dado entra no sistema") —
+        `IngestionFile.processed_at` já existia, mas nenhuma tela fora do
+        histórico de upload mostrava "desde quando" os números da Sala de
+        Comando refletem a realidade. Sem date_from/date_to (mesmo
+        espírito de health-score/inactive-patients): é sempre "agora",
+        nunca uma janela de período.
+        """
+        by_type = await self.ingestion_repo.most_recent_ingestion_by_data_type()
+        items = [
+            DataFreshnessItem(data_type=data_type, last_ingested_at=last_ingested_at)
+            for data_type, last_ingested_at in sorted(by_type.items())
+        ]
+        stalest_at = min(by_type.values()) if by_type else None
+        return DataFreshnessResponse(items=items, stalest_at=stalest_at)
+
+    async def get_return_rate(self, date_from: date, date_to: date) -> ReturnRateResponse:
+        """
+        Achado do Dossiê Insighta RCM — taxa de retorno de pacientes
+        (retorno / (retorno + primeira_consulta), entre atendimentos
+        concluídos). Segue o seletor de período da tela (não é um
+        estado fixo tipo health-score): "taxa de retorno da semana" é
+        uma pergunta legítima, diferente de "nota de saúde financeira",
+        que só faz sentido como janela longa fixa.
+        """
+        previous = _previous_period(date_from, date_to)
+        current_breakdown, untagged_count = await self.analytics_repo.visit_type_breakdown(date_from, date_to)
+        previous_breakdown, _previous_untagged = await self.analytics_repo.visit_type_breakdown(
+            previous.start, previous.end
+        )
+
+        return_count = current_breakdown.get("retorno", 0)
+        first_visit_count = current_breakdown.get("primeira_consulta", 0)
+        current_total = return_count + first_visit_count
+
+        return_rate = None
+        if current_total > 0:
+            current_rate = (return_count / current_total) * 100
+            previous_return = previous_breakdown.get("retorno", 0)
+            previous_first_visit = previous_breakdown.get("primeira_consulta", 0)
+            previous_total = previous_return + previous_first_visit
+            # Sem amostra no período anterior, nunca inventa "0% de
+            # retorno" como base de comparação (mesmo raciocínio de
+            # `get_satisfaction_summary` acima) — previous_value só
+            # existe aqui porque o schema exige um float; delta_pct=None
+            # é o sinal real de "sem comparação".
+            previous_rate = (previous_return / previous_total) * 100 if previous_total > 0 else current_rate
+            delta_pct = _delta_pct(current_rate, previous_rate) if previous_total > 0 else None
+            return_rate = PeriodKPI(value=round(current_rate, 2), previous_value=round(previous_rate, 2), delta_pct=delta_pct)
+
+        return ReturnRateResponse(
+            period_start=date_from,
+            period_end=date_to,
+            return_rate=return_rate,
+            return_count=return_count,
+            first_visit_count=first_visit_count,
+            untagged_count=untagged_count,
+        )
+
+    async def get_average_ticket(self, date_from: date, date_to: date) -> AverageTicketResponse:
+        """
+        Achado do Dossiê Insighta RCM — nenhuma agregação de ticket
+        médio existia (geral/canal/procedimento), apesar do dado
+        (`Billing.charged_value`) estar pronto desde sempre. `overall`
+        segue tendência contra o período anterior de mesma duração
+        (mesmo formato PeriodKPI do resto da Sala de Comando).
+        """
+        previous = _previous_period(date_from, date_to)
+        total, count = await self.analytics_repo.billing_ticket_summary(date_from, date_to)
+
+        overall = None
+        if count > 0:
+            current_avg = total / count
+            previous_total, previous_count = await self.analytics_repo.billing_ticket_summary(
+                previous.start, previous.end
+            )
+            # Sem amostra no período anterior, nunca inventa "sem
+            # variação" como base de comparação (mesmo raciocínio de
+            # get_return_rate/get_satisfaction_summary acima).
+            previous_avg = previous_total / previous_count if previous_count > 0 else current_avg
+            delta_pct = _delta_pct(current_avg, previous_avg) if previous_count > 0 else None
+            overall = PeriodKPI(value=round(current_avg, 2), previous_value=round(previous_avg, 2), delta_pct=delta_pct)
+
+        channel_rows = await self.analytics_repo.revenue_by_booking_channel(date_from, date_to)
+        by_channel = [
+            AverageTicketChannelItem(
+                channel=row["channel"],
+                billing_count=row["billing_count"],
+                average_ticket=round(row["revenue"] / row["billing_count"], 2),
+            )
+            for row in channel_rows
+        ]
+
+        procedure_rows = await self.analytics_repo.revenue_by_procedure(date_from, date_to)
+        by_procedure = [
+            AverageTicketProcedureItem(
+                procedure_code=row["procedure_code"],
+                procedure_name=row["procedure_name"],
+                billing_count=row["billing_count"],
+                average_ticket=round(row["revenue"] / row["billing_count"], 2),
+            )
+            for row in procedure_rows
+            if row["billing_count"] > 0
+        ]
+
+        return AverageTicketResponse(
+            period_start=date_from,
+            period_end=date_to,
+            overall=overall,
+            billing_count=count,
+            by_channel=by_channel,
+            by_procedure=by_procedure,
+        )
+
+    async def get_patient_revenue_pareto(self, date_from: date, date_to: date) -> PatientRevenueParetoResponse:
+        """
+        Achado do Dossiê Insighta RCM — Pareto de receita por PACIENTE,
+        dimensão diferente da concentração por convênio que já existe no
+        motor de insights (ver smart_insights_engine.py::
+        _revenue_concentration_insight) — aqui o risco é depender de
+        poucos PACIENTES, não de poucos convênios. `top_n_share_pct` é
+        `None` só quando `total_billed <= 0` (nenhum faturamento no
+        período — nunca uma % inventada sobre zero).
+        """
+        total, _count = await self.analytics_repo.billing_ticket_summary(date_from, date_to)
+        rows = await self.analytics_repo.revenue_by_patient(date_from, date_to)
+
+        items: list[PatientRevenueItem] = []
+        cumulative_pct = 0.0
+        for row in rows:
+            share_pct = (row["revenue"] / total) * 100 if total > 0 else 0.0
+            cumulative_pct += share_pct
+            items.append(
+                PatientRevenueItem(
+                    patient_id=row["patient_id"],
+                    full_name=row["full_name"],
+                    revenue=row["revenue"],
+                    share_pct=round(share_pct, 2),
+                    cumulative_share_pct=round(cumulative_pct, 2),
+                )
+            )
+
+        return PatientRevenueParetoResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_billed=total,
+            items=items,
+            top_n_share_pct=round(cumulative_pct, 2) if total > 0 else None,
+        )
+
+    async def get_patient_demographics(self, date_from: date, date_to: date) -> PatientDemographicsResponse:
+        """
+        Achado do Dossiê Insighta RCM — faixa etária/demografia:
+        nenhuma agregação lia `Patient.birth_date` para calcular idade
+        da carteira ativa. Idade calculada NA DATA DE HOJE (não na data
+        do atendimento) — "quantos anos o paciente tem agora". Paciente
+        sem `birth_date` cadastrado nunca entra numa faixa por padrão
+        (fica fora, reportado separado em `unknown_age_count`).
+        """
+        birth_dates, unknown_age_count = await self.analytics_repo.active_patient_birth_dates(date_from, date_to)
+
+        today = date.today()
+        bucket_counts: dict[str, int] = {label: 0 for label, _low, _high in _AGE_BUCKETS}
+        for birth_date in birth_dates:
+            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            bucket_counts[_age_bucket_label(age)] += 1
+
+        return PatientDemographicsResponse(
+            period_start=date_from,
+            period_end=date_to,
+            buckets=[AgeBucketItem(label=label, patient_count=bucket_counts[label]) for label, _low, _high in _AGE_BUCKETS],
+            unknown_age_count=unknown_age_count,
         )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:

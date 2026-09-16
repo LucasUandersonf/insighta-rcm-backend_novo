@@ -21,6 +21,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
@@ -32,8 +33,10 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    AverageTicketResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
+    DataFreshnessResponse,
     DataQualityResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
@@ -47,11 +50,14 @@ from app.schemas.analytics import (
     NetworkBenchmarkResponse,
     OportunidadesResponse,
     OrganizationSummaryResponse,
+    PatientDemographicsResponse,
+    PatientRevenueParetoResponse,
     ProductRoiResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
     PriorityQueueResponse,
     RecallCandidatesResponse,
+    ReturnRateResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
     UpsellFunnelResponse,
@@ -106,6 +112,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         ContractRepository(db),
         CostEntryRepository(db),
         InsightOutcomeRepository(db),
+        IngestionRepository(db),
     )
 
 
@@ -225,6 +232,83 @@ async def get_satisfaction_summary(
     # janela fixa dentro do service (ver DECISÃO em
     # AnalyticsService.get_satisfaction_summary).
     return await _build_service(db).get_satisfaction_summary()
+
+
+@router.get("/data-freshness", response_model=DataFreshnessResponse)
+async def get_data_freshness(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DataFreshnessResponse:
+    """
+    Achado do Dossiê Insighta RCM ("Como o dado entra no sistema") — sem
+    date_from/date_to de propósito (mesmo espírito de health-score): é
+    sempre "agora", nunca uma janela de período.
+    """
+    return await _build_service(db).get_data_freshness()
+
+
+@router.get("/return-rate", response_model=ReturnRateResponse)
+async def get_return_rate(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ReturnRateResponse:
+    """
+    Achado do Dossiê Insighta RCM — taxa de retorno de pacientes
+    (`Appointment.visit_type`), mesmo período/seletor do resto da Sala
+    de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_return_rate(start, end)
+
+
+@router.get("/average-ticket", response_model=AverageTicketResponse)
+async def get_average_ticket(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AverageTicketResponse:
+    """
+    Achado do Dossiê Insighta RCM — ticket médio geral/canal/procedimento
+    (`Billing.charged_value`), mesmo período/seletor do resto da Sala de
+    Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_average_ticket(start, end)
+
+
+@router.get("/patient-revenue-pareto", response_model=PatientRevenueParetoResponse)
+async def get_patient_revenue_pareto(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PatientRevenueParetoResponse:
+    """
+    Achado do Dossiê Insighta RCM — Pareto de receita por paciente,
+    dimensão diferente da concentração por convênio que já existe no
+    motor de insights. Mesmo período/seletor do resto da Sala de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_patient_revenue_pareto(start, end)
+
+
+@router.get("/patient-demographics", response_model=PatientDemographicsResponse)
+async def get_patient_demographics(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PatientDemographicsResponse:
+    """
+    Achado do Dossiê Insighta RCM — faixa etária/demografia da carteira
+    ativa, a partir de `Patient.birth_date`. Mesmo período/seletor do
+    resto da Sala de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_patient_demographics(start, end)
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)

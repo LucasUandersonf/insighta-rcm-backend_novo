@@ -109,3 +109,25 @@ class PatientResponse(BaseModel):
     vip_reasons: list[str] = []
 
     model_config = {"from_attributes": True}
+
+
+class PatientBirthdayItem(BaseModel):
+    """Achado do Dossiê Insighta RCM — Patient.birth_date já era
+    capturado, mas nenhuma tela listava aniversariantes do mês.
+    `communication_consent` vai junto de propósito: é o sinal que já
+    existe sobre se a clínica tem aval do paciente pra entrar em
+    contato (ex: ligar/mandar mensagem de parabéns) — a lista nunca
+    filtra por ele (não é um envio automático, é uma lista de apoio
+    pra decisão humana), só expõe pra quem for usar a lista saber."""
+
+    patient_id: UUID
+    full_name: str
+    birth_date: date
+    communication_consent: bool | None
+
+
+class PatientBirthdaysResponse(BaseModel):
+    """GET /api/v1/patients/birthdays — ordenado por dia do mês."""
+
+    month: int
+    items: list[PatientBirthdayItem]

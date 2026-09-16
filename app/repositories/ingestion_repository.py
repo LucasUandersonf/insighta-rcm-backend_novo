@@ -16,6 +16,7 @@ sabe que deve pular o processamento (outro worker já está cuidando ou já
 cuidou deste arquivo).
 """
 import uuid
+from datetime import datetime
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -184,6 +185,31 @@ class IngestionRepository:
         stmt = select(IngestionFile).order_by(IngestionFile.received_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         return list(result.scalars().all()), total
+
+    async def most_recent_ingestion_by_data_type(self) -> dict[str, datetime]:
+        """
+        Achado do Dossiê Insighta RCM ("Como o dado entra no sistema") —
+        `IngestionFile.processed_at` já existe desde sempre, mas nenhuma
+        tela fora do histórico de upload (GET /ingestion/files) mostra
+        "desde quando" o dado da Sala de Comando reflete a realidade.
+        "Agora" aqui sempre significa "desde o último arquivo importado
+        com sucesso", nunca "neste segundo" — este método é o que
+        alimenta esse aviso.
+
+        Só `status='processed'` conta (um arquivo que falhou não deixou
+        dado novo no sistema) — MAX(processed_at) por data_type
+        ("faturamento"/"agenda"/"glosa"), RLS já isola por tenant.
+        Retorna só os data_type que já tiveram pelo menos 1 sucesso —
+        um tenant que nunca importou "glosa" simplesmente não aparece
+        nesse tipo, nunca uma data inventada.
+        """
+        stmt = (
+            select(IngestionFile.data_type, func.max(IngestionFile.processed_at))
+            .where(IngestionFile.status == "processed")
+            .group_by(IngestionFile.data_type)
+        )
+        result = await self.session.execute(stmt)
+        return {data_type: processed_at for data_type, processed_at in result.all()}
 
     async def get_by_id(self, row_id: int) -> IngestionRawRow | None:
         result = await self.session.execute(select(IngestionRawRow).where(IngestionRawRow.id == row_id))

@@ -455,6 +455,104 @@ class AnalyticsRepository:
             for code, name, count, revenue in result.all()
         ]
 
+    async def billing_ticket_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Achado do Dossiê Insighta RCM — (total faturado, contagem de
+        lançamentos) no período, insumo do ticket médio GERAL. Sem
+        filtro de canal/procedimento: todo Billing conta, mesmo o que
+        não tem `booking_channel`/`procedure_code` preenchido (diferente
+        das quebras por canal/procedimento abaixo, que excluem o que
+        não tem essa coluna — aqui a pergunta é "quanto, em média, cada
+        lançamento vale", não "por canal/procedimento").
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0), func.count()).where(
+            Billing.created_at >= start, Billing.created_at <= end
+        )
+        total, count = (await self.session.execute(stmt)).one()
+        return float(total), int(count)
+
+    async def revenue_by_booking_channel(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `revenue_by_procedure` acima, mas agrupado por
+        `Appointment.booking_channel` (telefone/whatsapp/site/presencial)
+        — insumo do ticket médio por canal. Billing cujo agendamento não
+        tem canal preenchido fica de fora, mesmo motivo de
+        `revenue_by_procedure`.
+        """
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.booking_channel, func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.booking_channel.is_not(None))
+            .group_by(Appointment.booking_channel)
+            .order_by(revenue_expr.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"channel": channel, "billing_count": int(count), "revenue": float(revenue)}
+            for channel, count, revenue in result.all()
+        ]
+
+    async def revenue_by_patient(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — Pareto de receita por PACIENTE:
+        dimensão diferente da concentração por CONVÊNIO que já existe
+        (`revenue_by_plan`/`_revenue_concentration_insight`) — aqui o
+        risco é "poucos pacientes sustentam a maior parte do
+        faturamento", não "poucos convênios". Maior faturamento primeiro
+        (mesmo critério de `revenue_by_procedure`).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Patient.id, Patient.full_name)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"patient_id": str(patient_id), "full_name": full_name, "revenue": float(revenue)}
+            for patient_id, full_name, revenue in result.all()
+        ]
+
+    async def active_patient_birth_dates(self, date_from: date, date_to: date) -> tuple[list[date], int]:
+        """
+        Achado do Dossiê Insighta RCM — insumo de faixa etária/
+        demografia: `Patient.birth_date` de cada paciente DISTINTO com
+        pelo menos 1 atendimento concluído no período. Retorna (lista de
+        datas de nascimento conhecidas, contagem de pacientes SEM
+        birth_date cadastrado) — bucketing por faixa etária fica pro
+        service (mesma divisão de responsabilidade do resto do produto:
+        repositório devolve dado bruto, quem decide o corte é a camada
+        de cima).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Patient.id, Patient.birth_date)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Appointment.scheduled_at >= start, Appointment.scheduled_at <= end, Appointment.status == "completed")
+            .distinct()
+        )
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        birth_dates = [birth_date for _patient_id, birth_date in rows if birth_date is not None]
+        unknown_age_count = sum(1 for _patient_id, birth_date in rows if birth_date is None)
+        return birth_dates, unknown_age_count
+
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado
         com denial_risk_level medium/high), agrupada por convênio em vez
@@ -880,6 +978,37 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
+    async def weekday_cancellation_rate_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `weekday_no_show_rate_breakdown` acima, mas para CANCELAMENTO em
+        vez de falta. Denominador = atendimentos com desfecho TERMINAL
+        no dia (`completed`/`no_show`/`cancelled`) — um agendamento
+        ainda `scheduled` não tem desfecho conhecido (mesmo raciocínio
+        do motor de no-show); diferente do breakdown de falta, aqui
+        `cancelled` entra tanto no numerador quanto no denominador (é
+        exatamente o desfecho que a taxa está medindo).
+
+        Retorna {weekday: (cancellation_count, total_terminal)} — mesma
+        divisão de responsabilidade de sempre: o service decide "sem
+        amostra" vs. taxa real.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        cancellation_expr = func.sum(case((Appointment.status == "cancelled", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, cancellation_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show", "cancelled")),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(cancelled), int(total)) for weekday, cancelled, total in result.all()}
+
     async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
         """
         Equivalente a `weekday_no_show_rate_breakdown`, mas por CANAL de
@@ -957,6 +1086,51 @@ class AnalyticsRepository:
         result = await self.session.execute(reason_stmt)
         breakdown = {reason: int(count) for reason, count in result.all()}
         return breakdown, int(total)
+
+    async def visit_type_breakdown(self, date_from: date, date_to: date) -> tuple[dict[str, int], int]:
+        """
+        Achado do Dossiê Insighta RCM — `Appointment.visit_type`
+        ("primeira_consulta"/"retorno", ver VISIT_TYPE_VALUES) é
+        capturado pela normalização (Template de Agenda) desde sempre,
+        mas nenhum endpoint agregava isso: taxa de retorno de paciente
+        é um indicador padrão de qualquer clínica (mede fidelização),
+        hoje impossível de calcular no produto.
+
+        Só `status='completed'` conta (mesmo filtro do resto do produto
+        — ver `weekday_no_show_rate_breakdown` acima): um agendamento
+        que não aconteceu não tem "tipo de visita" realizado.
+
+        Devolve (breakdown, untagged_count) SEPARADOS pelo mesmo motivo
+        de `cancellation_reason_breakdown`: nem todo ERP de origem
+        distingue primeira consulta de retorno (campo NULLABLE), então
+        `sum(breakdown.values())` pode ser MENOR que o total de
+        atendimentos concluídos — o service usa a soma real do
+        breakdown como denominador da taxa (nunca conta um "untagged"
+        como primeira_consulta por padrão, o que sub-informaria a taxa
+        de retorno real).
+        """
+        start, end = _bounds(date_from, date_to)
+        untagged_stmt = select(func.count()).where(
+            Appointment.scheduled_at >= start,
+            Appointment.scheduled_at <= end,
+            Appointment.status == "completed",
+            Appointment.visit_type.is_(None),
+        )
+        untagged_count = (await self.session.execute(untagged_stmt)).scalar_one()
+
+        breakdown_stmt = (
+            select(Appointment.visit_type, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status == "completed",
+                Appointment.visit_type.is_not(None),
+            )
+            .group_by(Appointment.visit_type)
+        )
+        result = await self.session.execute(breakdown_stmt)
+        breakdown = {visit_type: int(count) for visit_type, count in result.all()}
+        return breakdown, int(untagged_count)
 
     async def item_type_charged_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """

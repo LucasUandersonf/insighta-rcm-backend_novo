@@ -27,6 +27,7 @@ from app.api.v1.endpoints import (
     integrations,
     locais,
     lotes,
+    marketing_spend,
     patients,
     platform,
     professionals,
@@ -55,6 +56,7 @@ api_router.include_router(guias.router)
 api_router.include_router(lotes.router)
 api_router.include_router(insight_outcomes.router)
 api_router.include_router(cost_entries.router)
+api_router.include_router(marketing_spend.router)
 api_router.include_router(faturas.router)
 api_router.include_router(glosas.router)
 api_router.include_router(webhooks.router)

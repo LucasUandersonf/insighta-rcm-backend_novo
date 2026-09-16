@@ -6,7 +6,13 @@ from fastapi import HTTPException, status
 from app.models.patient import Patient
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
-from app.schemas.patient import PatientCreateRequest, PatientResponse, PatientUpdateRequest
+from app.schemas.patient import (
+    PatientBirthdayItem,
+    PatientBirthdaysResponse,
+    PatientCreateRequest,
+    PatientResponse,
+    PatientUpdateRequest,
+)
 from app.services.patient_value_engine import compute_vip_status
 
 # Placeholder usado por anonymize_patient() — nunca um nome real, nunca
@@ -165,3 +171,21 @@ class PatientService:
             )
             responses.append(response)
         return responses, total
+
+    async def list_birthdays_in_month(self, month: int) -> PatientBirthdaysResponse:
+        """
+        Achado do Dossiê Insighta RCM — lista de aniversariantes do mês
+        (ação clássica de relacionamento/retenção). `birth_date` nunca é
+        None aqui: o repositório já filtra por isso na consulta.
+        """
+        patients = await self.repo.list_birthdays_in_month(month)
+        items = [
+            PatientBirthdayItem(
+                patient_id=p.id,
+                full_name=p.full_name,
+                birth_date=p.birth_date,
+                communication_consent=p.communication_consent,
+            )
+            for p in patients
+        ]
+        return PatientBirthdaysResponse(month=month, items=items)

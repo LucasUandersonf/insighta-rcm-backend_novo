@@ -141,6 +141,19 @@ class WeekdayNoShowRateBucket(BaseModel):
     no_show_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
 
 
+class WeekdayCancellationRateBucket(BaseModel):
+    """Achado do Dossiê Insighta RCM — mesmo molde de
+    WeekdayNoShowRateBucket, mas para cancelamento: fração de
+    cancelamentos dentro dos atendimentos com desfecho TERMINAL
+    (completed+no_show+cancelled) daquele dia. Ver
+    AnalyticsRepository.weekday_cancellation_rate_breakdown."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    cancellation_count: int
+    total_appointments: int  # só desfecho terminal (completed+no_show+cancelled)
+    cancellation_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -180,6 +193,10 @@ class AgendaMetricsResponse(BaseModel):
     # de falta X%", não só "quinta-feira tem N agendamentos". Alimenta o
     # insight textual em smart_insights_engine.py::_weekday_no_show_rate_insights.
     weekday_no_show_rates: list[WeekdayNoShowRateBucket]
+    # Achado do Dossiê Insighta RCM — mesmo espírito de
+    # weekday_no_show_rates acima, agora para cancelamento: "quinta tem
+    # taxa de cancelamento X%".
+    weekday_cancellation_rates: list[WeekdayCancellationRateBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em
@@ -918,3 +935,131 @@ class UpsellFunnelResponse(BaseModel):
     total_accepted: int
     overall_acceptance_rate: float | None  # None quando total_offered == 0
     items: list[UpsellFunnelItem]
+
+
+class DataFreshnessItem(BaseModel):
+    """Um data_type ("faturamento"/"agenda"/"glosa") e a última vez que
+    um arquivo desse tipo foi importado com sucesso."""
+
+    data_type: str
+    last_ingested_at: datetime
+
+
+class DataFreshnessResponse(BaseModel):
+    """GET /api/v1/analytics/data-freshness — achado do Dossiê Insighta
+    RCM ("Como o dado entra no sistema"): nenhuma tela fora do histórico
+    de upload mostrava "desde quando" os números da Sala de Comando
+    refletem a realidade. `items` só lista data_type que já tiveram pelo
+    menos uma ingestão com sucesso (nunca uma data inventada para um
+    tipo nunca importado). `stalest_at` é o PIOR caso entre os tipos já
+    importados (o mais antigo dos "mais recentes") — a manchete honesta
+    de frescor: se algum tipo está desatualizado, o indicador não deve
+    esconder isso atrás da média ou do tipo mais fresco. None quando
+    `items` está vazio (nenhuma ingestão bem-sucedida ainda)."""
+
+    items: list[DataFreshnessItem]
+    stalest_at: datetime | None
+
+
+class ReturnRateResponse(BaseModel):
+    """GET /api/v1/analytics/return-rate — achado do Dossiê Insighta
+    RCM: `Appointment.visit_type` (primeira_consulta/retorno) é
+    capturado desde sempre, mas nenhum indicador media taxa de retorno
+    de paciente (fidelização) a partir dele. Tendência contra o período
+    anterior de mesma duração (mesmo formato PeriodKPI do resto da Sala
+    de Comando)."""
+
+    period_start: date
+    period_end: date
+    return_rate: PeriodKPI | None  # None quando não há nenhum atendimento com visit_type informado no período atual
+    return_count: int
+    first_visit_count: int
+    untagged_count: int  # completed sem visit_type informado — nunca soma no denominador da taxa
+
+
+class AverageTicketChannelItem(BaseModel):
+    """Uma linha do ticket médio por canal de agendamento — ver
+    AnalyticsRepository.revenue_by_booking_channel."""
+
+    channel: str
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketProcedureItem(BaseModel):
+    """Uma linha do ticket médio por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure."""
+
+    procedure_code: str
+    procedure_name: str | None
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketResponse(BaseModel):
+    """GET /api/v1/analytics/average-ticket — achado do Dossiê Insighta
+    RCM: nenhuma agregação de ticket médio existia, apesar do dado
+    (`Billing.charged_value`) estar pronto desde sempre. `overall` segue
+    o mesmo formato PeriodKPI (tendência contra o período anterior de
+    mesma duração) do resto da Sala de Comando; None quando
+    `billing_count == 0`, nunca uma média inventada sobre zero
+    lançamentos."""
+
+    period_start: date
+    period_end: date
+    overall: PeriodKPI | None
+    billing_count: int
+    by_channel: list[AverageTicketChannelItem]
+    by_procedure: list[AverageTicketProcedureItem]
+
+
+class PatientRevenueItem(BaseModel):
+    """Uma linha do Pareto de receita por paciente — ver
+    AnalyticsRepository.revenue_by_patient. `cumulative_share_pct` é a
+    soma acumulada de `share_pct` até esta linha (na ordem em que a
+    lista já vem, maior receita primeiro) — a leitura direta de "os N
+    primeiros pacientes desta lista somam X% do faturado"."""
+
+    patient_id: UUID
+    full_name: str
+    revenue: float
+    share_pct: float
+    cumulative_share_pct: float
+
+
+class PatientRevenueParetoResponse(BaseModel):
+    """GET /api/v1/analytics/patient-revenue-pareto — achado do Dossiê
+    Insighta RCM: dimensão de concentração de receita DIFERENTE da que
+    já existe por convênio (`_revenue_concentration_insight`) — aqui o
+    risco é depender de poucos PACIENTES, não de poucos convênios.
+    `top_n_share_pct` é `None` só quando `total_billed <= 0` (nenhum
+    faturamento no período — nunca uma % inventada sobre zero)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    items: list[PatientRevenueItem]  # top N por receita, maior primeiro
+    top_n_share_pct: float | None
+
+
+class AgeBucketItem(BaseModel):
+    """Uma faixa etária e quantos pacientes distintos com atendimento
+    concluído no período caem nela — ver
+    AnalyticsRepository.active_patient_birth_dates."""
+
+    label: str  # "0-17" | "18-30" | "31-45" | "46-60" | "60+"
+    patient_count: int
+
+
+class PatientDemographicsResponse(BaseModel):
+    """GET /api/v1/analytics/patient-demographics — achado do Dossiê
+    Insighta RCM: faixa etária calculada a partir de `Patient.birth_date`
+    (idade NA DATA DE HOJE, não na data do atendimento), nunca lida
+    antes. Conta pacientes DISTINTOS com pelo menos 1 atendimento
+    concluído no período. `unknown_age_count` são pacientes sem
+    `birth_date` cadastrado — nunca jogados numa faixa por padrão."""
+
+    period_start: date
+    period_end: date
+    buckets: list[AgeBucketItem]  # sempre as 5 faixas, mesmo com contagem 0
+    unknown_age_count: int

@@ -37,6 +37,7 @@ from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
@@ -78,6 +79,7 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             ContractRepository(session),
             CostEntryRepository(session),
             InsightOutcomeRepository(session),
+            IngestionRepository(session),
         )
         health_score = await service.get_health_score(str(tenant.id))
         await HealthScoreSnapshotRepository(session).upsert_snapshot(
