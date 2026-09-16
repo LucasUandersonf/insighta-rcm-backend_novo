@@ -204,14 +204,14 @@ class AnalyticsRepository:
         start, end = _bounds(date_from, date_to)
         stmt = text(
             """
-            SELECT ip.id, ip.display_name,
+            SELECT ip.id, ip.display_name, ip.plan_type,
                    AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0) AS avg_days,
                    COUNT(*) AS settled_count
             FROM core.billing b
             JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
             WHERE b.created_at >= :start AND b.created_at <= :end
               AND b.settled_at IS NOT NULL
-            GROUP BY ip.id, ip.display_name
+            GROUP BY ip.id, ip.display_name, ip.plan_type
             ORDER BY avg_days DESC
             """
         )
@@ -220,8 +220,9 @@ class AnalyticsRepository:
             {
                 "insurance_plan_id": str(row[0]),
                 "insurance_plan_name": row[1],
-                "avg_days_to_receive": float(row[2]),
-                "billings_settled_count": int(row[3]),
+                "plan_type": row[2],
+                "avg_days_to_receive": float(row[3]),
+                "billings_settled_count": int(row[4]),
             }
             for row in result.all()
         ]
@@ -574,6 +575,19 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {name: float(total) for name, total in result.all() if total}
 
+    async def plan_types_by_name(self) -> dict[str, str]:
+        """
+        Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+        primeira classe") — lookup `display_name -> plan_type`, usado
+        pra anotar o ranking de perda por convênio (já agrupado por
+        NOME de plano em `financial_hole_by_plan`/`payment_gap_by_plan`/
+        `denial_risk_value_by_plan`) sem precisar reescrever essas 3
+        queries existentes. Mesma fragilidade de chave por NOME (não por
+        id) já presente nelas — não introduzida aqui.
+        """
+        result = await self.session.execute(select(InsurancePlan.display_name, InsurancePlan.plan_type))
+        return dict(result.all())
+
     async def contract_utilization(self, date_from: date, date_to: date) -> list[dict]:
         """
         Utilização de contrato: dos procedimentos NEGOCIADOS num contrato
@@ -606,6 +620,7 @@ class AnalyticsRepository:
             SELECT
                 c.id,
                 ip.display_name,
+                ip.plan_type,
                 c.valid_from,
                 c.valid_until,
                 COUNT(ci.id) AS total_items,
@@ -624,7 +639,7 @@ class AnalyticsRepository:
                 LIMIT 1
             ) billed ON true
             WHERE c.status = 'homologado'
-            GROUP BY c.id, ip.display_name, c.valid_from, c.valid_until
+            GROUP BY c.id, ip.display_name, ip.plan_type, c.valid_from, c.valid_until
             ORDER BY (COUNT(DISTINCT CASE WHEN billed.tuss_code IS NOT NULL THEN ci.tuss_code END)::float / NULLIF(COUNT(ci.id), 0)) ASC
             """
         )
@@ -633,11 +648,12 @@ class AnalyticsRepository:
             {
                 "contract_id": row[0],
                 "plan_name": row[1],
-                "valid_from": row[2],
-                "valid_until": row[3],
-                "total_items": row[4],
-                "items_billed": row[5],
-                "idle_catalog_value": float(row[6]),
+                "plan_type": row[2],
+                "valid_from": row[3],
+                "valid_until": row[4],
+                "total_items": row[5],
+                "items_billed": row[6],
+                "idle_catalog_value": float(row[7]),
             }
             for row in result.all()
         ]

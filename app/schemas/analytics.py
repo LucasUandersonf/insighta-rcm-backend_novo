@@ -56,6 +56,13 @@ class PaymentLagByPlanItem(BaseModel):
 
     insurance_plan_id: UUID
     insurance_plan_name: str
+    # Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+    # primeira classe") — "convenio" ou "particular" (ver
+    # DECISÃO em 054_insurance_plan_type.sql). PMR só tem o sentido de
+    # "prazo de operadora" pra convênio de verdade; particular aparece
+    # aqui por transparência, nunca escondido, mas o frontend pode optar
+    # por segregar a leitura.
+    plan_type: str
     avg_days_to_receive: float
     billings_settled_count: int
 
@@ -248,6 +255,11 @@ class PlanLossItem(BaseModel):
     mais em cada convênio."""
 
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima. "convenio" quando o nome não
+    # bate com nenhum InsurancePlan cadastrado (nunca deveria acontecer,
+    # mas nunca None).
+    plan_type: str
     financial_hole: float  # cobrado abaixo do contratado
     payment_gap: float  # pago pela operadora abaixo do contratado (só billings conciliados)
     denial_risk_value: float  # valor faturado com risco de glosa médio/alto
@@ -270,6 +282,9 @@ class ContractUtilizationItem(BaseModel):
 
     contract_id: UUID
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima.
+    plan_type: str
     valid_from: date
     valid_until: date | None
     total_items: int  # procedimentos negociados no contrato

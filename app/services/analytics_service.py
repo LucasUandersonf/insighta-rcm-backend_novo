@@ -602,6 +602,7 @@ class AnalyticsService:
                 PaymentLagByPlanItem(
                     insurance_plan_id=uuid.UUID(row["insurance_plan_id"]),
                     insurance_plan_name=row["insurance_plan_name"],
+                    plan_type=row["plan_type"],
                     avg_days_to_receive=row["avg_days_to_receive"],
                     billings_settled_count=row["billings_settled_count"],
                 )
@@ -754,11 +755,16 @@ class AnalyticsService:
         hole_by_plan = await self.analytics_repo.financial_hole_by_plan(date_from, date_to)
         gap_by_plan = await self.analytics_repo.payment_gap_by_plan(date_from, date_to)
         denial_by_plan = await self.analytics_repo.denial_risk_value_by_plan(date_from, date_to)
+        plan_types = await self.analytics_repo.plan_types_by_name()
 
         plan_names = set(hole_by_plan) | set(gap_by_plan) | set(denial_by_plan)
         items = [
             PlanLossItem(
                 plan_name=plan_name,
+                # Sem match no lookup (plano renomeado/excluído entre a
+                # query e essa chamada) cai em "convenio" — retrocompatível
+                # com o comportamento anterior à Onda 3, nunca quebra.
+                plan_type=plan_types.get(plan_name, "convenio"),
                 financial_hole=hole_by_plan.get(plan_name, 0.0),
                 payment_gap=gap_by_plan.get(plan_name, 0.0),
                 denial_risk_value=denial_by_plan.get(plan_name, 0.0),
@@ -784,6 +790,7 @@ class AnalyticsService:
             ContractUtilizationItem(
                 contract_id=row["contract_id"],
                 plan_name=row["plan_name"],
+                plan_type=row["plan_type"],
                 valid_from=row["valid_from"],
                 valid_until=row["valid_until"],
                 total_items=row["total_items"],

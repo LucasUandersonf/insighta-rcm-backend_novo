@@ -13,15 +13,17 @@ import pytest
 from sqlalchemy import text
 
 
-async def _create_insurance_plan(admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional") -> str:
+async def _create_insurance_plan(
+    admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional", plan_type="convenio"
+) -> str:
     plan_id = str(uuid.uuid4())
     async with admin_engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO core.insurance_plans (id, tenant_id, display_name, normalized_key) "
-                "VALUES (:id, :t, :name, :key)"
+                "INSERT INTO core.insurance_plans (id, tenant_id, display_name, normalized_key, plan_type) "
+                "VALUES (:id, :t, :name, :key, :plan_type)"
             ),
-            {"id": plan_id, "t": tenant_id, "name": display_name, "key": normalized_key},
+            {"id": plan_id, "t": tenant_id, "name": display_name, "key": normalized_key, "plan_type": plan_type},
         )
     return plan_id
 
@@ -170,6 +172,30 @@ async def test_payment_lag_by_plan_orders_worst_first(client, auth_headers_a, ad
     assert [item["insurance_plan_name"] for item in body["items"]] == ["Convênio Lento", "Convênio Rápido"]
     assert body["items"][0]["avg_days_to_receive"] == 100.0
     assert body["items"][1]["avg_days_to_receive"] == 10.0
+    # Achado da Onda 3 do Plano de Ação — ambos os planos criados por
+    # `_create_insurance_plan` nascem "convenio" (default da coluna).
+    assert body["items"][0]["plan_type"] == "convenio"
+    assert body["items"][1]["plan_type"] == "convenio"
+
+
+async def test_payment_lag_by_plan_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+    primeira classe") — um plano `plan_type="particular"` aparece no
+    ranking de PMR marcado como tal, nunca escondido nem confundido com
+    convênio de verdade."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, particular_plan, days_to_receive=5.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/payment-lag-by-plan?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["plan_type"] == "particular"
 
 
 async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
@@ -741,6 +767,44 @@ async def test_plan_loss_ranking_groups_financial_hole_by_plan(client, auth_head
     # 150 (charged_value sob risco) = 200.
     assert plans[0]["denial_risk_value"] == 150.0
     assert plans[0]["total_loss"] == 200.0
+    assert plans[0]["plan_type"] == "convenio"
+
+
+async def test_plan_loss_ranking_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação — mesma marcação de
+    `test_payment_lag_by_plan_reports_particular_plan_type`, agora no
+    ranking de perda por convênio (via `plan_types_by_name()`)."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=200.0)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Particular"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": particular_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": particular_plan, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/plan-loss-ranking?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    plans = response.json()["plans"]
+    assert len(plans) == 1
+    assert plans[0]["plan_name"] == "Atendimento Particular"
+    assert plans[0]["plan_type"] == "particular"
 
 
 async def test_plan_loss_ranking_orders_by_total_loss_descending(client, auth_headers_a, admin_engine, tenant_a):
@@ -876,6 +940,26 @@ async def test_contract_utilization_flags_unbilled_items(client, auth_headers_a,
     assert entry["items_billed"] == 1
     assert entry["utilization_pct"] == 50.0
     assert entry["idle_catalog_value"] == 80.0
+    assert entry["plan_type"] == "convenio"
+
+
+async def test_contract_utilization_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação — mesma marcação de plan_type
+    aplicada à utilização de contrato, pra um contrato "homologado" com
+    um plano particular (ex: tabela particular negociada)."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=200.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/contract-utilization?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    contracts = response.json()["contracts"]
+    assert len(contracts) == 1
+    assert contracts[0]["plan_type"] == "particular"
 
 
 async def test_agenda_metrics_includes_patient_no_show_ranking(client, auth_headers_a, admin_engine, tenant_a):
