@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.billing import Billing
 from app.models.denial_appeal import DenialAppeal
 
 
@@ -99,6 +100,33 @@ class DenialAppealRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def count_resolved_by_appeal_type(self, *, appeal_type: str, exclude_appeal_id: uuid.UUID) -> dict[str, int]:
+        """
+        Épico F2.4 do Plano Diretor ("Recurso de glosa assistido") —
+        "histórico de recursos ganhos pra motivo semelhante". A granularidade
+        real disponível é `appeal_type` (tecnica/administrativa/medica),
+        não o texto livre de `operator_denial_reason` (digitado por
+        pessoas diferentes, nunca normalizado — comparar por igualdade
+        de string classificaria "falta de guia" e "Falta de Guia" como
+        motivos diferentes). TODO o histórico já resolvido do mesmo
+        tipo, sem janela de tempo — mesmo critério de
+        denial_reason_confirmation_rates (olha pra TODO o histórico).
+        `exclude_appeal_id` tira o próprio recurso sendo redigido agora
+        da conta (ele pode já estar resolvido numa reabertura de fluxo).
+        """
+        stmt = (
+            select(DenialAppeal.status, func.count())
+            .where(
+                DenialAppeal.appeal_type == appeal_type,
+                DenialAppeal.status.in_(("deferido", "indeferido")),
+                DenialAppeal.id != exclude_appeal_id,
+            )
+            .group_by(DenialAppeal.status)
+        )
+        result = await self.session.execute(stmt)
+        counts = {status: count for status, count in result.all()}
+        return {"deferido": counts.get("deferido", 0), "indeferido": counts.get("indeferido", 0)}
+
     async def count_due_within(self, *, as_of: date, horizon_days: int) -> int:
         """Mesma janela de list_due_within, mas COUNT no banco em vez de
         materializar as linhas — é o número que alimenta o KPI de
@@ -150,3 +178,27 @@ class DenialAppealRepository:
         result = await self.session.execute(stmt, {"appeal_id": appeal_id})
         row = result.mappings().first()
         return dict(row) if row is not None else None
+
+    async def sum_recovered_value(self) -> tuple[float, int]:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — "glosas recuperadas por prazo avisado": soma do charged_value
+        de todo recurso já GANHO (status='deferido') — dinheiro que
+        seria perdido pra glosa se o recurso não tivesse sido protocolado
+        a tempo (o prazo é exatamente o que o produto avisa, ver
+        appeals_due_soon_count/_appeals_due_soon_insight). TODO o
+        histórico, sem janela — mesmo raciocínio de
+        count_resolved_by_status/denial_reason_confirmation_rates:
+        "prova de ROI" é cumulativo desde que a clínica começou a usar o
+        produto, não uma métrica de período.
+
+        Retorna (valor_total_recuperado, quantidade_de_recursos).
+        """
+        stmt = (
+            select(func.coalesce(func.sum(Billing.charged_value), 0), func.count())
+            .select_from(DenialAppeal)
+            .join(Billing, Billing.id == DenialAppeal.billing_id)
+            .where(DenialAppeal.status == "deferido")
+        )
+        total, count = (await self.session.execute(stmt)).one()
+        return float(total), int(count)

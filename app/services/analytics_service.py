@@ -17,6 +17,7 @@ os N dias imediatamente anteriores ao período pedido (N = duração do
 período atual) generaliza a mesma ideia sem assumir semana fixa — se o
 usuário pedir 7 dias, o resultado JÁ é "semana vs. semana anterior".
 """
+import calendar
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -25,8 +26,10 @@ from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_repository import ContractRepository
+from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -37,6 +40,8 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    DataQualityByUserItem,
+    DataQualityResponse,
     DenialReasonConfirmationItem,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
@@ -64,17 +69,30 @@ from app.schemas.analytics import (
     PaymentLagByPlanResponse,
     PlanLossItem,
     PlanLossRankingResponse,
+    PriorityQueueItem,
+    PriorityQueueResponse,
+    CapitalDecisionBaseDataResponse,
+    ProductRoiResponse,
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
+    SatisfactionSummaryResponse,
     SmartInsightResponse,
     SmartInsightsResponse,
     UpcomingRiskAppointmentItem,
+    UpsellFunnelItem,
+    UpsellFunnelResponse,
     WeekdayBucket,
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
-from app.services.health_score_engine import compute_health_score
+from app.services.health_score_engine import (
+    compute_health_score,
+    resolve_health_score_ceilings,
+    resolve_no_show_ceiling_for_period,
+    suggest_denial_rate_ceiling,
+    suggest_no_show_rate_ceiling,
+)
 from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
@@ -83,6 +101,8 @@ from app.services.smart_insights_engine import (
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
+    resolve_denial_risk_thresholds,
+    suggest_denial_risk_thresholds,
 )
 
 # Amostra mínima antes de reportar a taxa de confirmação de um motivo
@@ -94,6 +114,12 @@ from app.services.smart_insights_engine import (
 # demais limiares deste produto).
 DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
 
+# Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") — amostra
+# mínima de atendimentos lançados por um atendente antes de reportar sua
+# taxa de completude, mesmo raciocínio de DENIAL_REASON_CONFIRMATION_MIN_SAMPLE
+# logo acima: 1-2 lançamentos não é um "padrão do atendente", é ruído.
+DATA_QUALITY_MIN_SAMPLE = 5
+
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
 # de "tendência de saúde da clínica" que pula toda vez que o usuário
@@ -101,6 +127,10 @@ DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
 # dá amostra mínima razoável para o componente de recurso de glosa
 # (resolução de recurso é lenta, poucos por semana).
 _HEALTH_SCORE_WINDOW_DAYS = 90
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) — mesma
+# janela fixa de 90 dias da Nota de Saúde Financeira, mesmo raciocínio:
+# indicador de tendência, não retrato de um dia só.
+_SATISFACTION_WINDOW_DAYS = 90
 
 # Referência da tendência do anel de saúde: "como eu estava há 3 meses"
 # — mesma janela de 90 dias, por consistência com a própria nota (que já
@@ -241,6 +271,89 @@ def _denial_risk_pct(risk_value_breakdown: dict[str, float]) -> tuple[float | No
     return (at_risk / total) * 100, at_risk
 
 
+# Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+# quantos meses FECHADOS de histórico buscar para sugerir um limiar
+# calibrado pela própria clínica (ver threshold_calibration.py). "Mês
+# fechado" exclui o mês corrente (ainda parcial) de propósito — um mês
+# com só 5 dias faturados teria uma taxa artificialmente instável. 12
+# meses é generoso o bastante para cobrir sazonalidade sem custar muitas
+# queries (cada mês é 1-2 SELECTs pequenos, reaproveitando repositório já
+# existente — não uma SQL nova agregando por mês, já que este cálculo só
+# roda quando alguém pede a sugestão, nunca num dashboard de alta
+# frequência).
+_THRESHOLD_SUGGESTION_LOOKBACK_MONTHS = 12
+
+
+def _preceding_month_bounds(months_back: int) -> tuple[date, date]:
+    """(primeiro dia, último dia) do mês `months_back` meses atrás do mês
+    CORRENTE — months_back=1 é o mês passado (o mais recente FECHADO),
+    nunca o mês corrente em si."""
+    today = date.today()
+    year = today.year
+    month = today.month - months_back
+    while month <= 0:
+        month += 12
+        year -= 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, 1), date(year, month, last_day)
+
+
+async def monthly_denial_risk_pcts(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> list[float]:
+    """Série de denial_risk_pct (escala 0-100) dos últimos `months` meses
+    FECHADOS desta clínica — insumo de
+    smart_insights_engine.suggest_denial_risk_thresholds. Só entram meses
+    com faturamento no período (mesmo critério de _denial_risk_pct: sem
+    base, o mês não tem uma taxa real para contribuir — não é 0%, é
+    ausência de amostra)."""
+    pcts: list[float] = []
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        breakdown = await analytics_repo.denial_risk_value_breakdown(start, end)
+        pct, _value = _denial_risk_pct(breakdown)
+        if pct is not None:
+            pcts.append(pct)
+    return pcts
+
+
+async def monthly_no_show_rates(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> list[float]:
+    """Série de taxa de falta (fração 0-1) dos últimos `months` meses
+    FECHADOS desta clínica — insumo de
+    health_score_engine.suggest_no_show_rate_ceiling. Só entram meses com
+    pelo menos 1 atendimento resolvido (completed/no_show) — mesmo
+    critério de "sem amostra != 0%" do resto do produto."""
+    rates: list[float] = []
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        no_show_count, total = await analytics_repo.overall_no_show_rate(start, end)
+        if total > 0:
+            rates.append(no_show_count / total)
+    return rates
+
+
+async def monthly_no_show_rates_by_specialty(
+    analytics_repo: AnalyticsRepository, *, months: int = _THRESHOLD_SUGGESTION_LOOKBACK_MONTHS
+) -> dict[str, list[float]]:
+    """Mesma série de `monthly_no_show_rates` acima, quebrada por
+    especialidade do profissional — "Junta Técnica Insighta": insumo de
+    health_score_engine.resolve_no_show_ceiling_for_period (calibração
+    por especialidade DENTRO do próprio histórico da clínica, nunca um
+    benchmark externo — ver DECISÃO em threshold_calibration.py). Só
+    entram meses com pelo menos 1 atendimento resolvido NAQUELA
+    especialidade — mesmo critério "sem amostra != 0%" de sempre."""
+    rates_by_specialty: dict[str, list[float]] = {}
+    for months_back in range(1, months + 1):
+        start, end = _preceding_month_bounds(months_back)
+        counts = await analytics_repo.no_show_rate_by_specialty(start, end)
+        for specialty, (no_show_count, total) in counts.items():
+            if total > 0:
+                rates_by_specialty.setdefault(specialty, []).append(no_show_count / total)
+    return rates_by_specialty
+
+
 def _regroup_text_counts(breakdown: dict[str, int]) -> dict[str, int]:
     """
     Achado 3 da Auditoria de Templates e Insights (alto) — `canal_agendamento`/
@@ -305,6 +418,8 @@ class AnalyticsService:
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
         contract_repo: ContractRepository,
+        cost_entry_repo: CostEntryRepository,
+        insight_outcome_repo: InsightOutcomeRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -315,6 +430,8 @@ class AnalyticsService:
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
         self.contract_repo = contract_repo
+        self.cost_entry_repo = cost_entry_repo
+        self.insight_outcome_repo = insight_outcome_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -759,6 +876,26 @@ class AnalyticsService:
         coparticipation_total, coparticipation_billing_count, total_billing_count = (
             await self.analytics_repo.coparticipation_summary(date_from, date_to)
         )
+        # Épico F4.2 — "estado AGORA", mesmo raciocínio de risk_breakdown
+        # acima: só o período ATUAL é lido por
+        # _coparticipation_unconfirmed_insight, mas buscar pros dois é
+        # inofensivo (mesma query barata, sem quebrar o padrão de
+        # sempre buscar tudo aqui).
+        coparticipation_unconfirmed_value, coparticipation_unconfirmed_count = (
+            await self.analytics_repo.coparticipation_unconfirmed_summary(date_from, date_to)
+        )
+        # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) —
+        # mesmo raciocínio de "estado AGORA" acima, para
+        # _coparticipation_delayed_payment_insight.
+        coparticipation_delayed_payment_value, coparticipation_delayed_payment_count, coparticipation_known_payment_method_value = (
+            await self.analytics_repo.coparticipation_payment_method_summary(date_from, date_to)
+        )
+        # Épico F2.3 — mesmo raciocínio de coparticipation_unconfirmed_*
+        # acima: "estado AGORA", só o período atual é lido por
+        # _opme_documentation_unconfirmed_insight.
+        opme_documentation_unconfirmed_value, opme_documentation_unconfirmed_count = (
+            await self.analytics_repo.opme_documentation_unconfirmed_summary(date_from, date_to)
+        )
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(date_from, date_to)
         denial_risk_pct, denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
         professional_denial_rates = await self.analytics_repo.professional_denial_rates(date_from, date_to)
@@ -799,6 +936,13 @@ class AnalyticsService:
             coparticipation_total=coparticipation_total,
             coparticipation_billing_count=coparticipation_billing_count,
             total_billing_count=total_billing_count,
+            coparticipation_unconfirmed_value=coparticipation_unconfirmed_value,
+            coparticipation_unconfirmed_count=coparticipation_unconfirmed_count,
+            coparticipation_delayed_payment_value=coparticipation_delayed_payment_value,
+            coparticipation_delayed_payment_count=coparticipation_delayed_payment_count,
+            coparticipation_known_payment_method_value=coparticipation_known_payment_method_value,
+            opme_documentation_unconfirmed_value=opme_documentation_unconfirmed_value,
+            opme_documentation_unconfirmed_count=opme_documentation_unconfirmed_count,
             stale_open_lotes_count=stale_open_lotes[0],
             oldest_open_lote_age_days=stale_open_lotes[1],
             avg_days_to_receive=payment_lag_days,
@@ -993,12 +1137,19 @@ class AnalyticsService:
             if candidates:
                 extra_insights.append(max(candidates, key=lambda i: (i.financial_impact or 0)))
 
+        # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+        # — `tenant` já foi buscado acima (annual_revenue_goal); reaproveita
+        # o mesmo objeto para resolver o limiar de risco de glosa
+        # configurado desta clínica, sem consulta extra.
+        denial_risk_warning_threshold, denial_risk_critical_threshold = resolve_denial_risk_thresholds(tenant)
         insights = generate_insights(
             current_input,
             previous_input,
             estimated_revenue_at_risk,
             estimated_idle_capacity_revenue_lost,
             extra_insights=extra_insights,
+            denial_risk_warning_threshold=denial_risk_warning_threshold,
+            denial_risk_critical_threshold=denial_risk_critical_threshold,
         )
 
         return SmartInsightsResponse(
@@ -1019,16 +1170,164 @@ class AnalyticsService:
             ],
         )
 
-    async def get_health_score(self) -> HealthScoreResponse:
+    # _PRIORITY_QUEUE_DEFAULT_LIMIT: quantos itens a tela "Hoje" mostra por
+    # padrão — 10 é "cabe numa tela sem rolar muito" para o gestor de 5
+    # minutos que a F1.1 do Plano Diretor descreve; `total_considered` no
+    # response deixa claro quando há mais itens fora do corte.
+    _PRIORITY_QUEUE_DEFAULT_LIMIT = 10
+
+    async def get_priority_queue(
+        self,
+        date_from: date,
+        date_to: date,
+        *,
+        tenant_id: str,
+        network_benchmark: list[tuple[str, str, float, float]] | None = None,
+        limit: int = _PRIORITY_QUEUE_DEFAULT_LIMIT,
+    ) -> PriorityQueueResponse:
+        """
+        Épico F1.1 do Plano Diretor ("Fila única de ação priorizada"):
+        "Hoje os 39 mecanismos vivem espalhados em abas [...] O gestor
+        decide sozinho, de cabeça, o que atacar primeiro." Esta fila
+        reaproveita 100% do cálculo já pronto — get_smart_insights (que
+        já cobre a maior parte do motor, incluindo o Comparativo) MAIS
+        os 3 painéis do Raio-X da Receita que concentram perda real mas
+        NUNCA viram card de feed sozinhos (ver DECISÃO no boletim
+        técnico: "são painéis, não cards de feed"): ranking de perda por
+        convênio, utilização de contrato ociosa, e o profissional com
+        menor receita por hora ocupada. Nenhum motor novo, só uma
+        camada de agregação e ranqueamento por cima de serviços que já
+        existem — exatamente o que o tech-note do épico pede.
+
+        Cada painel entra só quando tem ALGO material a mostrar (nunca
+        um card vazio "0 de perda") e só o PIOR item de cada um — mesmo
+        critério de "só o pior caso vira manchete" já usado em
+        _professional_outlier_insight/build_network_comparativo_insight.
+        """
+        insights_response = await self.get_smart_insights(
+            date_from, date_to, tenant_id=tenant_id, network_benchmark=network_benchmark
+        )
+        items: list[PriorityQueueItem] = [
+            PriorityQueueItem(
+                severity=i.severity,
+                category=i.category,
+                title=i.title,
+                message=i.message,
+                financial_impact=i.financial_impact,
+                is_new=i.is_new,
+                action_label=i.action_label,
+                action_href=i.action_href,
+                source="insight",
+            )
+            for i in insights_response.insights
+        ]
+
+        loss_ranking = await self.get_plan_loss_ranking(date_from, date_to)
+        if loss_ranking.plans and loss_ranking.plans[0].total_loss > 0:
+            worst_plan = loss_ranking.plans[0]
+            items.append(
+                PriorityQueueItem(
+                    severity="critical",
+                    category="faturamento",
+                    title=f"Maior perda concentrada no convênio {worst_plan.plan_name}",
+                    message=(
+                        f"Somando buraco de cobrança, pagamento a menor e valor em risco de glosa, "
+                        f"{worst_plan.plan_name} concentra R$ {worst_plan.total_loss:,.2f} de perda no período — "
+                        "o maior entre todos os convênios faturados. Ver o ranking completo pra decidir com qual "
+                        "convênio conversar primeiro."
+                    ).replace(",", "X").replace(".", ",").replace("X", "."),
+                    financial_impact=worst_plan.total_loss,
+                    action_label="Ver ranking de perda por convênio",
+                    action_href="/",
+                    source="raiox",
+                )
+            )
+
+        utilization = await self.get_contract_utilization(date_from, date_to)
+        if utilization.contracts and utilization.contracts[0].idle_catalog_value > 0:
+            worst_contract = utilization.contracts[0]
+            items.append(
+                PriorityQueueItem(
+                    severity="warning",
+                    category="faturamento",
+                    title=f"Contrato de {worst_contract.plan_name} com catálogo pouco utilizado",
+                    message=(
+                        f"Só {worst_contract.utilization_pct:.0f}% dos procedimentos negociados com "
+                        f"{worst_contract.plan_name} foram faturados no período — R$ {worst_contract.idle_catalog_value:,.2f} "
+                        "em valor de tabela contratado nunca cobrado. Pode ser linha de serviço parada, não "
+                        "necessariamente um problema, mas vale investigar por quê."
+                    ).replace(",", "X").replace(".", ",").replace("X", "."),
+                    financial_impact=worst_contract.idle_catalog_value,
+                    action_label="Ver utilização de contrato",
+                    action_href="/",
+                    source="raiox",
+                )
+            )
+
+        profitability = await self.get_profitability(date_from, date_to)
+        rated_professionals = [p for p in profitability.by_professional if p.revenue_per_hour is not None]
+        # Exige pelo menos 2 pra "pior" ter sentido comparativo — com 1
+        # profissional só, não existe "pior que quem" (mesmo princípio
+        # de amostra mínima do resto do motor: nunca inventa confiança
+        # sem ter contra o que comparar).
+        if len(rated_professionals) >= 2:
+            worst_professional = min(rated_professionals, key=lambda p: p.revenue_per_hour or 0)
+            best_rate = max(p.revenue_per_hour or 0 for p in rated_professionals)
+            if best_rate > 0 and (worst_professional.revenue_per_hour or 0) < best_rate:
+                items.append(
+                    PriorityQueueItem(
+                        severity="warning",
+                        category="estrategia",
+                        title=f"{worst_professional.full_name} com a menor receita por hora ocupada da equipe",
+                        message=(
+                            f"R$ {(worst_professional.revenue_per_hour or 0):,.2f}/hora ocupada, contra até "
+                            f"R$ {best_rate:,.2f}/hora de outro profissional da equipe no mesmo período. Pode ser mix "
+                            "de procedimento, tabela de convênio, ou algo a conversar — sem inventar o motivo aqui."
+                        ).replace(",", "X").replace(".", ",").replace("X", "."),
+                        financial_impact=None,
+                        action_label="Ver rentabilidade por profissional",
+                        # "#tab:id" — mesma convenção de smart_insights_engine.Insight:
+                        # a fila renderiza dentro da própria Sala de Comando, então
+                        # troca de aba (aba "Rentabilidade" já existe), não navega
+                        # pra fora (ver InsightActionButton no frontend).
+                        action_href="#tab:rentabilidade",
+                        source="raiox",
+                    )
+                )
+
+        severity_rank = {"critical": 0, "comparativo": 1, "warning": 2, "positive": 3}
+        items.sort(key=lambda i: (i.financial_impact is None, -(i.financial_impact or 0), severity_rank.get(i.severity, 99)))
+
+        return PriorityQueueResponse(
+            period_start=date_from,
+            period_end=date_to,
+            items=items[:limit],
+            total_considered=len(items),
+        )
+
+    async def get_health_score(self, tenant_id: str) -> HealthScoreResponse:
         """
         Nota de Saúde Financeira — ver DECISÃO completa em
         health_score_engine.py (regras determinísticas, componente sem
         amostra é excluído, nunca vira zero). Janela sempre fixa (ver
         _HEALTH_SCORE_WINDOW_DAYS acima), nunca a do seletor de período.
+
+        `tenant_id` (Épico F2.1 do Plano Diretor — "Calibração por
+        especialidade/porte"): busca o tenant só para resolver os tetos
+        configurados (ver resolve_health_score_ceilings) — mesmo padrão de
+        get_smart_insights reaproveitando `self.tenant_repo`.
+
+        "Junta Técnica Insighta": o teto de falta (`no_show_rate_ceiling`)
+        agora também considera a MISTURA de especialidades do período —
+        ver DECISÃO completa em
+        health_score_engine.resolve_no_show_ceiling_for_period.
         """
         today = date.today()
         window_start_date = today - timedelta(days=_HEALTH_SCORE_WINDOW_DAYS)
         window_start_dt = datetime.combine(window_start_date, datetime.min.time(), tzinfo=timezone.utc)
+
+        tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
+        denial_rate_ceiling, _default_no_show_rate_ceiling = resolve_health_score_ceilings(tenant)
 
         risk_value_breakdown = await self.analytics_repo.denial_risk_value_breakdown(window_start_date, today)
         denial_risk_pct_0_100, _denial_at_risk_value = _denial_risk_pct(risk_value_breakdown)
@@ -1041,12 +1340,27 @@ class AnalyticsService:
         no_show_count, no_show_total = await self.analytics_repo.overall_no_show_rate(window_start_date, today)
         appeal_counts = await self.appeal_repo.count_resolved_by_status(since=window_start_dt)
 
+        no_show_rate_ceiling = _default_no_show_rate_ceiling
+        if no_show_total > 0 and (tenant is None or tenant.health_score_no_show_ceiling is None):
+            # Só busca a quebra por especialidade quando de fato existe um
+            # componente de falta pra calcular E o gestor não configurou um
+            # teto manual (que sempre vence, ver resolve_no_show_ceiling_for_period)
+            # — evita 2 queries extras num tenant novo sem atendimento
+            # resolvido ainda, ou que já fez a própria calibração.
+            counts_by_specialty = await self.analytics_repo.no_show_rate_by_specialty(window_start_date, today)
+            monthly_rates_by_specialty = await monthly_no_show_rates_by_specialty(self.analytics_repo)
+            no_show_rate_ceiling = resolve_no_show_ceiling_for_period(
+                tenant, counts_by_specialty=counts_by_specialty, monthly_rates_by_specialty=monthly_rates_by_specialty
+            )
+
         result = compute_health_score(
             denial_risk_pct=denial_risk_pct,
             no_show_count=no_show_count,
             no_show_total=no_show_total,
             appeal_deferred_count=appeal_counts["deferido"],
             appeal_indeferido_count=appeal_counts["indeferido"],
+            denial_rate_ceiling=denial_rate_ceiling,
+            no_show_rate_ceiling=no_show_rate_ceiling,
         )
 
         # Tendência (ver DECISÃO em app/sql/034_health_score_snapshots.sql):
@@ -1074,6 +1388,56 @@ class AnalyticsService:
             ],
             window_days=_HEALTH_SCORE_WINDOW_DAYS,
             trend=trend,
+        )
+
+    async def get_satisfaction_summary(self) -> SatisfactionSummaryResponse:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 2) — resumo de NPS/satisfação pós-atendimento. Janela
+        fixa (mesmo padrão de get_health_score, ver DECISÃO em
+        _SATISFACTION_WINDOW_DAYS acima) — não segue o seletor de período
+        da tela.
+
+        Tendência contra a janela ANTERIOR de mesma duração (mesmo
+        formato PeriodKPI usado no resto da Sala de Comando, ver
+        ExecutiveSummaryResponse) — não uma fotografia gravada tipo
+        Health Score, porque aqui a amostra já é naturalmente pequena
+        (nem todo atendimento é avaliado); comparar contra o período
+        imediatamente anterior é mais honesto do que esperar meses de
+        histórico acumulado só para ter UMA comparação.
+        """
+        today = date.today()
+        window_start = today - timedelta(days=_SATISFACTION_WINDOW_DAYS)
+        previous_window_end = window_start - timedelta(days=1)
+        previous_window_start = previous_window_end - timedelta(days=_SATISFACTION_WINDOW_DAYS)
+
+        current = await self.analytics_repo.satisfaction_score_breakdown(window_start, today)
+        current_count = sum(current.values())
+
+        average_score = None
+        if current_count > 0:
+            current_avg = sum(score * count for score, count in current.items()) / current_count
+            previous = await self.analytics_repo.satisfaction_score_breakdown(previous_window_start, previous_window_end)
+            previous_count = sum(previous.values())
+            if previous_count > 0:
+                previous_avg = sum(score * count for score, count in previous.items()) / previous_count
+                delta_pct = ((current_avg - previous_avg) / previous_avg) * 100 if previous_avg != 0 else None
+            else:
+                # Sem janela anterior pra comparar — nunca inventa "0% de
+                # variação" (mesmo raciocínio de "amostra ausente != sem
+                # mudança" do resto do produto). previous_value só existe
+                # aqui porque o schema exige um float; delta_pct=None é o
+                # sinal real de "sem comparação", o único que o frontend lê.
+                previous_avg = current_avg
+                delta_pct = None
+
+            average_score = PeriodKPI(value=round(current_avg, 2), previous_value=round(previous_avg, 2), delta_pct=delta_pct)
+
+        return SatisfactionSummaryResponse(
+            average_score=average_score,
+            response_count=current_count,
+            distribution={i: current.get(i, 0) for i in range(1, 6)},
+            window_days=_SATISFACTION_WINDOW_DAYS,
         )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:
@@ -1138,6 +1502,16 @@ class AnalyticsService:
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 
+    # "Junta Técnica Insighta" — CostEntry.category ("folha_fixa",
+    # "comissao_repasse", "aluguel", "insumo", "outros" — ver
+    # app/models/cost_entry.py) que representam custo FIXO (não varia
+    # com volume de atendimento) para o benchmark "custo fixo saudável
+    # fica até 60% da receita". "comissao_repasse"/"insumo" são
+    # variáveis por definição (escalam com volume); "outros" fica de
+    # fora de propósito — categoria ambígua, contar como fixo inflaria
+    # o indicador sem base.
+    _FIXED_COST_CATEGORIES = frozenset({"folha_fixa", "aluguel"})
+
     async def get_profitability(self, date_from: date, date_to: date) -> ProfitabilityResponse:
         """
         Raio-X da Receita, frente "Gestão eficiente": até esta rodada, o
@@ -1153,6 +1527,18 @@ class AnalyticsService:
         `by_procedure` é independente de profissional — ranking de mix
         de receita por código TUSS (ver
         AnalyticsRepository.revenue_by_procedure).
+
+        Épico F3.1 do Plano Diretor ("Módulo de custos e margem real"):
+        "ProfitabilityPanel hoje mostra receita por hora ocupada — não
+        margem. Sem custo [...] toda conversa de 'rentabilidade' fica
+        pela metade." Ver DECISÃO completa em
+        app/sql/039_cost_entries.sql sobre o modelo de rateio (custo
+        GERAL rateado proporcionalmente à receita de cada profissional
+        no período; custo DIRETO de um profissional carregado 100%
+        nele, sem diluir). `has_cost_data=False` (nenhum CostEntry
+        lançado no período) deixa margem/custo em None em TODA a
+        resposta — nunca inventa 0, que pareceria "sem custo nenhum"
+        em vez de "sem dado de custo ainda".
         """
         billing = await self.reporting_repo.billing_summary(date_from, date_to)
         total_billed = billing["total_billed"]
@@ -1182,6 +1568,46 @@ class AnalyticsService:
         # com quem tem valor real na frente.
         by_professional.sort(key=lambda item: (item.revenue_per_hour is None, -(item.revenue_per_hour or 0)))
 
+        cost_entries = await self.cost_entry_repo.list_for_period(date_from=date_from, date_to=date_to)
+        has_cost_data = bool(cost_entries)
+        total_costs: float | None = None
+        net_margin: float | None = None
+        net_margin_pct: float | None = None
+        fixed_cost_pct: float | None = None
+        if has_cost_data:
+            total_costs = round(sum(float(e.amount) for e in cost_entries), 2)
+            net_margin = round(total_billed - total_costs, 2)
+            if total_billed > 0:
+                net_margin_pct = round(net_margin / total_billed * 100, 1)
+                fixed_costs_total = sum(float(e.amount) for e in cost_entries if e.category in self._FIXED_COST_CATEGORIES)
+                fixed_cost_pct = round(fixed_costs_total / total_billed * 100, 1)
+
+            general_costs_total = sum(float(e.amount) for e in cost_entries if e.professional_id is None)
+            direct_costs_by_professional: dict[str, float] = {}
+            for e in cost_entries:
+                if e.professional_id is not None:
+                    key = str(e.professional_id)
+                    direct_costs_by_professional[key] = direct_costs_by_professional.get(key, 0.0) + float(e.amount)
+
+            # Rateio proporcional à receita — só entre quem TEM receita
+            # faturada no período (a mesma lista `by_professional` já
+            # filtrada acima). Um custo direto lançado pra um
+            # profissional SEM receita no período ainda soma no
+            # total_costs do tenant, mas não cria uma linha fantasma
+            # aqui — decisão deliberada, não bug (ver DECISÃO no SQL).
+            revenue_base_for_allocation = sum(item.revenue for item in by_professional)
+            for item in by_professional:
+                direct_cost = direct_costs_by_professional.get(str(item.professional_id), 0.0)
+                allocated_general = (
+                    (item.revenue / revenue_base_for_allocation) * general_costs_total
+                    if revenue_base_for_allocation > 0 and general_costs_total > 0
+                    else 0.0
+                )
+                allocated_cost = round(direct_cost + allocated_general, 2)
+                item.allocated_cost = allocated_cost
+                item.net_margin = round(item.revenue - allocated_cost, 2)
+                item.margin_per_hour = (item.net_margin / (item.booked_minutes / 60)) if item.booked_minutes > 0 else None
+
         procedure_rows = await self.analytics_repo.revenue_by_procedure(date_from, date_to)
         by_procedure = [
             ProcedureProfitabilityItem(
@@ -1200,6 +1626,103 @@ class AnalyticsService:
             total_billed=total_billed,
             by_professional=by_professional,
             by_procedure=by_procedure,
+            has_cost_data=has_cost_data,
+            net_margin_pct=net_margin_pct,
+            fixed_cost_pct=fixed_cost_pct,
+            total_costs=total_costs,
+            net_margin=net_margin,
+        )
+
+    # Épico F3.4 do Plano Diretor ("Decisões de capital"): janela mais
+    # longa que o resto do produto (6 meses, não 7/30 dias) de propósito
+    # — receita/hora por especialidade é ruidosa numa janela curta, e
+    # esta é a base de uma decisão de CONTRATAÇÃO, não um dashboard
+    # operacional do dia a dia.
+    _CAPITAL_DECISION_WINDOW_DAYS = 180
+    # Menor que o usual (3, ver DATA_QUALITY_MIN_SAMPLE/MIN_APPEAL_HISTORY_SAMPLE)
+    # de propósito: a população de profissionais de UMA especialidade
+    # numa clínica pequena já é naturalmente pequena — exigir 3 tornaria
+    # o fallback pra média da clínica quase sempre acionado, esvaziando
+    # o propósito de filtrar por especialidade.
+    _CAPITAL_DECISION_MIN_SAMPLE = 2
+
+    async def get_capital_decision_base_data(
+        self,
+        specialty: str | None,
+        *,
+        belongs_to_organization: bool,
+        sibling_monthly_revenues: list[float],
+    ) -> CapitalDecisionBaseDataResponse:
+        """
+        Épico F3.4 do Plano Diretor ("Decisões de capital: contratar/
+        expandir"). Metade "contratar" calculada aqui (receita/margem
+        por hora por especialidade, reaproveitando get_profitability —
+        ver DECISÃO no schema CapitalDecisionBaseDataResponse); metade
+        "expandir" (`belongs_to_organization`/`sibling_monthly_revenues`)
+        já vem PRONTA do endpoint, porque depende de
+        OrganizationRepository, que só existe atrás de uma sessão
+        cross-tenant (DbSessionNoTenant) — mesmo motivo de
+        network_benchmark ser resolvido no endpoint em vez de aqui
+        dentro (ver get_smart_insights/get_priority_queue).
+        """
+        # +2 dias de margem no fim da janela — mesmo motivo do resto do
+        # produto quando cruza receita com agenda (ver `_window()` nos
+        # testes de rentabilidade): um atendimento já faturado pode
+        # estar agendado pra hoje/amanhã, e cortar a janela exatamente
+        # em "hoje" descartaria a receita/hora desse profissional por um
+        # detalhe de fuso, não por falta de dado real.
+        date_to = date.today() + timedelta(days=2)
+        date_from = date_to - timedelta(days=self._CAPITAL_DECISION_WINDOW_DAYS)
+        profitability = await self.get_profitability(date_from, date_to)
+        rated = [p for p in profitability.by_professional if p.revenue_per_hour is not None]
+
+        professionals = await self.professional_repo.list_active()
+        specialty_by_id = {str(p.id): (p.specialty or "").strip() for p in professionals}
+        available_specialties = sorted({s for s in specialty_by_id.values() if s})
+
+        normalized_requested = specialty.strip() if specialty and specialty.strip() else None
+        used_fallback = False
+        pool = rated
+        if normalized_requested is not None:
+            matching = [
+                p
+                for p in rated
+                if specialty_by_id.get(str(p.professional_id), "").lower() == normalized_requested.lower()
+            ]
+            if len(matching) >= self._CAPITAL_DECISION_MIN_SAMPLE:
+                pool = matching
+            else:
+                used_fallback = True  # cai pra média de toda a clínica (pool já é `rated`)
+
+        sample_size = len(pool)
+        avg_revenue_per_hour = (
+            sum(p.revenue_per_hour for p in pool) / sample_size
+            if sample_size >= self._CAPITAL_DECISION_MIN_SAMPLE
+            else None
+        )
+        avg_margin_per_hour = None
+        if profitability.has_cost_data:
+            margin_pool = [p for p in pool if p.margin_per_hour is not None]
+            if len(margin_pool) >= self._CAPITAL_DECISION_MIN_SAMPLE:
+                avg_margin_per_hour = sum(p.margin_per_hour for p in margin_pool) / len(margin_pool)
+
+        return CapitalDecisionBaseDataResponse(
+            window_days=self._CAPITAL_DECISION_WINDOW_DAYS,
+            period_start=date_from,
+            period_end=date_to,
+            available_specialties=available_specialties,
+            specialty_requested=normalized_requested,
+            used_fallback_clinic_wide=used_fallback,
+            sample_size=sample_size,
+            min_sample=self._CAPITAL_DECISION_MIN_SAMPLE,
+            avg_revenue_per_hour=avg_revenue_per_hour,
+            has_cost_data=profitability.has_cost_data,
+            avg_margin_per_hour=avg_margin_per_hour,
+            belongs_to_organization=belongs_to_organization,
+            sibling_units_count=len(sibling_monthly_revenues),
+            avg_monthly_revenue_per_unit=(
+                sum(sibling_monthly_revenues) / len(sibling_monthly_revenues) if sibling_monthly_revenues else None
+            ),
         )
 
     async def get_marketing_channels(self, date_from: date, date_to: date) -> MarketingChannelsResponse:
@@ -1216,6 +1739,36 @@ class AnalyticsService:
             period_end=date_to,
             total_spend=sum(row["spend"] for row in rows),
             items=[MarketingChannelItem(**row) for row in rows],
+        )
+
+    async def get_upsell_funnel(self, date_from: date, date_to: date) -> UpsellFunnelResponse:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 3) — funil de upsell (oferecido × aceito). Complementa
+        get_marketing_channels (aquisição) olhando expansão de receita
+        em paciente já conquistado — ver DECISÃO completa em
+        AnalyticsRepository.addon_upsell_breakdown.
+        """
+        rows = await self.analytics_repo.addon_upsell_breakdown(date_from, date_to)
+        items = [
+            UpsellFunnelItem(
+                procedure_name=procedure,
+                offered_count=offered,
+                accepted_count=accepted,
+                acceptance_rate=(accepted / offered) if offered > 0 else None,
+            )
+            for procedure, offered, accepted in rows
+        ]
+        items.sort(key=lambda i: i.offered_count, reverse=True)
+        total_offered = sum(i.offered_count for i in items)
+        total_accepted = sum(i.accepted_count for i in items)
+        return UpsellFunnelResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_offered=total_offered,
+            total_accepted=total_accepted,
+            overall_acceptance_rate=(total_accepted / total_offered) if total_offered > 0 else None,
+            items=items,
         )
 
     async def get_recall_candidates(
@@ -1350,4 +1903,63 @@ class AnalyticsService:
             baseline_denial_rate=baseline_rate,
             items=items,
             min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
+        )
+
+    async def get_data_quality_by_user(self, date_from: date, date_to: date) -> DataQualityResponse:
+        """
+        Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
+        quanto de cada atendente que lança atendimento já entra completo
+        (CID + procedimento), a fonte mais comum de risco de glosa por
+        dado ausente (ver DECISÃO completa em
+        AnalyticsRepository.data_completeness_by_user). Ordenado do PIOR
+        pro melhor — quem mais precisa de atenção/treinamento primeiro,
+        mesmo critério de "pior caso primeiro" do resto do produto
+        (Radar de Profissional, fila de ação priorizada).
+        """
+        rows = await self.analytics_repo.data_completeness_by_user(date_from, date_to, min_sample=DATA_QUALITY_MIN_SAMPLE)
+        items = [
+            DataQualityByUserItem(
+                user_id=user_id,
+                full_name=full_name,
+                complete_count=complete,
+                total_count=total,
+                completion_rate=complete / total,
+            )
+            for user_id, full_name, complete, total in rows
+        ]
+        items.sort(key=lambda item: item.completion_rate)
+
+        total_considered = sum(item.total_count for item in items)
+        total_complete = sum(item.complete_count for item in items)
+        overall_rate = (total_complete / total_considered) if total_considered > 0 else None
+
+        return DataQualityResponse(
+            items=items,
+            overall_completion_rate=overall_rate,
+            total_considered=total_considered,
+            min_sample=DATA_QUALITY_MIN_SAMPLE,
+        )
+
+    async def get_product_roi(self) -> ProductRoiResponse:
+        """
+        Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto")
+        — soma três componentes INDEPENDENTES e cumulativos (nunca uma
+        janela de período): valor protegido pelo motor anti-glosa,
+        valor recuperado em recursos de glosa ganhos, e ganho REAL
+        medido em qualquer insight que um gestor fechou o ciclo (F1.2).
+        Ver DECISÃO completa em ProductRoiResponse sobre por que os três
+        continuam separados na resposta, não só um total.
+        """
+        protected_value, tracking_since = await self.reporting_repo.total_value_saved_all_time()
+        recovered_value, recovered_count = await self.appeal_repo.sum_recovered_value()
+        realized_value, realized_count = await self.insight_outcome_repo.sum_realized_delta()
+
+        return ProductRoiResponse(
+            protected_from_denial_value=protected_value,
+            recovered_appeals_value=recovered_value,
+            recovered_appeals_count=recovered_count,
+            realized_insight_outcomes_value=realized_value,
+            realized_insight_outcomes_count=realized_count,
+            total_roi_value=protected_value + recovered_value + realized_value,
+            tracking_since=tracking_since,
         )

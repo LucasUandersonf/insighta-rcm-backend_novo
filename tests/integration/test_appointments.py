@@ -266,3 +266,119 @@ async def test_list_appointments_empty_range_returns_empty_page(client, auth_hea
 async def test_list_appointments_requires_authentication(client):
     response = await client.get("/api/v1/appointments?date_from=2026-01-01&date_to=2026-01-31")
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------
+# "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1):
+# visit_intent_tag, motivo estruturado do agendamento.
+# ---------------------------------------------------------------------
+
+
+async def test_create_appointment_with_visit_intent_tag(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id, visit_intent_tag="urgencia")
+    assert appointment["visit_intent_tag"] == "urgencia"
+
+
+async def test_create_appointment_rejects_unknown_visit_intent_tag(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    response = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "visit_intent_tag": "emergencia",
+        },
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_fills_in_visit_intent_tag_later(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+    assert appointment["visit_intent_tag"] is None
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}", json={"visit_intent_tag": "retorno"}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["visit_intent_tag"] == "retorno"
+
+
+# ---------------------------------------------------------------------
+# "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2): funil de
+# upsell (addon_offered_procedure/addon_declined) no checkout.
+# ---------------------------------------------------------------------
+
+
+async def test_new_appointment_has_no_addon_info(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+    assert appointment["addon_offered_procedure"] is None
+    assert appointment["addon_declined"] is None
+
+
+async def test_patch_registers_addon_offered_and_accepted(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"status": "completed", "addon_offered_procedure": "Limpeza de pele", "addon_declined": False},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    updated = patch_resp.json()
+    assert updated["addon_offered_procedure"] == "Limpeza de pele"
+    assert updated["addon_declined"] is False
+
+
+async def test_patch_registers_addon_offered_and_declined(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"status": "completed", "addon_offered_procedure": "Drenagem linfática", "addon_declined": True},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    updated = patch_resp.json()
+    assert updated["addon_offered_procedure"] == "Drenagem linfática"
+    assert updated["addon_declined"] is True
+
+
+async def test_patch_rejects_addon_declined_without_offered_procedure(client, auth_headers_a):
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+
+    patch_resp = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"status": "completed", "addon_declined": False},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 422
+
+
+async def test_patch_allows_addon_declined_when_procedure_was_set_earlier(client, auth_headers_a):
+    """addon_offered_procedure e addon_declined não precisam vir na mesma
+    chamada PATCH — a recepção pode oferecer no meio do atendimento e o
+    resultado só ficar claro no fechamento."""
+    patient_id = await _create_patient(client, auth_headers_a)
+    appointment = await _create_appointment(client, auth_headers_a, patient_id)
+
+    first_patch = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"addon_offered_procedure": "Bota de pressoterapia"},
+        headers=auth_headers_a,
+    )
+    assert first_patch.status_code == 200, first_patch.text
+
+    second_patch = await client.patch(
+        f"/api/v1/appointments/{appointment['id']}",
+        json={"status": "completed", "addon_declined": True},
+        headers=auth_headers_a,
+    )
+    assert second_patch.status_code == 200, second_patch.text
+    assert second_patch.json()["addon_declined"] is True

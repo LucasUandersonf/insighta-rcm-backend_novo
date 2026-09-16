@@ -59,6 +59,76 @@ async def test_full_lote_lifecycle_open_add_close(client, auth_headers_a, admin_
     assert fechar_resp.json()["closed_at"] is not None
 
 
+async def test_list_lotes_includes_guias_count(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado do Parecer Técnico "Boletim Insighta" (revisão 2): a
+    listagem da tela de gestão de Lotes precisa mostrar quantas guias
+    tem em cada lote sem abrir um por um."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    lote = (
+        await client.post("/api/v1/lotes", json={"insurance_plan_id": plan_id, "tipo": "consulta"}, headers=auth_headers_a)
+    ).json()
+    assert lote["guias_count"] == 0
+
+    guia1 = await _create_guia(client, auth_headers_a, plan_id, tipo="consulta")
+    guia2 = await _create_guia(client, auth_headers_a, plan_id, tipo="consulta")
+    await client.post(f"/api/v1/lotes/{lote['id']}/guias/{guia1['id']}", headers=auth_headers_a)
+    await client.post(f"/api/v1/lotes/{lote['id']}/guias/{guia2['id']}", headers=auth_headers_a)
+
+    list_resp = await client.get("/api/v1/lotes", headers=auth_headers_a)
+    assert list_resp.status_code == 200
+    listed = next(item for item in list_resp.json()["items"] if item["id"] == lote["id"])
+    assert listed["guias_count"] == 2
+
+    get_resp = await client.get(f"/api/v1/lotes/{lote['id']}", headers=auth_headers_a)
+    assert get_resp.json()["guias_count"] == 2
+
+
+async def test_list_lotes_filters_by_status(client, auth_headers_a, admin_engine, tenant_a):
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    aberto = (
+        await client.post("/api/v1/lotes", json={"insurance_plan_id": plan_id, "tipo": "consulta"}, headers=auth_headers_a)
+    ).json()
+    fechado = (
+        await client.post("/api/v1/lotes", json={"insurance_plan_id": plan_id, "tipo": "sadt"}, headers=auth_headers_a)
+    ).json()
+    guia = await _create_guia(client, auth_headers_a, plan_id, tipo="sadt")
+    await client.post(f"/api/v1/lotes/{fechado['id']}/guias/{guia['id']}", headers=auth_headers_a)
+    await client.post(f"/api/v1/lotes/{fechado['id']}/fechar", headers=auth_headers_a)
+
+    resp_aberto = await client.get("/api/v1/lotes?status=aberto", headers=auth_headers_a)
+    ids_aberto = {item["id"] for item in resp_aberto.json()["items"]}
+    assert aberto["id"] in ids_aberto
+    assert fechado["id"] not in ids_aberto
+
+    resp_fechado = await client.get("/api/v1/lotes?status=fechado", headers=auth_headers_a)
+    ids_fechado = {item["id"] for item in resp_fechado.json()["items"]}
+    assert fechado["id"] in ids_fechado
+    assert aberto["id"] not in ids_fechado
+
+
+async def test_guia_candidates_only_lists_unassigned_matching_plan_and_tipo(client, auth_headers_a, admin_engine, tenant_a):
+    plan_a = await _create_insurance_plan(admin_engine, tenant_a, "Unimed Nacional", "unimed_nacional")
+    plan_b = await _create_insurance_plan(admin_engine, tenant_a, "SulAmérica", "sulamerica")
+
+    lote = (
+        await client.post("/api/v1/lotes", json={"insurance_plan_id": plan_a, "tipo": "consulta"}, headers=auth_headers_a)
+    ).json()
+
+    candidate = await _create_guia(client, auth_headers_a, plan_a, tipo="consulta")
+    wrong_plan = await _create_guia(client, auth_headers_a, plan_b, tipo="consulta")
+    wrong_tipo = await _create_guia(client, auth_headers_a, plan_a, tipo="sadt")
+    already_assigned = await _create_guia(client, auth_headers_a, plan_a, tipo="consulta")
+    await client.post(f"/api/v1/lotes/{lote['id']}/guias/{already_assigned['id']}", headers=auth_headers_a)
+
+    resp = await client.get(f"/api/v1/lotes/{lote['id']}/guias-candidatas", headers=auth_headers_a)
+    assert resp.status_code == 200
+    candidate_ids = {g["id"] for g in resp.json()}
+    assert candidate_ids == {candidate["id"]}
+    assert wrong_plan["id"] not in candidate_ids
+    assert wrong_tipo["id"] not in candidate_ids
+    assert already_assigned["id"] not in candidate_ids
+
+
 async def test_cannot_close_empty_lote(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     lote_resp = await client.post(

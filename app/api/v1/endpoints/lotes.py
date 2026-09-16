@@ -42,8 +42,9 @@ async def list_lotes(
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    status_filter: str | None = Query(None, alias="status"),
 ) -> PaginatedResponse[LoteResponse]:
-    return await _build_service(db).list_lotes_paginated(limit=limit, offset=offset)
+    return await _build_service(db).list_lotes_paginated(limit=limit, offset=offset, status=status_filter)
 
 
 @router.get("/{lote_id}", response_model=LoteResponse)
@@ -62,6 +63,18 @@ async def list_guias_in_lote(
     current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
 ) -> list[GuiaResponse]:
     return await _build_service(db).list_guias_in_lote(lote_id)
+
+
+@router.get("/{lote_id}/guias-candidatas", response_model=list[GuiaResponse])
+async def list_guia_candidates(
+    lote_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_READ)),
+) -> list[GuiaResponse]:
+    """Guias sem lote, do mesmo convênio + tipo deste lote — o que a
+    tela de gestão oferece como opção pra "Atribuir ao lote", em vez de
+    pedir pro usuário digitar um UUID de guia de memória."""
+    return await _build_service(db).list_guia_candidates(lote_id)
 
 
 @router.post("/{lote_id}/guias/{guia_id}", response_model=GuiaResponse)

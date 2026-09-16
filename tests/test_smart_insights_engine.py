@@ -8,12 +8,16 @@ milissegundos, sem subir Postgres.
 import pytest
 
 from app.services.smart_insights_engine import (
+    _DENIAL_RISK_PCT_CRITICAL,
+    _DENIAL_RISK_PCT_WARNING,
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
+    resolve_denial_risk_thresholds,
+    suggest_denial_risk_thresholds,
 )
 
 _EMPTY_PERIOD = InsightsPeriodInput(
@@ -198,7 +202,7 @@ def test_denial_spike_has_action_pointing_to_the_exact_plans_high_risk_billing_q
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label is not None
     assert "Unimed Nacional" in insights[0].action_label
-    assert insights[0].action_href == "/?insurance_plan_id=plan-unimed-123"
+    assert insights[0].action_href == "/painel?insurance_plan_id=plan-unimed-123"
 
 
 def test_financial_hole_insight_carries_financial_impact_for_ranking():
@@ -795,6 +799,143 @@ def test_coparticipation_growth_insight_absent_without_any_data():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
 
 
+# ---------------------------------------------------------------------
+# Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — quanto
+# do que foi COBRADO de coparticipação ainda não foi confirmado como
+# recebido do paciente.
+# ---------------------------------------------------------------------
+
+
+def test_coparticipation_unconfirmed_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=250.0, coparticipation_unconfirmed_count=5,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 250.0
+    assert "ainda não foi confirmada" in insights[0].title.lower()
+
+
+def test_coparticipation_unconfirmed_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=50.0, coparticipation_unconfirmed_count=2,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_unconfirmed_insight_absent_without_any_unconfirmed_value():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=0.0, coparticipation_unconfirmed_count=0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo 5)
+# — quanto da coparticipação foi cobrado por uma forma de pagamento que
+# não garante recebimento (boleto/cartão de crédito parcelado), diferente
+# do insight de "ninguém confirmou ainda" acima.
+# ---------------------------------------------------------------------
+
+
+def test_coparticipation_delayed_payment_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=300.0, coparticipation_delayed_payment_count=5,
+        coparticipation_known_payment_method_value=500.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 300.0
+    assert "60%" in insights[0].message
+    assert "boleto" in insights[0].message.lower()
+
+
+def test_coparticipation_delayed_payment_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=60.0, coparticipation_delayed_payment_count=2,
+        coparticipation_known_payment_method_value=100.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_delayed_payment_insight_absent_without_any_known_payment_method():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_delayed_payment_value=0.0, coparticipation_delayed_payment_count=0,
+        coparticipation_known_payment_method_value=0.0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_coparticipation_delayed_payment_insight_is_independent_from_unconfirmed_insight():
+    """Os dois cobrem lacunas DIFERENTES — nada impede os dois
+    dispararem juntos no mesmo período (confirmação manual e forma de
+    pagamento são sinais independentes)."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        coparticipation_unconfirmed_value=250.0, coparticipation_unconfirmed_count=5,
+        coparticipation_delayed_payment_value=300.0, coparticipation_delayed_payment_count=5,
+        coparticipation_known_payment_method_value=500.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = {i.title.lower() for i in insights}
+    assert len(insights) == 2
+    assert any("ainda não foi confirmada" in t for t in titles)
+    assert any("ainda pode não fechar" in t for t in titles)
+
+
+# ---------------------------------------------------------------------
+# Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
+# conta") — quanto do que foi cobrado como OPME ainda não foi conferido
+# quanto à presença de prescrição/evolução no prontuário.
+# ---------------------------------------------------------------------
+
+
+def test_opme_documentation_unconfirmed_insight_fires_with_enough_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=1600.0, opme_documentation_unconfirmed_count=2,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    assert len(insights) == 1
+    assert insights[0].severity == "warning"
+    assert insights[0].financial_impact == 1600.0
+    assert "sem conferência documental" in insights[0].title.lower()
+
+
+def test_opme_documentation_unconfirmed_insight_absent_below_min_sample():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=800.0, opme_documentation_unconfirmed_count=1,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_opme_documentation_unconfirmed_insight_absent_without_any_unconfirmed_value():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0,
+        opme_documentation_unconfirmed_value=0.0, opme_documentation_unconfirmed_count=0,
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
 def test_denial_risk_pct_above_critical_threshold():
     """Reprodução direta do exemplo do redesenho: 'risco de até 50% de
     glosas nas contas atuais'."""
@@ -835,6 +976,78 @@ def test_denial_risk_pct_none_when_no_billing_in_period():
         high_risk_no_show_count=0, denial_risk_pct=None, denial_at_risk_value=0.0,
     )
     assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+# ---------------------------------------------------------------------
+# Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+# limiares de risco de glosa configuráveis por tenant.
+# ---------------------------------------------------------------------
+
+
+def test_custom_denial_risk_thresholds_change_what_gets_flagged():
+    """Com limiares customizados mais folgados, um risco que dispararia
+    'warning' nos defaults deixa de aparecer — prova que generate_insights
+    de fato usa o valor passado, não a constante do módulo."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, denial_risk_pct=20.0, denial_at_risk_value=1000.0,
+    )
+    # Default (_DENIAL_RISK_PCT_WARNING=15.0): 20% dispara warning.
+    assert len(generate_insights(current, _EMPTY_PERIOD)) == 1
+    # Limiar customizado mais alto: 20% fica abaixo do novo "aviso".
+    insights = generate_insights(
+        current, _EMPTY_PERIOD, denial_risk_warning_threshold=25.0, denial_risk_critical_threshold=50.0
+    )
+    assert insights == []
+
+
+def test_custom_denial_risk_thresholds_can_reclassify_severity():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, denial_risk_pct=20.0, denial_at_risk_value=1000.0,
+    )
+    # Default: 20% < _DENIAL_RISK_PCT_CRITICAL (40.0) -> warning.
+    default_insights = generate_insights(current, _EMPTY_PERIOD)
+    assert default_insights[0].severity == "warning"
+    # Limiar crítico customizado mais baixo que 20% -> vira critical.
+    insights = generate_insights(
+        current, _EMPTY_PERIOD, denial_risk_warning_threshold=5.0, denial_risk_critical_threshold=15.0
+    )
+    assert insights[0].severity == "critical"
+
+
+def test_resolve_denial_risk_thresholds_none_tenant_uses_defaults():
+    assert resolve_denial_risk_thresholds(None) == (_DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL)
+
+
+class _FakeTenant:
+    def __init__(self, warning=None, critical=None):
+        self.denial_risk_warning_threshold = warning
+        self.denial_risk_critical_threshold = critical
+
+
+def test_resolve_denial_risk_thresholds_tenant_without_config_uses_defaults():
+    assert resolve_denial_risk_thresholds(_FakeTenant()) == (_DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL)
+
+
+def test_resolve_denial_risk_thresholds_tenant_with_config():
+    assert resolve_denial_risk_thresholds(_FakeTenant(warning=10.0, critical=30.0)) == (10.0, 30.0)
+
+
+def test_suggest_denial_risk_thresholds_below_min_sample_returns_none():
+    assert suggest_denial_risk_thresholds([10.0, 20.0, 30.0]) is None
+
+
+def test_suggest_denial_risk_thresholds_with_enough_months():
+    # 6 meses (MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION), distribuição
+    # crescente simples.
+    monthly_pcts = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
+    suggestion = suggest_denial_risk_thresholds(monthly_pcts)
+    assert suggestion is not None
+    assert suggestion.sample_size == 6
+    assert suggestion.warning_threshold < suggestion.critical_threshold
+    # Mediana de [5,10,15,20,25,30] é 17.5.
+    assert suggestion.warning_threshold == 17.5
 
 
 def test_insights_are_sorted_by_financial_impact_descending():
@@ -1134,8 +1347,8 @@ def test_stale_open_lotes_insight_fires_with_count_and_oldest_age():
     assert lote_titles[0].category == "faturamento"
     assert "3 lotes" in lote_titles[0].message
     assert "45 dias" in lote_titles[0].message
-    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
-    assert lote_titles[0].action_href is None
+    # LotesPage.tsx agora existe no frontend — o botão aponta pra ela.
+    assert lote_titles[0].action_href == "/lotes"
 
 
 def test_stale_open_lotes_insight_singular_wording_and_no_age_note():

@@ -31,6 +31,32 @@ class GuiaRepository:
         total = (await self.session.execute(select(func.count()).select_from(Guia))).scalar_one()
         return items, total
 
+    async def count_by_lote_ids(self, lote_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+        """Achado do Parecer Técnico "Boletim Insighta" (revisão 2): a
+        tela de gestão de Lotes (antes inexistente) precisa mostrar
+        quantas guias tem em cada lote na LISTAGEM, sem abrir um por um
+        — uma query agregada por lote_id, não N+1 por linha da tabela."""
+        if not lote_ids:
+            return {}
+        stmt = select(Guia.lote_id, func.count()).where(Guia.lote_id.in_(lote_ids)).group_by(Guia.lote_id)
+        result = await self.session.execute(stmt)
+        return {row[0]: row[1] for row in result.all()}
+
+    async def list_unassigned_candidates(self, *, insurance_plan_id: uuid.UUID, tipo: str, limit: int = 200) -> list[Guia]:
+        """Guias "candidatas" a entrar num lote: mesmo convênio + mesmo
+        tipo do lote (a mesma regra que LoteService.add_guia já valida
+        na escrita) e ainda sem lote (lote_id IS NULL). Alimenta o
+        seletor da tela de gestão de Lotes — sem isso o usuário teria que
+        adivinhar o UUID de uma guia pra conseguir atribuí-la."""
+        stmt = (
+            select(Guia)
+            .where(Guia.insurance_plan_id == insurance_plan_id, Guia.tipo == tipo, Guia.lote_id.is_(None))
+            .order_by(Guia.created_at)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_by_lote(self, lote_id: uuid.UUID) -> list[Guia]:
         """Usado por LoteService para montar a lista de guias de um lote
         (tela de gestão) e para validar que um lote não fica vazio ao

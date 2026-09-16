@@ -49,9 +49,10 @@ normalization_service.py) busca o valor configurado do tenant e passa
 aqui; sem configuração, caem nos defaults acima. A função continua pura
 (sem tocar banco), só ganhou dois parâmetros com default.
 """
-import statistics
 from dataclasses import dataclass
 from datetime import datetime
+
+from app.services.threshold_calibration import compute_percentile_pair
 
 MIN_SPECIFIC_SAMPLES = 3
 DEFAULT_LOW_THRESHOLD = 0.10
@@ -115,16 +116,19 @@ def suggest_thresholds(patient_no_show_rates: list[float]) -> ThresholdSuggestio
     ruído estatístico, não um padrão real. Quem chama decide como
     comunicar isso (ex: "ainda não há histórico suficiente").
     """
-    if len(patient_no_show_rates) < MIN_PATIENTS_FOR_SUGGESTION:
+    # Núcleo estatístico (mediana + P85) extraído para
+    # threshold_calibration.compute_percentile_pair — Épico F2.1 do Plano
+    # Diretor ("Calibração por especialidade/porte"), reaproveitado
+    # também por smart_insights_engine (limiar de risco de glosa) e
+    # health_score_engine (teto de nota). Comportamento numérico
+    # idêntico ao cálculo anterior (P85 via quantiles(n=20)[16] e
+    # via quantiles(n=100)[84] são o MESMO ponto, só granularidade
+    # diferente de interpolação).
+    pair = compute_percentile_pair(patient_no_show_rates, min_sample=MIN_PATIENTS_FOR_SUGGESTION, high_percentile=85)
+    if pair is None:
         return None
 
-    sorted_rates = sorted(patient_no_show_rates)
-    low = statistics.median(sorted_rates)
-    # statistics.quantiles(data, n=20) devolve 19 pontos de corte dividindo
-    # os dados em 20 grupos iguais — o ponto na posição i (1-indexado)
-    # corresponde ao percentil 5*i. Percentil 85 -> i=17 -> índice 16
-    # (0-indexado) na lista devolvida.
-    medium = statistics.quantiles(sorted_rates, n=20)[16]
+    low, medium = pair.median, pair.high
     # Defesa: com uma distribuição muito concentrada, P85 pode empatar ou
     # ficar abaixo da mediana (ex: quase todo mundo com a MESMA taxa) —
     # o motor exige low < medium (mesma regra de TenantService.update_own_tenant),
@@ -132,7 +136,7 @@ def suggest_thresholds(patient_no_show_rates: list[float]) -> ThresholdSuggestio
     if medium <= low:
         medium = min(low + 0.01, 0.99)
 
-    return ThresholdSuggestion(low_threshold=round(low, 4), medium_threshold=round(medium, 4), sample_size=len(sorted_rates))
+    return ThresholdSuggestion(low_threshold=round(low, 4), medium_threshold=round(medium, 4), sample_size=pair.sample_size)
 
 
 @dataclass

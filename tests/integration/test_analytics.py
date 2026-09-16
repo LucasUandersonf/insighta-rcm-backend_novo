@@ -9,6 +9,7 @@ tests/test_smart_insights_engine.py, sem banco).
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import text
 
 
@@ -188,6 +189,89 @@ async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_head
     assert lag_insight is not None
     assert lag_insight["severity"] == "critical"  # 95 dias >= 90 (limiar crítico)
     assert "média do setor" in lag_insight["message"]
+
+
+async def test_smart_insights_denial_risk_uses_custom_tenant_threshold(client, auth_headers_a, admin_engine, tenant_a):
+    """Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+    — prova que AnalyticsService.get_smart_insights de fato resolve e usa
+    o limiar de risco de glosa configurado no tenant, não só a constante
+    fixa do módulo (ver DECISÃO completa em
+    smart_insights_engine.resolve_denial_risk_thresholds)."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Limiar Customizado"}, headers=auth_headers_a)
+    patient_id = patient_resp.json()["id"]
+
+    # Uma linha de alto risco (200) + uma de baixo risco (800), esta com
+    # CID + tabela de contrato cadastrada casando o valor cobrado (senão
+    # ela também cairia em "medium" por falta de referência contratual,
+    # ver denial_risk_engine._rule_no_contract_reference) -> 20% do
+    # faturamento em risco médio/alto (mesmo valor de
+    # test_denial_risk_pct_warning_band, sem banco). Usar 100% de risco
+    # (uma única linha sem CID) nunca provaria a diferença — o Field de
+    # denial_risk_warning_threshold exige < 100, então qualquer limiar
+    # customizado ainda classificaria 100% como "acima do aviso".
+    await _create_contract(admin_engine, tenant_a, plan_id, procedure_code="10101012", agreed_value=800.0)
+    high_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            # cid_code omitido -> billing nasce com denial_risk_level "high"
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": high_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 200.0},
+        headers=auth_headers_a,
+    )
+    low_risk_appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_id,
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": low_risk_appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 800.0},
+        headers=auth_headers_a,
+    )
+
+    date_from, date_to = _window()
+
+    # Com os defaults do módulo (15%/40%), 20% de risco dispara "warning".
+    default_response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    default_insight = next(
+        (i for i in default_response.json()["insights"] if "risco de ser recusada" in i["title"].lower()), None
+    )
+    assert default_insight is not None
+    assert default_insight["severity"] == "warning"
+
+    # Limiar customizado mais folgado (warning=25%) -> o MESMO dado (20%)
+    # deixa de disparar o insight.
+    patch_resp = await client.patch(
+        "/api/v1/tenant",
+        json={"denial_risk_warning_threshold": 25.0, "denial_risk_critical_threshold": 50.0},
+        headers=auth_headers_a,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+
+    custom_response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    custom_insight = next(
+        (i for i in custom_response.json()["insights"] if "risco de ser recusada" in i["title"].lower()), None
+    )
+    assert custom_insight is None
 
 
 async def test_executive_summary_computes_financial_hole_and_margin(client, auth_headers_a, admin_engine, tenant_a):
@@ -554,6 +638,7 @@ async def test_atendimento_cannot_access_analytics(client, admin_engine, tenant_
         "plan-loss-ranking",
         "contract-utilization",
         "denial-risk-distribution",
+        "data-quality",
     ):
         response = await client.get(f"/api/v1/analytics/{path}", headers=headers)
         assert response.status_code == 403, f"{path} deveria barrar atendimento"
@@ -689,6 +774,61 @@ async def test_plan_loss_ranking_orders_by_total_loss_descending(client, auth_he
     assert response.status_code == 200
     plans = response.json()["plans"]
     assert [p["plan_name"] for p in plans] == ["Bradesco Saúde", "Unimed Nacional"]
+
+
+async def test_priority_queue_merges_insights_and_raiox_panels_sorted_by_impact(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Épico F1.1 do Plano Diretor: a fila reaproveita generate_insights()
+    (via get_smart_insights) MAIS o ranking de perda por convênio, que
+    nunca vira card de feed sozinho — este teste prova que o item do
+    Raio-X (source="raiox") aparece na mesma fila, com `financial_impact`
+    de verdade vindo do JOIN real (não um valor fixo do teste)."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/priority-queue?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["items"], "fila não deveria vir vazia com um buraco financeiro real no período"
+    assert body["total_considered"] >= len(body["items"])
+
+    raiox_items = [i for i in body["items"] if i["source"] == "raiox"]
+    loss_ranking_item = next((i for i in raiox_items if "Unimed Nacional" in i["title"]), None)
+    assert loss_ranking_item is not None
+    assert loss_ranking_item["financial_impact"] == 200.0
+    assert loss_ranking_item["category"] == "faturamento"
+
+    # Ordenado por financial_impact desc (itens sem impacto ficam por
+    # último) — mesmo critério de generate_insights().
+    impacts = [i["financial_impact"] for i in body["items"] if i["financial_impact"] is not None]
+    assert impacts == sorted(impacts, reverse=True)
+
+
+async def test_priority_queue_respects_limit_but_reports_total_considered(client, auth_headers_a, admin_engine, tenant_a):
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=200.0, charged_value=150.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/priority-queue?date_from={date_from}&date_to={date_to}&limit=1", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 1
+    assert body["total_considered"] >= 1
+
+
+async def test_atendimento_cannot_access_priority_queue(client, admin_engine, tenant_a, auth_headers_a):
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@priority-queue-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get("/api/v1/analytics/priority-queue", headers=headers)
+    assert response.status_code == 403
 
 
 async def test_contract_utilization_flags_unbilled_items(client, auth_headers_a, admin_engine, tenant_a):
@@ -1271,8 +1411,8 @@ async def test_smart_insights_flags_stale_open_lotes_from_real_data(client, auth
     assert lote_insight["category"] == "faturamento"
     assert "2 lotes" in lote_insight["message"]
     assert "50 dias" in lote_insight["message"]
-    # Sem tela de Lotes no frontend ainda — nunca inventa destino.
-    assert lote_insight["action_href"] is None
+    # LotesPage.tsx agora existe no frontend — o botão aponta pra ela.
+    assert lote_insight["action_href"] == "/lotes"
 
 
 async def test_smart_insights_absent_when_no_lote_is_stale(client, auth_headers_a, admin_engine, tenant_a):
@@ -1730,6 +1870,172 @@ async def test_profitability_computes_revenue_per_hour_by_professional(client, a
     assert item["revenue_per_hour"] == 300.0  # R$300 em 1h de agenda ocupada
 
 
+# ---------------------------------------------------------------------
+# Margem líquida (épico F3.1 do Plano Diretor — módulo de custos)
+# ---------------------------------------------------------------------
+
+
+async def _bill_professional(client, auth_headers, admin_engine, tenant_id, *, full_name, plan_name, plan_key, charged_value, duration_minutes=60):
+    professional_resp = await client.post("/api/v1/professionals", json={"full_name": full_name}, headers=auth_headers)
+    professional_id = professional_resp.json()["id"]
+    plan_id = await _create_insurance_plan(admin_engine, tenant_id, display_name=plan_name, normalized_key=plan_key)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": f"Paciente {full_name}"}, headers=auth_headers)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "professional_id": professional_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "duration_minutes": duration_minutes,
+        },
+        headers=auth_headers,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": plan_id, "charged_value": charged_value},
+        headers=auth_headers,
+    )
+    return professional_id
+
+
+async def test_profitability_has_no_cost_data_by_default(client, auth_headers_a, admin_engine, tenant_a):
+    professional_id = await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Sem Custo", plan_name="Sem Custo Saúde", plan_key="sem_custo_saude", charged_value=300.0
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is False
+    assert body["total_costs"] is None
+    assert body["net_margin"] is None
+    item = next(p for p in body["by_professional"] if p["professional_id"] == professional_id)
+    assert item["allocated_cost"] is None
+    assert item["net_margin"] is None
+    assert item["margin_per_hour"] is None
+
+
+async def test_profitability_computes_margin_with_direct_and_general_costs(client, auth_headers_a, admin_engine, tenant_a):
+    """Um profissional só faturando no período: todo custo GERAL cai
+    100% nele (rateio proporcional à receita, e ele é 100% da receita
+    aqui) + o custo DIRETO lançado especificamente pra ele."""
+    professional_id = await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Margem", plan_name="Margem Saúde", plan_key="margem_saude", charged_value=1000.0
+    )
+    period_month = date.today().replace(day=1).isoformat()
+
+    direct_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "comissao_repasse", "amount": 400.0, "period_month": period_month, "professional_id": professional_id},
+        headers=auth_headers_a,
+    )
+    assert direct_resp.status_code == 201
+    general_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "aluguel", "amount": 200.0, "period_month": period_month},
+        headers=auth_headers_a,
+    )
+    assert general_resp.status_code == 201
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is True
+    assert body["total_costs"] == 600.0
+    assert body["net_margin"] == 400.0  # 1000 faturado - 600 de custo
+
+    item = next(p for p in body["by_professional"] if p["professional_id"] == professional_id)
+    # Direto (400) + 100% do geral (200, único profissional com receita) = 600
+    assert item["allocated_cost"] == 600.0
+    assert item["net_margin"] == 400.0  # 1000 - 600
+    assert item["margin_per_hour"] == 400.0  # 1h de agenda ocupada
+
+
+async def test_profitability_computes_net_margin_pct_and_fixed_cost_pct(client, auth_headers_a, admin_engine, tenant_a):
+    """"Junta Técnica Insighta" (reavaliação de mercado da Sala de
+    Comando, aba Rentabilidade): benchmarks de mercado — margem líquida
+    e custo fixo como % da receita — precisam do PERCENTUAL, não só do
+    valor em R$ já coberto pelo teste de margem acima."""
+    await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Percentual", plan_name="Percentual Saúde", plan_key="percentual_saude", charged_value=1000.0
+    )
+    period_month = date.today().replace(day=1).isoformat()
+
+    # folha_fixa + aluguel = custo FIXO (300); comissao_repasse = variável (100).
+    for category, amount in (("folha_fixa", 200.0), ("aluguel", 100.0), ("comissao_repasse", 100.0)):
+        resp = await client.post(
+            "/api/v1/cost-entries",
+            json={"category": category, "amount": amount, "period_month": period_month},
+            headers=auth_headers_a,
+        )
+        assert resp.status_code == 201, resp.text
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["has_cost_data"] is True
+    assert body["total_costs"] == 400.0
+    assert body["net_margin"] == 600.0  # 1000 - 400
+    assert body["net_margin_pct"] == 60.0  # 600 / 1000 * 100
+    assert body["fixed_cost_pct"] == 30.0  # (200 + 100 fixo, sem contar os 100 de comissão) / 1000 * 100
+
+
+async def test_profitability_margin_pct_none_without_cost_data(client, auth_headers_a, admin_engine, tenant_a):
+    await _bill_professional(
+        client, auth_headers_a, admin_engine, tenant_a, full_name="Dr. Sem Percentual", plan_name="Sem Percentual Saúde", plan_key="sem_percentual_saude", charged_value=300.0
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/profitability?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    body = response.json()
+    assert body["net_margin_pct"] is None
+    assert body["fixed_cost_pct"] is None
+
+
+async def test_cost_entry_crud_and_rbac(client, admin_engine, tenant_a, auth_headers_a):
+    period_month = date.today().replace(day=1).isoformat()
+    create_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "insumo", "description": "Material descartável", "amount": 150.5, "period_month": "2026-09-15"},
+        headers=auth_headers_a,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()
+    # period_month normalizado pro dia 1 (mesmo se o usuário mandar outro dia).
+    assert body["period_month"] == "2026-09-01"
+    assert body["professional_id"] is None
+
+    list_resp = await client.get("/api/v1/cost-entries", headers=auth_headers_a)
+    assert list_resp.status_code == 200
+    assert any(i["id"] == body["id"] for i in list_resp.json()["items"])
+
+    delete_resp = await client.delete(f"/api/v1/cost-entries/{body['id']}", headers=auth_headers_a)
+    assert delete_resp.status_code == 204
+    list_after = await client.get("/api/v1/cost-entries", headers=auth_headers_a)
+    assert all(i["id"] != body["id"] for i in list_after.json()["items"])
+
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="recepcao@cost-entry-test.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    forbidden_resp = await client.post(
+        "/api/v1/cost-entries",
+        json={"category": "outros", "amount": 10.0, "period_month": period_month},
+        headers=headers,
+    )
+    assert forbidden_resp.status_code == 403
+
+
 async def test_profitability_ranks_procedures_by_revenue_and_reports_share(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a, display_name="Mix Saúde", normalized_key="mix_saude")
     await _create_contract(admin_engine, tenant_a, plan_id, "80808080", 400.0)
@@ -2115,3 +2421,113 @@ async def test_denial_reason_confirmation_baseline_is_none_without_any_resolved_
     assert body["baseline_sample_size"] == 0
     assert body["baseline_denial_rate"] is None
     assert body["items"] == []
+
+
+# =====================================================================
+# GET /analytics/data-quality — Épico F2.2 do Plano Diretor ("Qualidade
+# de dado na origem").
+# =====================================================================
+
+
+async def _create_patient(client, headers, full_name="Paciente Qualidade de Dado") -> str:
+    resp = await client.post("/api/v1/patients", json={"full_name": full_name}, headers=headers)
+    return resp.json()["id"]
+
+
+async def _launch_appointment(client, headers, patient_id, *, complete: bool) -> None:
+    payload = {
+        "patient_id": patient_id,
+        "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+    }
+    if complete:
+        payload["procedure_code"] = "10101012"
+        payload["cid_code"] = "J06"
+    resp = await client.post("/api/v1/appointments", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+
+
+async def test_data_quality_ranks_worst_attendant_first(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.conftest import _insert_user, _login
+
+    worse = await _insert_user(admin_engine, tenant_id=tenant_a, email="ana.recepcao@clinica-a.com", role="atendimento")
+    better = await _insert_user(admin_engine, tenant_id=tenant_a, email="beto.recepcao@clinica-a.com", role="atendimento")
+    worse_token = await _login(client, worse["email"], worse["password"])
+    better_token = await _login(client, better["email"], better["password"])
+    worse_headers = {"Authorization": f"Bearer {worse_token}"}
+    better_headers = {"Authorization": f"Bearer {better_token}"}
+
+    patient_id = await _create_patient(client, auth_headers_a)
+
+    # Ana: 5 lançamentos, só 1 completo (20%).
+    for i in range(5):
+        await _launch_appointment(client, worse_headers, patient_id, complete=(i == 0))
+    # Beto: 5 lançamentos, todos completos (100%).
+    for _ in range(5):
+        await _launch_appointment(client, better_headers, patient_id, complete=True)
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["min_sample"] == 5
+    assert len(body["items"]) == 2
+    # Pior primeiro.
+    assert body["items"][0]["full_name"] == "ana.recepcao"
+    assert body["items"][0]["complete_count"] == 1
+    assert body["items"][0]["total_count"] == 5
+    assert body["items"][0]["completion_rate"] == 0.2
+    assert body["items"][1]["full_name"] == "beto.recepcao"
+    assert body["items"][1]["completion_rate"] == 1.0
+
+    assert body["total_considered"] == 10
+    assert body["overall_completion_rate"] == pytest.approx(0.6)
+
+
+async def test_data_quality_excludes_attendant_below_min_sample(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="poucos.lancamentos@clinica-a.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    patient_id = await _create_patient(client, auth_headers_a)
+
+    # Só 3 lançamentos — abaixo de min_sample (5): ruído estatístico
+    # demais para reportar uma taxa por atendente.
+    for i in range(3):
+        await _launch_appointment(client, headers, patient_id, complete=(i == 0))
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["total_considered"] == 0
+    assert body["overall_completion_rate"] is None
+
+
+async def test_data_quality_ignores_appointments_without_created_by(client, auth_headers_a, admin_engine, tenant_a):
+    """Atendimento importado em massa/via job automatizado não tem
+    'quem lançou' (created_by NULL) — não deveria virar um atendente
+    fantasma 'sem nome' na lista."""
+    patient_id = await _create_patient(client, auth_headers_a)
+    async with admin_engine.begin() as conn:
+        for _ in range(6):
+            await conn.execute(
+                text(
+                    "INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) "
+                    "VALUES (:t, :p, :dt, 'scheduled')"
+                ),
+                {"t": tenant_a, "p": patient_id, "dt": datetime.now(timezone.utc) + timedelta(days=1)},
+            )
+
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/data-quality?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []

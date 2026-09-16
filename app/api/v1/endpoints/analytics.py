@@ -18,10 +18,13 @@ from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_price_benchmark_repository import ContractPriceBenchmarkRepository
 from app.repositories.contract_repository import ContractRepository
+from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
+from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -29,7 +32,9 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
+    CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
+    DataQualityResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
     ExecutiveSummaryResponse,
@@ -41,14 +46,20 @@ from app.schemas.analytics import (
     ProfitabilityResponse,
     NetworkBenchmarkResponse,
     OportunidadesResponse,
+    OrganizationSummaryResponse,
+    ProductRoiResponse,
     PaymentLagByPlanResponse,
     PlanLossRankingResponse,
+    PriorityQueueResponse,
     RecallCandidatesResponse,
+    SatisfactionSummaryResponse,
     SmartInsightsResponse,
+    UpsellFunnelResponse,
 )
 from app.services.analytics_service import AnalyticsService
 from app.services.network_benchmark_service import NetworkBenchmarkService
 from app.services.oportunidades_service import OportunidadesService
+from app.services.organization_service import OrganizationService
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -93,6 +104,8 @@ def _build_service(db: DbSession) -> AnalyticsService:
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
         ContractRepository(db),
+        CostEntryRepository(db),
+        InsightOutcomeRepository(db),
     )
 
 
@@ -148,6 +161,33 @@ async def get_smart_insights(
     )
 
 
+@router.get("/priority-queue", response_model=PriorityQueueResponse)
+async def get_priority_queue(
+    db: DbSession,
+    db_no_tenant: DbSessionNoTenant,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 10,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PriorityQueueResponse:
+    """Épico F1.1 do Plano Diretor — tela "Hoje", página inicial da
+    Sala de Comando. Mesma dupla de sessão (db + db_no_tenant) de
+    /smart-insights logo acima, pelo mesmo motivo: o Comparativo de
+    rede entra como candidato da fila e precisa da fonte cross-tenant."""
+    start, end = _default_period(date_from, date_to)
+    benchmark = await NetworkBenchmarkService(NetworkBenchmarkRepository(db_no_tenant)).get_benchmark(
+        uuid.UUID(current_user.tenant_id)
+    )
+    network_benchmark = [
+        (m.key, m.label, m.your_rate, m.network_median)
+        for m in benchmark.metrics
+        if m.your_rate is not None and m.network_median is not None
+    ]
+    return await _build_service(db).get_priority_queue(
+        start, end, tenant_id=current_user.tenant_id, network_benchmark=network_benchmark, limit=limit
+    )
+
+
 @router.get("/health-score", response_model=HealthScoreResponse)
 async def get_health_score(
     db: DbSession,
@@ -155,7 +195,36 @@ async def get_health_score(
 ) -> HealthScoreResponse:
     # Sem date_from/date_to de propósito — janela é fixa dentro do
     # service (ver DECISÃO em AnalyticsService.get_health_score).
-    return await _build_service(db).get_health_score()
+    return await _build_service(db).get_health_score(current_user.tenant_id)
+
+
+@router.get("/upsell-funnel", response_model=UpsellFunnelResponse)
+async def get_upsell_funnel(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> UpsellFunnelResponse:
+    """
+    "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    3) — funil de upsell (oferecido × aceito) por procedimento adicional.
+    Complementa /marketing-channels (aquisição) olhando expansão de
+    receita em paciente já conquistado.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_upsell_funnel(start, end)
+
+
+@router.get("/satisfaction-summary", response_model=SatisfactionSummaryResponse)
+async def get_satisfaction_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> SatisfactionSummaryResponse:
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) — sem
+    # date_from/date_to de propósito, mesmo espírito de health-score:
+    # janela fixa dentro do service (ver DECISÃO em
+    # AnalyticsService.get_satisfaction_summary).
+    return await _build_service(db).get_satisfaction_summary()
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)
@@ -288,16 +357,39 @@ async def get_network_benchmark(
     return await service.get_benchmark(uuid.UUID(current_user.tenant_id))
 
 
+@router.get("/organization-summary", response_model=OrganizationSummaryResponse)
+async def get_organization_summary(
+    db: DbSessionNoTenant,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> OrganizationSummaryResponse:
+    """
+    Épico F3.2 do Plano Diretor ("Consolidação multi-unidade") —
+    dashboard consolidado comparando as unidades do MESMO grupo lado a
+    lado. DbSessionNoTenant pelo mesmo motivo do Comparativo entre
+    Clínicas acima (ver DECISÃO em app/sql/042_organizations.sql): a
+    função SQL lê as unidades da MESMA organization_id do tenant
+    solicitante, escapando do RLS de dentro de uma função SECURITY
+    DEFINER. `belongs_to_organization=False` é o estado normal de uma
+    clínica avulsa, nunca um erro.
+    """
+    service = OrganizationService(OrganizationRepository(db))
+    return await service.get_units_summary(uuid.UUID(current_user.tenant_id))
+
+
 @router.get("/oportunidades", response_model=OportunidadesResponse)
 async def get_oportunidades(
     db: DbSessionNoTenant,
+    tenant_db: DbSession,
     current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
 ) -> OportunidadesResponse:
     # DbSessionNoTenant pelo mesmo motivo do Comparativo acima (ver
     # DECISÃO em app/sql/033_network_contract_price_benchmark.sql): esta
     # rota também escapa do RLS de propósito para cruzar preço de
-    # contrato entre clínicas.
-    service = OportunidadesService(ContractPriceBenchmarkRepository(db))
+    # contrato entre clínicas. `tenant_db` (RLS normal) é usado só para
+    # ler os PRÓPRIOS contratos deste tenant (renovação vencendo) — ver
+    # DECISÃO em OportunidadesService.get_oportunidades ("Junta Técnica
+    # Insighta").
+    service = OportunidadesService(ContractPriceBenchmarkRepository(db), ContractRepository(tenant_db))
     return await service.get_oportunidades(uuid.UUID(current_user.tenant_id))
 
 
@@ -382,3 +474,60 @@ async def get_denial_reason_confirmation(
     histórico já resolvido, não uma janela.
     """
     return await _build_service(db).get_denial_reason_confirmation()
+
+
+@router.get("/data-quality", response_model=DataQualityResponse)
+async def get_data_quality(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DataQualityResponse:
+    """
+    Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") — painel
+    de qualidade de cadastro: taxa de atendimento lançado já completo
+    (CID + procedimento) por atendente, ordenado do pior pro melhor.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_data_quality_by_user(start, end)
+
+
+@router.get("/product-roi", response_model=ProductRoiResponse)
+async def get_product_roi(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ProductRoiResponse:
+    """
+    Épico F4.4 do Plano Diretor ("Prova de ROI do próprio produto") —
+    sem date_from/date_to de propósito (mesmo espírito de
+    health-score/denial-reason-confirmation): "prova de ROI" é
+    cumulativo desde que a clínica começou a usar o produto, não uma
+    métrica de período.
+    """
+    return await _build_service(db).get_product_roi()
+
+
+@router.get("/capital-decision-base-data", response_model=CapitalDecisionBaseDataResponse)
+async def get_capital_decision_base_data(
+    db: DbSession,
+    db_no_tenant: DbSessionNoTenant,
+    specialty: str | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> CapitalDecisionBaseDataResponse:
+    """
+    Épico F3.4 do Plano Diretor ("Decisões de capital: contratar/
+    expandir — simulação de payback de contratação") — dado-base real
+    pra simulação feita no frontend (CapitalDecisionPanel.tsx), nunca a
+    decisão pronta. db_no_tenant pelo mesmo motivo de
+    /organization-summary: a metade "expandir" olha o faturamento das
+    OUTRAS unidades do mesmo grupo, cross-tenant.
+    """
+    org_summary = await OrganizationService(OrganizationRepository(db_no_tenant)).get_units_summary(
+        uuid.UUID(current_user.tenant_id)
+    )
+    sibling_monthly_revenues = [u.total_billed for u in org_summary.units if not u.is_requesting_tenant]
+    return await _build_service(db).get_capital_decision_base_data(
+        specialty,
+        belongs_to_organization=org_summary.belongs_to_organization,
+        sibling_monthly_revenues=sibling_monthly_revenues,
+    )

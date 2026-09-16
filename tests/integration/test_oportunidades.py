@@ -8,7 +8,7 @@ amostra mínima por grupo, e nunca expõe o preço de uma clínica
 específica — só a mediana agregada.
 """
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import text
 
@@ -20,10 +20,12 @@ async def _insert_tenant(admin_engine, *, trade_name: str) -> str:
 
 
 async def _seed_homologated_contract(
-    admin_engine, tenant_id: str, *, normalized_key: str, tuss_code: str, agreed_price: float
+    admin_engine, tenant_id: str, *, normalized_key: str, tuss_code: str, agreed_price: float, valid_until: date | None = None
 ) -> str:
     """Um convênio + um contrato homologado vigente + um item de preço —
-    o mínimo para a clínica "ter" aquele procedimento contratado."""
+    o mínimo para a clínica "ter" aquele procedimento contratado.
+    `valid_until` opcional — usado pelos testes de contagem regressiva
+    de renovação ("Junta Técnica Insighta")."""
     plan_id = str(uuid.uuid4())
     contract_id = str(uuid.uuid4())
     async with admin_engine.begin() as conn:
@@ -36,10 +38,10 @@ async def _seed_homologated_contract(
         )
         await conn.execute(
             text(
-                "INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, status) "
-                "VALUES (:id, :t, :plan, :valid_from, 'homologado')"
+                "INSERT INTO core.contracts (id, tenant_id, insurance_plan_id, valid_from, valid_until, status) "
+                "VALUES (:id, :t, :plan, :valid_from, :valid_until, 'homologado')"
             ),
-            {"id": contract_id, "t": tenant_id, "plan": plan_id, "valid_from": date(2020, 1, 1)},
+            {"id": contract_id, "t": tenant_id, "plan": plan_id, "valid_from": date(2020, 1, 1), "valid_until": valid_until},
         )
         await conn.execute(
             text(
@@ -104,6 +106,8 @@ async def test_computes_median_across_other_tenants_and_ranks_by_opportunity(
         "gap_value",
         "gap_pct",
         "estimated_monthly_opportunity",
+        "days_until_contract_renewal",
+        "contract_valid_until",
     }
 
 
@@ -163,3 +167,60 @@ async def test_draft_contract_is_never_considered_for_your_own_price(
     response = await client.get("/api/v1/analytics/oportunidades", headers=auth_headers_a)
     assert response.status_code == 200
     assert response.json()["items"] == []
+
+
+# "Junta Técnica Insighta" — a contagem regressiva de renovação junta
+# core.contracts (RLS, só do tenant autenticado) ao ranking cross-tenant
+# de oportunidade por convênio+procedimento.
+
+
+async def test_contract_expiring_within_horizon_adds_renewal_countdown(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    valid_until = date.today() + timedelta(days=45)
+    await _seed_homologated_contract(
+        admin_engine,
+        tenant_a,
+        normalized_key="unimed",
+        tuss_code="10101012",
+        agreed_price=100.0,
+        valid_until=valid_until,
+    )
+    for price in (180.0, 200.0, 220.0):
+        other = await _insert_tenant(admin_engine, trade_name=f"Clínica Rede {price}")
+        await _seed_homologated_contract(
+            admin_engine, other, normalized_key="unimed", tuss_code="10101012", agreed_price=price
+        )
+
+    response = await client.get("/api/v1/analytics/oportunidades", headers=auth_headers_a)
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["contract_valid_until"] == valid_until.isoformat()
+    assert item["days_until_contract_renewal"] == 45
+
+
+async def test_contract_expiring_beyond_horizon_omits_renewal_countdown(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Vence, mas só daqui a 200 dias — fora da janela de preparação de
+    120 dias, não deveria acender a contagem regressiva ainda."""
+    valid_until = date.today() + timedelta(days=200)
+    await _seed_homologated_contract(
+        admin_engine,
+        tenant_a,
+        normalized_key="unimed",
+        tuss_code="10101012",
+        agreed_price=100.0,
+        valid_until=valid_until,
+    )
+    for price in (180.0, 200.0, 220.0):
+        other = await _insert_tenant(admin_engine, trade_name=f"Clínica Rede {price}")
+        await _seed_homologated_contract(
+            admin_engine, other, normalized_key="unimed", tuss_code="10101012", agreed_price=price
+        )
+
+    response = await client.get("/api/v1/analytics/oportunidades", headers=auth_headers_a)
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["contract_valid_until"] is None
+    assert item["days_until_contract_renewal"] is None

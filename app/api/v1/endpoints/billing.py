@@ -22,7 +22,14 @@ from app.repositories.billing_repository import BillingRepository
 from app.repositories.contract_item_repository import ContractItemRepository
 from app.repositories.guia_repository import GuiaRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
-from app.schemas.billing import BillingCreateRequest, BillingResponse, BillingSearchItem, BillingSettleRequest
+from app.schemas.billing import (
+    BillingClinicalDocumentationConfirmationRequest,
+    BillingCoparticipationConfirmationRequest,
+    BillingCreateRequest,
+    BillingResponse,
+    BillingSearchItem,
+    BillingSettleRequest,
+)
 from app.schemas.pagination import PaginatedResponse
 from app.services.billing_service import BillingService
 
@@ -106,3 +113,43 @@ async def settle_billing(
     """Módulo de Taxas, Custos e Repasses: registra o valor que a
     operadora efetivamente repassou na liquidação do lote."""
     return await _build_service(db).settle_billing(current_user.tenant_id, UUID(current_user.id), billing_id, payload)
+
+
+@router.post("/{billing_id}/confirm-coparticipation", response_model=BillingResponse)
+async def confirm_coparticipation(
+    billing_id: UUID,
+    payload: BillingCoparticipationConfirmationRequest,
+    db: DbSession,
+    # DIFERENTE do RBAC do resto de billing.py (financeiro/admin/owner):
+    # esta confirmação acontece NO MOMENTO DO ATENDIMENTO (Épico F4.2 do
+    # Plano Diretor) — é quem está na recepção cobrando o paciente, não
+    # necessariamente financeiro. `atendimento` entra aqui de propósito.
+    current_user: CurrentUser = Depends(require_role("atendimento", "financeiro", "admin", "owner")),
+) -> BillingResponse:
+    """
+    Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") —
+    confirma (ou não) que a coparticipação cobrada nesta linha foi de
+    fato recebida do paciente.
+    """
+    return await _build_service(db).confirm_coparticipation(current_user.tenant_id, UUID(current_user.id), billing_id, payload)
+
+
+@router.post("/{billing_id}/confirm-clinical-documentation", response_model=BillingResponse)
+async def confirm_clinical_documentation(
+    billing_id: UUID,
+    payload: BillingClinicalDocumentationConfirmationRequest,
+    db: DbSession,
+    # financeiro/admin/owner — mesmo RBAC do resto de billing.py (não
+    # `atendimento`, diferente de confirm-coparticipation): conferir
+    # prescrição/evolução no prontuário é uma tarefa de auditoria de
+    # faturamento antes de enviar a guia, não algo feito na recepção.
+    current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
+) -> BillingResponse:
+    """
+    Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    × conta") — versão restrita (sem NLP): confirma (ou não) que existe
+    registro de prescrição/evolução sustentando este item OPME.
+    """
+    return await _build_service(db).confirm_clinical_documentation(
+        current_user.tenant_id, UUID(current_user.id), billing_id, payload
+    )

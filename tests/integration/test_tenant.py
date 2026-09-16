@@ -150,3 +150,166 @@ async def test_atendimento_role_can_view_suggestion_but_not_patch(client, admin_
 async def test_no_show_threshold_out_of_range_is_rejected(client, auth_headers_a):
     resp = await client.patch("/api/v1/tenant", json={"no_show_low_threshold": 1.5}, headers=auth_headers_a)
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------
+# Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+# specialty + limiares de risco de glosa + tetos da Nota de Saúde
+# Financeira, configuráveis por tenant. Mesmo padrão dos testes de
+# no-show acima.
+# ---------------------------------------------------------------------
+
+
+async def test_calibration_fields_default_to_null(client, auth_headers_a):
+    resp = await client.get("/api/v1/tenant", headers=auth_headers_a)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["specialty"] is None
+    assert body["denial_risk_warning_threshold"] is None
+    assert body["denial_risk_critical_threshold"] is None
+    assert body["health_score_denial_ceiling"] is None
+    assert body["health_score_no_show_ceiling"] is None
+
+
+async def test_owner_can_configure_specialty(client, auth_headers_a):
+    resp = await client.patch("/api/v1/tenant", json={"specialty": "odontologia"}, headers=auth_headers_a)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["specialty"] == "odontologia"
+
+
+async def test_owner_can_configure_denial_risk_thresholds(client, auth_headers_a):
+    resp = await client.patch(
+        "/api/v1/tenant",
+        json={"denial_risk_warning_threshold": 10.0, "denial_risk_critical_threshold": 35.0},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["denial_risk_warning_threshold"] == 10.0
+    assert resp.json()["denial_risk_critical_threshold"] == 35.0
+
+
+async def test_denial_risk_warning_must_be_below_critical_in_a_single_patch(client, auth_headers_a):
+    resp = await client.patch(
+        "/api/v1/tenant",
+        json={"denial_risk_warning_threshold": 50.0, "denial_risk_critical_threshold": 20.0},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422
+
+
+async def test_denial_risk_warning_validated_against_already_saved_critical(client, auth_headers_a):
+    first = await client.patch("/api/v1/tenant", json={"denial_risk_critical_threshold": 20.0}, headers=auth_headers_a)
+    assert first.status_code == 200, first.text
+
+    second = await client.patch("/api/v1/tenant", json={"denial_risk_warning_threshold": 30.0}, headers=auth_headers_a)
+    assert second.status_code == 422
+
+
+async def test_owner_can_configure_health_score_ceilings(client, auth_headers_a):
+    resp = await client.patch(
+        "/api/v1/tenant",
+        json={"health_score_denial_ceiling": 0.5, "health_score_no_show_ceiling": 0.6},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["health_score_denial_ceiling"] == 0.5
+    assert resp.json()["health_score_no_show_ceiling"] == 0.6
+
+
+async def test_denial_risk_threshold_out_of_range_is_rejected(client, auth_headers_a):
+    resp = await client.patch("/api/v1/tenant", json={"denial_risk_warning_threshold": 150.0}, headers=auth_headers_a)
+    assert resp.status_code == 422
+
+
+async def test_health_score_ceiling_out_of_range_is_rejected(client, auth_headers_a):
+    resp = await client.patch("/api/v1/tenant", json={"health_score_denial_ceiling": 1.5}, headers=auth_headers_a)
+    assert resp.status_code == 422
+
+
+async def test_suggested_denial_risk_thresholds_returns_none_without_monthly_history(client, auth_headers_a):
+    # Tenant sem nenhum billing histórico -> nenhum mês qualificado.
+    response = await client.get("/api/v1/tenant/denial-risk-thresholds/suggested", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["warning_threshold"] is None
+    assert body["critical_threshold"] is None
+    assert body["sample_size"] == 0
+
+
+async def _seed_billing_in_month(admin_engine, tenant_id, plan_id, *, months_ago: int, denial_risk_level: str) -> None:
+    """Cria 1 atendimento + 1 billing com `denial_risk_level` fixo,
+    datado dentro do mês `months_ago` meses atrás — usado para montar uma
+    série mensal conhecida pro teste de sugestão de limiar."""
+    scheduled_at = datetime.now(timezone.utc) - timedelta(days=months_ago * 30 + 5)
+    patient_id = str(uuid.uuid4())
+    appointment_id = str(uuid.uuid4())
+    billing_id = str(uuid.uuid4())
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO core.patients (id, tenant_id, full_name) VALUES (:id, :t, :n)"),
+            {"id": patient_id, "t": tenant_id, "n": f"Paciente {patient_id[:8]}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO core.appointments (id, tenant_id, patient_id, insurance_plan_id, scheduled_at, status, procedure_code, cid_code) "
+                "VALUES (:id, :t, :p, :plan, :dt, 'completed', '10101012', 'J06')"
+            ),
+            {"id": appointment_id, "t": tenant_id, "p": patient_id, "plan": plan_id, "dt": scheduled_at},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO core.billing (id, tenant_id, appointment_id, insurance_plan_id, charged_value, denial_risk_level, created_at) "
+                "VALUES (:id, :t, :a, :plan, 100.0, :level, :dt)"
+            ),
+            {"id": billing_id, "t": tenant_id, "a": appointment_id, "plan": plan_id, "level": denial_risk_level, "dt": scheduled_at},
+        )
+
+
+async def test_suggested_denial_risk_thresholds_computed_from_monthly_history(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.integration.test_health_score import _create_insurance_plan
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # 6 meses fechados (1 a 6 meses atrás), alternando risco alto/baixo
+    # pra gerar uma série de denial_risk_pct crescente e previsível.
+    for months_ago in range(1, 7):
+        level = "high" if months_ago % 2 == 0 else "low"
+        await _seed_billing_in_month(admin_engine, tenant_a, plan_id, months_ago=months_ago, denial_risk_level=level)
+
+    response = await client.get("/api/v1/tenant/denial-risk-thresholds/suggested", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sample_size"] == 6
+    assert body["warning_threshold"] is not None
+    assert body["critical_threshold"] is not None
+    assert 0 <= body["warning_threshold"] < body["critical_threshold"] <= 100
+
+
+async def test_suggested_health_score_ceilings_returns_none_without_monthly_history(client, auth_headers_a):
+    response = await client.get("/api/v1/tenant/health-score-ceilings/suggested", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["denial_ceiling"] is None
+    assert body["no_show_ceiling"] is None
+    assert body["denial_ceiling_sample_size"] == 0
+    assert body["no_show_ceiling_sample_size"] == 0
+
+
+async def test_suggested_health_score_ceilings_computed_from_monthly_history(client, auth_headers_a, admin_engine, tenant_a):
+    from tests.integration.test_health_score import _create_insurance_plan
+
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    for months_ago in range(1, 7):
+        level = "high" if months_ago % 2 == 0 else "low"
+        await _seed_billing_in_month(admin_engine, tenant_a, plan_id, months_ago=months_ago, denial_risk_level=level)
+
+    response = await client.get("/api/v1/tenant/health-score-ceilings/suggested", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["denial_ceiling_sample_size"] == 6
+    assert body["denial_ceiling"] is not None
+    assert 0 <= body["denial_ceiling"] <= 1
+    # _seed_billing_in_month também cria o atendimento como 'completed'
+    # (resolvido) — conta para overall_no_show_rate, mas sempre 0 faltas,
+    # então o teto sugerido de falta também tem amostra (0% em todo mês).
+    assert body["no_show_ceiling_sample_size"] == 6
+    assert body["no_show_ceiling"] == 0.0

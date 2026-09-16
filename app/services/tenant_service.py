@@ -53,5 +53,39 @@ class TenantService:
         if data.no_show_medium_threshold is not None:
             tenant.no_show_medium_threshold = data.no_show_medium_threshold
 
+        # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte")
+        # — mesmo padrão acima. `specialty` não tem restrição cruzada
+        # (texto livre); `denial_risk_*_threshold` segue a MESMA validação
+        # warning < critical sobre o valor RESULTANTE; os dois
+        # `health_score_*_ceiling` são métricas INDEPENDENTES entre si
+        # (glosa e falta), sem ordem relativa exigida um contra o outro.
+        if data.specialty is not None:
+            tenant.specialty = data.specialty
+
+        resulting_warning = (
+            data.denial_risk_warning_threshold
+            if data.denial_risk_warning_threshold is not None
+            else tenant.denial_risk_warning_threshold
+        )
+        resulting_critical = (
+            data.denial_risk_critical_threshold
+            if data.denial_risk_critical_threshold is not None
+            else tenant.denial_risk_critical_threshold
+        )
+        if resulting_warning is not None and resulting_critical is not None and resulting_warning >= resulting_critical:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="denial_risk_warning_threshold precisa ser menor que denial_risk_critical_threshold.",
+            )
+        if data.denial_risk_warning_threshold is not None:
+            tenant.denial_risk_warning_threshold = data.denial_risk_warning_threshold
+        if data.denial_risk_critical_threshold is not None:
+            tenant.denial_risk_critical_threshold = data.denial_risk_critical_threshold
+
+        if data.health_score_denial_ceiling is not None:
+            tenant.health_score_denial_ceiling = data.health_score_denial_ceiling
+        if data.health_score_no_show_ceiling is not None:
+            tenant.health_score_no_show_ceiling = data.health_score_no_show_ceiling
+
         await self.repo.save(tenant)
         return TenantResponse.model_validate(tenant)

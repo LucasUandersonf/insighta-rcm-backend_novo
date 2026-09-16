@@ -42,6 +42,7 @@ frequente vira a manchete, os demais entram como "e mais N motivo(s)".
 from dataclasses import dataclass, field
 
 from app.services.report_calculations import compute_roi_pct
+from app.services.threshold_calibration import compute_percentile_pair
 
 # Tradução em português simples de cada motivo técnico do motor de glosa
 # (denial_risk_engine.py) — usada SÓ na composição de frases deste
@@ -77,6 +78,73 @@ _WEEKDAY_DROP_CRITICAL_PCT = 30.0
 _WEEKDAY_DROP_WARNING_PCT = 15.0
 _DENIAL_RISK_PCT_CRITICAL = 40.0
 _DENIAL_RISK_PCT_WARNING = 15.0
+
+# Amostra mínima de MESES de histórico antes de sugerir um limiar de
+# risco de glosa calibrado pela própria clínica (ver DECISÃO completa em
+# threshold_calibration.py — Épico F2.1 do Plano Diretor). Mais baixa que
+# MIN_PATIENTS_FOR_SUGGESTION do no-show (10) porque a unidade aqui é
+# "mês", não "paciente" — pedir 10 meses de histórico antes de qualquer
+# sugestão adiaria demais um recurso que já é opcional (o tenant só vê
+# essa sugestão se pedir).
+MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION = 6
+
+
+@dataclass
+class DenialRiskThresholdSuggestion:
+    warning_threshold: float
+    critical_threshold: float
+    sample_size: int  # quantos meses de histórico entraram no cálculo
+
+
+def resolve_denial_risk_thresholds(tenant) -> tuple[float, float]:
+    """Duck-typed de propósito (mesmo padrão de
+    no_show_risk_engine.resolve_thresholds): aceita qualquer objeto com
+    `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    (Decimal/float/None) ou `None` — centraliza a conversão "None -> default
+    do módulo" para não divergir entre quem chama."""
+    if tenant is None:
+        return _DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL
+    warning = (
+        float(tenant.denial_risk_warning_threshold)
+        if tenant.denial_risk_warning_threshold is not None
+        else _DENIAL_RISK_PCT_WARNING
+    )
+    critical = (
+        float(tenant.denial_risk_critical_threshold)
+        if tenant.denial_risk_critical_threshold is not None
+        else _DENIAL_RISK_PCT_CRITICAL
+    )
+    return warning, critical
+
+
+def suggest_denial_risk_thresholds(monthly_denial_risk_pcts: list[float]) -> DenialRiskThresholdSuggestion | None:
+    """
+    Sugere `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    a partir da distribuição REAL de risco de glosa mês a mês desta
+    clínica (escala 0-100, mesma de `InsightsPeriodInput.denial_risk_pct`)
+    — não um corte genérico igual pra qualquer clínica. Mesmo raciocínio
+    de no_show_risk_engine.suggest_thresholds: mediana vira o aviso
+    ("comportamento típico já merece atenção"), P85 vira o crítico (só os
+    15% piores meses da própria clínica).
+
+    Retorna None com menos de MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION meses
+    qualificados — mesma cautela de nunca inventar confiança que a
+    evidência não dá.
+    """
+    pair = compute_percentile_pair(
+        monthly_denial_risk_pcts, min_sample=MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION, high_percentile=85
+    )
+    if pair is None:
+        return None
+    warning, critical = pair.median, pair.high
+    # Defesa: distribuição concentrada pode fazer P85 empatar/ficar abaixo
+    # da mediana — o motor exige warning < critical (mesma regra de
+    # TenantService.update_own_tenant), nunca sugerimos um par inválido.
+    if critical <= warning:
+        critical = min(warning + 1.0, 99.0)
+    return DenialRiskThresholdSuggestion(
+        warning_threshold=round(warning, 1), critical_threshold=round(critical, 1), sample_size=pair.sample_size
+    )
 
 # Achado do usuário sobre lacunas do módulo de Agenda: volume por dia da
 # semana (weekday_appointment_counts acima) não responde "quinta tem taxa
@@ -145,6 +213,15 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
+# conta") — amostra mínima de linhas OPME não conferidas antes de virar
+# card, mesmo raciocínio de _MIN_COPARTICIPATION_SAMPLE: 1-2 linhas
+# esquecidas é ruído operacional do dia a dia, não um padrão. Menor que
+# o de coparticipação de propósito: OPME já é, por natureza, uma fatia
+# pequena e de ALTO valor do faturamento — exigir 5 quase nunca
+# disparava em clínicas menores.
+_MIN_OPME_DOCUMENTATION_SAMPLE = 2
+
 # Raio-X da Receita — achado do Parecer Técnico "Boletim Insighta"
 # (revisão 2, 14/09): _coparticipation_visibility_insight só dispara UMA
 # vez (a "estreia" do dado); nada acompanhava a fatia de coparticipação
@@ -152,6 +229,17 @@ _MIN_COPARTICIPATION_SAMPLE = 5
 # _OPME_CONCENTRATION_INCREASE_PP — mesmo "chute razoável" documentado
 # no resto do arquivo.
 _COPARTICIPATION_GROWTH_INCREASE_PP = 5.0
+
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo 5)
+# — Billing.payment_method/installments ("Mapa de Dados Insighta" Onda
+# 1) foram capturados de propósito para um "futuro insight de
+# inadimplência de particular" (ver COMMENT ON COLUMN em
+# 049_billing_payment_method.sql) — este é esse insight. Boleto e cartão
+# de crédito são as duas formas onde o dinheiro NÃO entra no caixa na
+# hora do atendimento (diferente de dinheiro/pix/débito, liquidação
+# imediata) — mesma régua de risco que qualquer corretor financeiro
+# usaria, não uma calibração inventada.
+_COPARTICIPATION_DELAYED_PAYMENT_METHODS = frozenset({"boleto", "cartao_credito"})
 
 # "O que resta em aberto" da Auditoria de Templates e Insights: peça
 # natural do mesmo padrão que Guia/coparticipação já fecharam —
@@ -364,6 +452,33 @@ class InsightsPeriodInput:
     coparticipation_total: float = 0.0
     coparticipation_billing_count: int = 0
     total_billing_count: int = 0
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — de
+    # toda coparticipação COBRADA (coparticipation_total acima), quanto
+    # ainda não foi confirmada como recebida do paciente (ver
+    # AnalyticsRepository.coparticipation_unconfirmed_summary). Estado
+    # "AGORA" (como no_show_risk_score etc.): só o período atual recebe
+    # o valor real, o anterior fica no default — não existe "pendência
+    # de confirmação do período anterior" com sentido de negócio.
+    coparticipation_unconfirmed_value: float = 0.0
+    coparticipation_unconfirmed_count: int = 0
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    # 5) — de toda coparticipação com payment_method PREENCHIDO, quanto
+    # foi via forma de pagamento "a prazo" (boleto/cartão de crédito, ver
+    # _COPARTICIPATION_DELAYED_PAYMENT_METHODS) contra o total com forma
+    # conhecida (denominador — nunca o total geral, que inclui billings
+    # sem payment_method informado ainda). Estado "AGORA", mesmo
+    # raciocínio de coparticipation_unconfirmed_* acima.
+    coparticipation_delayed_payment_value: float = 0.0
+    coparticipation_delayed_payment_count: int = 0
+    coparticipation_known_payment_method_value: float = 0.0
+    # Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+    # prontuário × conta") — de todo item OPME cobrado, quanto ainda não
+    # foi conferido como tendo prescrição/evolução no prontuário (ver
+    # AnalyticsRepository.opme_documentation_unconfirmed_summary).
+    # Estado "AGORA", mesmo raciocínio de coparticipation_unconfirmed_*
+    # acima: só o período atual recebe o valor real.
+    opme_documentation_unconfirmed_value: float = 0.0
+    opme_documentation_unconfirmed_count: int = 0
     # Lotes de faturamento (core.lotes) com status='aberto' há mais de
     # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
     # — ver AnalyticsService._period_insights_input e
@@ -505,8 +620,13 @@ def _high_risk_billing_href(plan_id: str) -> str:
     parâmetro que o Painel usa de verdade (ver
     BillingRepository.list_high_risk_paginated e DashboardPage.tsx,
     frontend) — o `action_label` já nomeia o convênio na própria frase
-    do botão, então o destino não precisa repetir o nome na URL."""
-    return f"/?insurance_plan_id={plan_id}"
+    do botão, então o destino não precisa repetir o nome na URL.
+
+    "Junta Técnica Insighta": o Painel foi movido de "/" para "/painel"
+    (deixou de ser a landing page, virou só destino de drill-down — ver
+    RootRedirect.tsx, frontend) — este é exatamente esse drill-down,
+    então o link precisa acompanhar a rota nova."""
+    return f"/painel?insurance_plan_id={plan_id}"
 
 
 def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
@@ -844,6 +964,111 @@ def _coparticipation_growth_insight(current: InsightsPeriodInput, previous: Insi
             "recebendo esse valor do paciente na hora do atendimento, não só lançando no sistema."
         ),
         financial_impact=current.coparticipation_total,
+    )
+
+
+def _coparticipation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — fecha
+    a lacuna que os DOIS insights de coparticipação acima deixam
+    explicitamente em aberto (ver docstring de
+    _coparticipation_growth_insight: "nunca se o paciente de fato
+    PAGOU"). Agora que existe confirmação de recebimento
+    (Billing.coparticipation_received — ver
+    043_coparticipation_confirmation.sql), este insight soma o que foi
+    COBRADO mas ainda não confirmado como recebido (NULL) ou confirmado
+    que NÃO foi recebido (FALSE) — um vazamento de receita real, não
+    hipotético.
+
+    Amostra mínima na CONTAGEM de linhas não confirmadas (mesmo
+    raciocínio de _MIN_COPARTICIPATION_SAMPLE): 1-2 linhas esquecidas é
+    ruído operacional do dia a dia, não um padrão que merece alerta.
+    """
+    if current.coparticipation_unconfirmed_count < _MIN_COPARTICIPATION_SAMPLE or current.coparticipation_unconfirmed_value <= 0:
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem coparticipação cobrada que ainda não foi confirmada como recebida",
+        message=(
+            f"R$ {current.coparticipation_unconfirmed_value:,.2f} em coparticipação (a parte que o PACIENTE paga) "
+            f"foram cobrados em {current.coparticipation_unconfirmed_count} atendimento(s) neste período, mas "
+            "ninguém confirmou no sistema se esse valor de fato entrou no caixa. Vale conferir com a recepção e "
+            "confirmar cada um — cobrado no papel não é o mesmo que recebido de verdade."
+        ),
+        financial_impact=current.coparticipation_unconfirmed_value,
+    )
+
+
+def _coparticipation_delayed_payment_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    5) — fecha uma lacuna DIFERENTE da que
+    _coparticipation_unconfirmed_insight já fecha.
+
+    IMPORTANTE — payment_method só existe em billing JÁ confirmado como
+    recebido: BillingService.confirm_coparticipation só grava
+    payment_method/installments quando `received=True` (não há "como foi
+    pago" pra registrar quando nada foi pago). Então este insight NÃO é
+    "recepção esqueceu de confirmar" (isso já é
+    _coparticipation_unconfirmed_insight) — é "mesmo o que já foi
+    marcado como recebido pode não ser dinheiro de verdade no caixa
+    ainda": boleto marcado como recebido na hora do atendimento ainda
+    pode não compensar; cartão de crédito parcelado ainda pode ser
+    cancelado/estornado antes de quitar todas as parcelas. Os dois
+    insights são complementares, não duplicados: um cobre "ninguém
+    confirmou ainda", o outro cobre "confirmou, mas de um jeito que
+    ainda carrega risco de não fechar".
+    """
+    if current.coparticipation_delayed_payment_count < _MIN_COPARTICIPATION_SAMPLE:
+        return None
+    if current.coparticipation_known_payment_method_value <= 0:
+        return None
+    pct = (current.coparticipation_delayed_payment_value / current.coparticipation_known_payment_method_value) * 100
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Coparticipação marcada como recebida, mas em forma de pagamento que ainda pode não fechar",
+        message=(
+            f"R$ {current.coparticipation_delayed_payment_value:,.2f} ({pct:.0f}% da coparticipação já confirmada "
+            f"como recebida, com forma de pagamento informada) foram marcados como recebidos em "
+            f"{current.coparticipation_delayed_payment_count} atendimento(s) via boleto ou cartão de crédito "
+            "parcelado — diferente de dinheiro, PIX ou débito, esse valor pode ainda não ter entrado de verdade "
+            "no caixa (boleto pode não compensar, parcela pode ser cancelada antes de quitar)."
+        ),
+        financial_impact=current.coparticipation_delayed_payment_value,
+    )
+
+
+def _opme_documentation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    × conta") — versão RESTRITA explicitamente pedida no roadmap: "checar
+    presença de registro de prescrição/evolução para procedimentos de
+    alto valor (OPME), sem NLP semântico". Este insight nunca lê nem
+    interpreta prontuário nenhum — só soma o que foi cobrado como OPME
+    (item_type='material_opme') mas ainda não foi CONFERIDO por um
+    humano como tendo prescrição/evolução no prontuário
+    (Billing.clinical_documentation_confirmed NULL) ou conferido que NÃO
+    tem (FALSE) — um risco de glosa documental real, mesma mecânica de
+    _coparticipation_unconfirmed_insight acima.
+    """
+    if (
+        current.opme_documentation_unconfirmed_count < _MIN_OPME_DOCUMENTATION_SAMPLE
+        or current.opme_documentation_unconfirmed_value <= 0
+    ):
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem item de material especial (OPME) sem conferência documental",
+        message=(
+            f"R$ {current.opme_documentation_unconfirmed_value:,.2f} em {current.opme_documentation_unconfirmed_count} "
+            "item(ns) de OPME (órtese/prótese/material especial) neste período ainda não foram conferidos quanto à "
+            "presença de prescrição/evolução no prontuário. OPME é uma das maiores fontes de glosa de alto valor — "
+            "vale confirmar o registro clínico ANTES de enviar a guia ao convênio."
+        ),
+        financial_impact=current.opme_documentation_unconfirmed_value,
     )
 
 
@@ -1246,17 +1471,30 @@ def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None
     )
 
 
-def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
+def _denial_risk_pct_insight(
+    current: InsightsPeriodInput,
+    *,
+    warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
+) -> Insight | None:
     """
     Traduz o backlog de risco de glosa em uma frase de urgência
     financeira em vez de uma contagem seca — segundo exemplo do briefing
     de redesenho ("risco de até 50% de glosas nas contas atuais").
     Baseado em VALOR (R$), não em contagem de linhas: para a diretoria,
     "quanto dinheiro está em risco" é a pergunta real por trás do número.
+
+    `warning_threshold`/`critical_threshold` (Épico F2.1 do Plano
+    Diretor — "Calibração por especialidade/porte"): opcionais, default
+    nos mesmos valores de sempre (_DENIAL_RISK_PCT_WARNING/_CRITICAL) —
+    quem chama (AnalyticsService.get_smart_insights) resolve o valor
+    configurado do tenant via resolve_denial_risk_thresholds e passa
+    aqui; sem configuração, caem nos defaults. Mesmo padrão não-quebrador
+    já usado em no_show_risk_engine.assess().
     """
-    if current.denial_risk_pct is None or current.denial_risk_pct < _DENIAL_RISK_PCT_WARNING:
+    if current.denial_risk_pct is None or current.denial_risk_pct < warning_threshold:
         return None
-    severity = "critical" if current.denial_risk_pct >= _DENIAL_RISK_PCT_CRITICAL else "warning"
+    severity = "critical" if current.denial_risk_pct >= critical_threshold else "warning"
     return Insight(
         severity=severity,
         category="faturamento",
@@ -1402,10 +1640,11 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
     operacional (guias dentro do lote ficam paradas, sem virar fatura,
     atrasando o recebimento), não uma perda irreversível de direito.
 
-    Sem botão de ação, DE PROPÓSITO: ainda não existe nenhuma tela de
-    Lotes no frontend (só o endpoint /lotes, hoje consumido só por
-    FaturaService.create_from_lotes internamente) — "nunca inventa
-    destino" (ver DECISÃO na dataclass Insight acima).
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): agora que
+    a tela de gestão de Lotes existe (LotesPage.tsx), o botão de ação
+    aponta pra ela — antes ficava sem ação DE PROPÓSITO ("nunca inventa
+    destino", ver DECISÃO na dataclass Insight acima) porque só existia
+    o endpoint, sem nenhuma tela consumindo.
     """
     if current.stale_open_lotes_count <= 0:
         return None
@@ -1424,6 +1663,8 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
             f"fechar.{age_note} As guias dentro desses lotes ficam paradas — não avançam para fatura enquanto "
             "o lote não é fechado."
         ),
+        action_label="Ver lotes abertos",
+        action_href="/lotes",
     )
 
 
@@ -1696,6 +1937,8 @@ def generate_insights(
     estimated_no_show_revenue_at_risk: float = 0.0,
     estimated_idle_capacity_revenue_lost: float = 0.0,
     extra_insights: list[Insight] | None = None,
+    denial_risk_warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    denial_risk_critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
@@ -1709,7 +1952,9 @@ def generate_insights(
         _payment_gap_without_appeal_insight(current),
         _stale_open_lotes_insight(current),
         _contract_expiring_insight(current),
-        _denial_risk_pct_insight(current),
+        _denial_risk_pct_insight(
+            current, warning_threshold=denial_risk_warning_threshold, critical_threshold=denial_risk_critical_threshold
+        ),
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),
@@ -1723,6 +1968,9 @@ def generate_insights(
         _opme_concentration_insight(current, previous),
         _coparticipation_visibility_insight(current, previous),
         _coparticipation_growth_insight(current, previous),
+        _coparticipation_unconfirmed_insight(current),
+        _coparticipation_delayed_payment_insight(current),
+        _opme_documentation_unconfirmed_insight(current),
         _revenue_concentration_insight(current),
         _marketing_roi_insight(current, previous),
     ):

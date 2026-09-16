@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.appointment_satisfaction_token_repository import AppointmentSatisfactionTokenRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentListItem, AppointmentResponse, AppointmentUpdateRequest
+from app.schemas.appointment_satisfaction import SatisfactionLinkResponse
 from app.schemas.pagination import PaginatedResponse
 from app.services.appointment_service import AppointmentService
 
@@ -26,6 +28,7 @@ def _build_service(db: DbSession) -> AppointmentService:
         ProfessionalRepository(db),
         LocalRepository(db),
         TenantRepository(db),
+        AppointmentSatisfactionTokenRepository(db),
         webhook_repo=WebhookSubscriptionRepository(db),
     )
 
@@ -53,6 +56,19 @@ async def update_appointment(
     DECISÃO completa em AppointmentUpdateRequest (app/schemas/appointment.py).
     """
     return await _build_service(db).update_appointment(appointment_id, payload)
+
+
+@router.post("/{appointment_id}/satisfaction-link", response_model=SatisfactionLinkResponse)
+async def generate_satisfaction_link(
+    appointment_id: UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> SatisfactionLinkResponse:
+    """"Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    Satisfação/NPS: gera o link público de uso único que a recepção envia
+    manualmente ao paciente — ver DECISÃO completa em
+    AppointmentService.generate_satisfaction_link."""
+    return await _build_service(db).generate_satisfaction_link(appointment_id)
 
 
 @router.get("/by-patient/{patient_id}", response_model=list[AppointmentResponse])

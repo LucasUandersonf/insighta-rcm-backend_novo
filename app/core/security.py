@@ -75,6 +75,16 @@ def generate_password_reset_token() -> tuple[str, str]:
     return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def generate_satisfaction_token() -> tuple[str, str]:
+    """Gera (token_em_texto_puro, hash_sha256_hex) para o link público de
+    avaliação de satisfação pós-atendimento (ver AppointmentSatisfactionToken).
+    Mesmo formato/raciocínio de generate_password_reset_token() — função
+    própria (não reaproveitada) só para deixar claro, no ponto de uso, a
+    qual fluxo cada token pertence."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def create_access_token(*, user_id: str, tenant_id: str, role: str) -> str:
     """
     Gera o JWT que o cliente (frontend) enviará em cada requisição via

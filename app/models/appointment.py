@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,11 +18,25 @@ TIPO_PACIENTE_VALUES = ("ambulatorial", "internacao", "pronto_socorro")
 # de "retorno" em nenhum relatório.
 VISIT_TYPE_VALUES = ("primeira_consulta", "retorno")
 
+# "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1): motivo
+# estruturado do agendamento — complementa VISIT_TYPE_VALUES (corte
+# administrativo primeira_consulta/retorno) com o PORQUÊ clínico/
+# comercial. Alimenta segmentação de campanha de reengajamento.
+VISIT_INTENT_TAG_VALUES = ("rotina", "retorno", "avaliacao", "urgencia")
+
 
 class Appointment(Base):
     __tablename__ = "appointments"
     __table_args__ = (
         CheckConstraint(f"visit_type IS NULL OR visit_type IN {VISIT_TYPE_VALUES}", name="appointments_visit_type_check"),
+        CheckConstraint(
+            f"visit_intent_tag IS NULL OR visit_intent_tag IN {VISIT_INTENT_TAG_VALUES}",
+            name="appointments_visit_intent_tag_check",
+        ),
+        CheckConstraint(
+            "visit_satisfaction_score IS NULL OR (visit_satisfaction_score >= 1 AND visit_satisfaction_score <= 5)",
+            name="appointments_visit_satisfaction_score_check",
+        ),
         {"schema": "core"},
     )
 
@@ -82,4 +96,16 @@ class Appointment(Base):
     # sobrescreveria um dado de ROI de marketing com um dado operacional
     # toda vez que o mesmo paciente reagendasse por outro canal).
     booking_channel: Mapped[str | None] = mapped_column(String(50))
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1). Ver
+    # VISIT_INTENT_TAG_VALUES acima e DECISÃO completa em
+    # 046_appointment_visit_intent.sql.
+    visit_intent_tag: Mapped[str | None] = mapped_column(String(20))
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell. Ver DECISÃO completa em
+    # 050_appointment_addon_upsell.sql.
+    addon_offered_procedure: Mapped[str | None] = mapped_column(Text)
+    addon_declined: Mapped[bool | None] = mapped_column(Boolean)
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Satisfação/NPS. Ver DECISÃO completa em 052_appointment_satisfaction.sql.
+    visit_satisfaction_score: Mapped[int | None] = mapped_column(SmallInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
