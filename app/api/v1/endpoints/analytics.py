@@ -54,6 +54,7 @@ from app.schemas.analytics import (
     PlanLossRankingResponse,
     PriorityQueueResponse,
     RecallCandidatesResponse,
+    ReturnRateResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
     UpsellFunnelResponse,
@@ -241,6 +242,22 @@ async def get_data_freshness(
     sempre "agora", nunca uma janela de período.
     """
     return await _build_service(db).get_data_freshness()
+
+
+@router.get("/return-rate", response_model=ReturnRateResponse)
+async def get_return_rate(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ReturnRateResponse:
+    """
+    Achado do Dossiê Insighta RCM — taxa de retorno de pacientes
+    (`Appointment.visit_type`), mesmo período/seletor do resto da Sala
+    de Comando.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_return_rate(start, end)
 
 
 @router.get("/inactive-patients", response_model=InactivePatientsResponse)

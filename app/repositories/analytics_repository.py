@@ -958,6 +958,51 @@ class AnalyticsRepository:
         breakdown = {reason: int(count) for reason, count in result.all()}
         return breakdown, int(total)
 
+    async def visit_type_breakdown(self, date_from: date, date_to: date) -> tuple[dict[str, int], int]:
+        """
+        Achado do Dossiê Insighta RCM — `Appointment.visit_type`
+        ("primeira_consulta"/"retorno", ver VISIT_TYPE_VALUES) é
+        capturado pela normalização (Template de Agenda) desde sempre,
+        mas nenhum endpoint agregava isso: taxa de retorno de paciente
+        é um indicador padrão de qualquer clínica (mede fidelização),
+        hoje impossível de calcular no produto.
+
+        Só `status='completed'` conta (mesmo filtro do resto do produto
+        — ver `weekday_no_show_rate_breakdown` acima): um agendamento
+        que não aconteceu não tem "tipo de visita" realizado.
+
+        Devolve (breakdown, untagged_count) SEPARADOS pelo mesmo motivo
+        de `cancellation_reason_breakdown`: nem todo ERP de origem
+        distingue primeira consulta de retorno (campo NULLABLE), então
+        `sum(breakdown.values())` pode ser MENOR que o total de
+        atendimentos concluídos — o service usa a soma real do
+        breakdown como denominador da taxa (nunca conta um "untagged"
+        como primeira_consulta por padrão, o que sub-informaria a taxa
+        de retorno real).
+        """
+        start, end = _bounds(date_from, date_to)
+        untagged_stmt = select(func.count()).where(
+            Appointment.scheduled_at >= start,
+            Appointment.scheduled_at <= end,
+            Appointment.status == "completed",
+            Appointment.visit_type.is_(None),
+        )
+        untagged_count = (await self.session.execute(untagged_stmt)).scalar_one()
+
+        breakdown_stmt = (
+            select(Appointment.visit_type, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status == "completed",
+                Appointment.visit_type.is_not(None),
+            )
+            .group_by(Appointment.visit_type)
+        )
+        result = await self.session.execute(breakdown_stmt)
+        breakdown = {visit_type: int(count) for visit_type, count in result.all()}
+        return breakdown, int(untagged_count)
+
     async def item_type_charged_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """
         Soma de charged_value por `item_type` (procedimento/material_opme/

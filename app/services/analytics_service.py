@@ -45,6 +45,7 @@ from app.schemas.analytics import (
     DataFreshnessResponse,
     DataQualityByUserItem,
     DataQualityResponse,
+    ReturnRateResponse,
     DenialReasonConfirmationItem,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
@@ -1461,6 +1462,49 @@ class AnalyticsService:
         ]
         stalest_at = min(by_type.values()) if by_type else None
         return DataFreshnessResponse(items=items, stalest_at=stalest_at)
+
+    async def get_return_rate(self, date_from: date, date_to: date) -> ReturnRateResponse:
+        """
+        Achado do Dossiê Insighta RCM — taxa de retorno de pacientes
+        (retorno / (retorno + primeira_consulta), entre atendimentos
+        concluídos). Segue o seletor de período da tela (não é um
+        estado fixo tipo health-score): "taxa de retorno da semana" é
+        uma pergunta legítima, diferente de "nota de saúde financeira",
+        que só faz sentido como janela longa fixa.
+        """
+        previous = _previous_period(date_from, date_to)
+        current_breakdown, untagged_count = await self.analytics_repo.visit_type_breakdown(date_from, date_to)
+        previous_breakdown, _previous_untagged = await self.analytics_repo.visit_type_breakdown(
+            previous.start, previous.end
+        )
+
+        return_count = current_breakdown.get("retorno", 0)
+        first_visit_count = current_breakdown.get("primeira_consulta", 0)
+        current_total = return_count + first_visit_count
+
+        return_rate = None
+        if current_total > 0:
+            current_rate = (return_count / current_total) * 100
+            previous_return = previous_breakdown.get("retorno", 0)
+            previous_first_visit = previous_breakdown.get("primeira_consulta", 0)
+            previous_total = previous_return + previous_first_visit
+            # Sem amostra no período anterior, nunca inventa "0% de
+            # retorno" como base de comparação (mesmo raciocínio de
+            # `get_satisfaction_summary` acima) — previous_value só
+            # existe aqui porque o schema exige um float; delta_pct=None
+            # é o sinal real de "sem comparação".
+            previous_rate = (previous_return / previous_total) * 100 if previous_total > 0 else current_rate
+            delta_pct = _delta_pct(current_rate, previous_rate) if previous_total > 0 else None
+            return_rate = PeriodKPI(value=round(current_rate, 2), previous_value=round(previous_rate, 2), delta_pct=delta_pct)
+
+        return ReturnRateResponse(
+            period_start=date_from,
+            period_end=date_to,
+            return_rate=return_rate,
+            return_count=return_count,
+            first_visit_count=first_visit_count,
+            untagged_count=untagged_count,
+        )
 
     async def get_inactive_patients(self) -> InactivePatientsResponse:
         """

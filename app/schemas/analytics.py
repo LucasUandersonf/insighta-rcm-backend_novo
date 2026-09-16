@@ -942,3 +942,19 @@ class DataFreshnessResponse(BaseModel):
 
     items: list[DataFreshnessItem]
     stalest_at: datetime | None
+
+
+class ReturnRateResponse(BaseModel):
+    """GET /api/v1/analytics/return-rate — achado do Dossiê Insighta
+    RCM: `Appointment.visit_type` (primeira_consulta/retorno) é
+    capturado desde sempre, mas nenhum indicador media taxa de retorno
+    de paciente (fidelização) a partir dele. Tendência contra o período
+    anterior de mesma duração (mesmo formato PeriodKPI do resto da Sala
+    de Comando)."""
+
+    period_start: date
+    period_end: date
+    return_rate: PeriodKPI | None  # None quando não há nenhum atendimento com visit_type informado no período atual
+    return_count: int
+    first_visit_count: int
+    untagged_count: int  # completed sem visit_type informado — nunca soma no denominador da taxa
