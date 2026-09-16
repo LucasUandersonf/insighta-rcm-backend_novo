@@ -141,6 +141,19 @@ class WeekdayNoShowRateBucket(BaseModel):
     no_show_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
 
 
+class WeekdayCancellationRateBucket(BaseModel):
+    """Achado do Dossiê Insighta RCM — mesmo molde de
+    WeekdayNoShowRateBucket, mas para cancelamento: fração de
+    cancelamentos dentro dos atendimentos com desfecho TERMINAL
+    (completed+no_show+cancelled) daquele dia. Ver
+    AnalyticsRepository.weekday_cancellation_rate_breakdown."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    cancellation_count: int
+    total_appointments: int  # só desfecho terminal (completed+no_show+cancelled)
+    cancellation_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -180,6 +193,10 @@ class AgendaMetricsResponse(BaseModel):
     # de falta X%", não só "quinta-feira tem N agendamentos". Alimenta o
     # insight textual em smart_insights_engine.py::_weekday_no_show_rate_insights.
     weekday_no_show_rates: list[WeekdayNoShowRateBucket]
+    # Achado do Dossiê Insighta RCM — mesmo espírito de
+    # weekday_no_show_rates acima, agora para cancelamento: "quinta tem
+    # taxa de cancelamento X%".
+    weekday_cancellation_rates: list[WeekdayCancellationRateBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em

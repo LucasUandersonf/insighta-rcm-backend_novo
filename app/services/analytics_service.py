@@ -94,6 +94,7 @@ from app.schemas.analytics import (
     UpsellFunnelItem,
     UpsellFunnelResponse,
     WeekdayBucket,
+    WeekdayCancellationRateBucket,
     WeekdayNoShowRateBucket,
 )
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
@@ -667,6 +668,19 @@ class AnalyticsService:
             for weekday, (no_show, total) in sorted(weekday_no_show_counts.items(), key=lambda item: item[0])
         ]
 
+        # Achado do Dossiê Insighta RCM — mesmo espírito do bloco acima,
+        # agora para cancelamento: "quinta tem taxa de cancelamento X%".
+        weekday_cancellation_counts = await self.analytics_repo.weekday_cancellation_rate_breakdown(date_from, date_to)
+        weekday_cancellation_buckets = [
+            WeekdayCancellationRateBucket(
+                weekday=weekday,
+                cancellation_count=cancelled,
+                total_appointments=total,
+                cancellation_rate=(cancelled / total) if total > 0 else None,
+            )
+            for weekday, (cancelled, total) in sorted(weekday_cancellation_counts.items(), key=lambda item: item[0])
+        ]
+
         # Quantos profissionais ativos ainda não têm NENHUM bloco de grade
         # cadastrado — checagem INDEPENDENTE da janela de período pedida
         # de propósito: `available_minutes <= 0` (usado por
@@ -704,6 +718,7 @@ class AnalyticsService:
             peak_hours=peak_hours,
             weekday_histogram=weekday_buckets,
             weekday_no_show_rates=weekday_no_show_buckets,
+            weekday_cancellation_rates=weekday_cancellation_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
             patient_no_show_ranking=[

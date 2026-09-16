@@ -978,6 +978,37 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
+    async def weekday_cancellation_rate_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `weekday_no_show_rate_breakdown` acima, mas para CANCELAMENTO em
+        vez de falta. Denominador = atendimentos com desfecho TERMINAL
+        no dia (`completed`/`no_show`/`cancelled`) — um agendamento
+        ainda `scheduled` não tem desfecho conhecido (mesmo raciocínio
+        do motor de no-show); diferente do breakdown de falta, aqui
+        `cancelled` entra tanto no numerador quanto no denominador (é
+        exatamente o desfecho que a taxa está medindo).
+
+        Retorna {weekday: (cancellation_count, total_terminal)} — mesma
+        divisão de responsabilidade de sempre: o service decide "sem
+        amostra" vs. taxa real.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        cancellation_expr = func.sum(case((Appointment.status == "cancelled", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, cancellation_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show", "cancelled")),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(cancelled), int(total)) for weekday, cancelled, total in result.all()}
+
     async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
         """
         Equivalente a `weekday_no_show_rate_breakdown`, mas por CANAL de
