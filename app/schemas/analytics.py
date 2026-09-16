@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -56,6 +57,13 @@ class PaymentLagByPlanItem(BaseModel):
 
     insurance_plan_id: UUID
     insurance_plan_name: str
+    # Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+    # primeira classe") — "convenio" ou "particular" (ver
+    # DECISÃO em 054_insurance_plan_type.sql). PMR só tem o sentido de
+    # "prazo de operadora" pra convênio de verdade; particular aparece
+    # aqui por transparência, nunca escondido, mas o frontend pode optar
+    # por segregar a leitura.
+    plan_type: str
     avg_days_to_receive: float
     billings_settled_count: int
 
@@ -71,6 +79,32 @@ class PaymentLagByPlanResponse(BaseModel):
     avg_days_to_receive: float | None
     billings_settled_count: int
     items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
+
+
+class AgendaPlanPriorityItem(BaseModel):
+    """Uma linha da recomendação de priorização de agenda por convênio
+    (Onda 4 do Plano de Ação, item 14 — evolução do PMR existente). Ver
+    DECISÃO completa em AnalyticsService.get_agenda_plan_priority."""
+
+    insurance_plan_id: UUID
+    insurance_plan_name: str
+    avg_days_to_receive: float
+    total_loss: float
+    # 1 = prioridade MÁXIMA pra encaixar um paciente novo/de retorno
+    # quando há mais de um convênio candidato pra mesma vaga.
+    priority_rank: int
+
+
+class AgendaPlanPriorityResponse(BaseModel):
+    """GET /api/v1/analytics/agenda-plan-priority — Painel → Agenda.
+    Só entram convênios de verdade (`plan_type="convenio"`) com PMR
+    calculável no período (billing conciliado) — sem prazo de
+    recebimento não há o que ranquear. `items` já vem ordenado por
+    `priority_rank` crescente."""
+
+    period_start: date
+    period_end: date
+    items: list[AgendaPlanPriorityItem]
 
 
 class AgendaRevenueForecastResponse(BaseModel):
@@ -154,6 +188,18 @@ class WeekdayCancellationRateBucket(BaseModel):
     cancellation_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
 
 
+class WeekdaySqueezeInBucket(BaseModel):
+    """Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    agenda mais recebe encaixe. Ver DECISÃO completa em
+    AnalyticsRepository.weekday_squeeze_in_breakdown sobre o
+    denominador (só quem tem is_squeeze_in informado)."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    squeeze_in_count: int
+    total_informed: int  # só agendamentos com is_squeeze_in preenchido (não NULL)
+    squeeze_in_rate: float | None  # None quando total_informed == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -197,6 +243,9 @@ class AgendaMetricsResponse(BaseModel):
     # weekday_no_show_rates acima, agora para cancelamento: "quinta tem
     # taxa de cancelamento X%".
     weekday_cancellation_rates: list[WeekdayCancellationRateBucket]
+    # Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    # agenda mais recebe encaixe (Appointment.is_squeeze_in).
+    weekday_squeeze_in_rates: list[WeekdaySqueezeInBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em
@@ -248,6 +297,11 @@ class PlanLossItem(BaseModel):
     mais em cada convênio."""
 
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima. "convenio" quando o nome não
+    # bate com nenhum InsurancePlan cadastrado (nunca deveria acontecer,
+    # mas nunca None).
+    plan_type: str
     financial_hole: float  # cobrado abaixo do contratado
     payment_gap: float  # pago pela operadora abaixo do contratado (só billings conciliados)
     denial_risk_value: float  # valor faturado com risco de glosa médio/alto
@@ -270,6 +324,9 @@ class ContractUtilizationItem(BaseModel):
 
     contract_id: UUID
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima.
+    plan_type: str
     valid_from: date
     valid_until: date | None
     total_items: int  # procedimentos negociados no contrato
@@ -681,6 +738,11 @@ class InactivePatientItem(BaseModel):
     full_name: str
     last_appointment_at: datetime
     days_since_last_appointment: int
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — fecha o
+    # ciclo desta lista: `None` = ninguém tentou reativar este paciente
+    # ainda (ver PatientOutreachLogRepository.latest_by_patient_ids).
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
 
 
 class InactivePatientsResponse(BaseModel):
@@ -694,6 +756,61 @@ class InactivePatientsResponse(BaseModel):
     items: list[InactivePatientItem]
     total_count: int
     inactive_after_days: int
+
+
+# Gaps Dossiê Insighta RCM, item 4 — RFM completo (Recência, Frequência,
+# Valor). Recência e Frequência já existiam espalhadas em outras
+# features (InactivePatientsResponse, patient_value_engine); Valor era a
+# dimensão que faltava pra virar RFM DE VERDADE. Ver DECISÃO completa em
+# app/services/rfm_engine.py sobre os limiares/quantis usados.
+RfmSegment = Literal["campeoes", "fieis", "nao_pode_perder", "em_risco", "novos", "hibernando", "precisa_atencao"]
+
+
+class RfmSegmentCount(BaseModel):
+    segment: RfmSegment
+    patient_count: int
+
+
+class RfmPatientItem(BaseModel):
+    """Uma linha da lista de pacientes que mais precisam de ação —
+    segmento "não pode perder" (alto valor histórico, sumiu) ou "em
+    risco" (vinha com frequência, sumiu), maior receita histórica
+    primeiro. Ver DECISÃO em AnalyticsService.get_patient_rfm."""
+
+    patient_id: UUID
+    full_name: str
+    days_since_last_appointment: int
+    visit_count: int
+    total_revenue: float
+    recency_score: int
+    frequency_score: int
+    monetary_score: int
+    segment: RfmSegment
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — mesma
+    # anotação de InactivePatientItem.last_outreach_at.
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
+
+
+class RfmResponse(BaseModel):
+    """GET /api/v1/analytics/patient-rfm — a base de pacientes inteira
+    (todo mundo com pelo menos 1 atendimento não cancelado) classificada
+    em Recência × Frequência × Valor, sempre "a partir de hoje" (sem
+    date_from/date_to — mesmo espírito de InactivePatientsResponse: RFM
+    avalia o relacionamento inteiro, não uma janela de período).
+
+    `segment_counts` sempre traz os 7 segmentos (mesmo os com 0
+    pacientes — é uma taxonomia fixa, diferente de uma quebra por dado
+    variável como dia da semana): a distribuição completa da carteira.
+    `action_items` é só quem precisa de ação AGORA (segmentos
+    "nao_pode_perder"/"em_risco"), maior receita histórica primeiro —
+    mesmo espírito de "lista vermelha" de PatientNoShowRankingItem, não
+    um dump da base inteira."""
+
+    as_of: date
+    total_patients: int
+    segment_counts: list[RfmSegmentCount]
+    action_items: list[RfmPatientItem]
 
 
 class EarlyChurnRiskItem(BaseModel):
@@ -1063,3 +1180,24 @@ class PatientDemographicsResponse(BaseModel):
     period_end: date
     buckets: list[AgeBucketItem]  # sempre as 5 faixas, mesmo com contagem 0
     unknown_age_count: int
+
+
+class DailySummaryResponse(BaseModel):
+    """GET /api/v1/analytics/daily-summary — Onda 6 do Plano de Ação,
+    item 18 ("resumo diário narrado"). NÃO é uma fonte de dado nova:
+    compõe em texto corrido métricas que já existem espalhadas em telas
+    diferentes (executive-summary, agenda-metrics, inactive-patients,
+    agenda-plan-priority), sempre para HOJE — mesmo espírito "sempre a
+    partir de hoje" de InactivePatientsResponse/HealthScoreResponse,
+    nunca uma janela de período configurável (é um resumo do DIA, não
+    do período escolhido em outra tela).
+
+    `sentences` nunca inventa uma frase sobre um dado ausente — cada
+    frase só entra na lista quando o número por trás dela é
+    genuinamente informativo (ex: só menciona risco alto de falta
+    quando `high_risk_count > 0`, nunca "0 atendimentos em risco" como
+    se fosse notícia)."""
+
+    date: date
+    headline: str
+    sentences: list[str]

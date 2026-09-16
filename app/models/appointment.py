@@ -108,4 +108,7 @@ class Appointment(Base):
     # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
     # Satisfação/NPS. Ver DECISÃO completa em 052_appointment_satisfaction.sql.
     visit_satisfaction_score: Mapped[int | None] = mapped_column(SmallInteger)
+    # Onda 5 do Plano de Ação, item 15 ("agenda avançada"). Ver DECISÃO
+    # completa em 056_appointment_squeeze_in.sql.
+    is_squeeze_in: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

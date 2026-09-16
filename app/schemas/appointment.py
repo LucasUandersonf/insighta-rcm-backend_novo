@@ -34,6 +34,9 @@ class AppointmentCreateRequest(BaseModel):
     cid_code: str | None = None
     # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1).
     visit_intent_tag: str | None = None
+    # Onda 5 do Plano de Ação, item 15 — já conhecido na hora de marcar
+    # quando é um encaixe explícito fora da grade normal.
+    is_squeeze_in: bool | None = None
 
     @field_validator("tipo_paciente")
     @classmethod
@@ -102,6 +105,9 @@ class AppointmentUpdateRequest(BaseModel):
     # 050_appointment_addon_upsell.sql.
     addon_offered_procedure: str | None = None
     addon_declined: bool | None = None
+    # Onda 5 do Plano de Ação, item 15 — editável depois (ex: a recepção
+    # só percebe que virou encaixe no dia, não na hora de marcar).
+    is_squeeze_in: bool | None = None
 
     @field_validator("status")
     @classmethod
@@ -156,6 +162,8 @@ class AppointmentResponse(BaseModel):
     addon_offered_procedure: str | None = None
     addon_declined: bool | None = None
     visit_satisfaction_score: int | None = None
+    # Onda 5 do Plano de Ação, item 15.
+    is_squeeze_in: bool | None = None
 
     model_config = {"from_attributes": True}
 

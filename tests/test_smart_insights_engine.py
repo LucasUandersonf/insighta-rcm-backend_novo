@@ -1818,3 +1818,111 @@ def test_early_churn_insight_is_current_period_state_never_from_previous():
     )
     insights = generate_insights(_EMPTY_PERIOD, previous)
     assert [i for i in insights if "sumindo do próprio padrão" in i.title.lower()] == []
+
+
+# ---------------------------------------------------------------------
+# Onda 6 do Plano de Ação, item 19 — dia da semana com mais encaixe
+# ---------------------------------------------------------------------
+
+
+def test_weekday_squeeze_in_above_average_is_flagged():
+    """Segunda: 6 de 10 (60%) são encaixe; sexta: 2 de 20 (10%) — média
+    do período = 8/30 = 26.7%. Segunda fica +33.3pp acima da média
+    (warning; crítico seria >=25pp acima, então na verdade crítico)."""
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_squeeze_in_counts={1: (6, 10), 5: (2, 20)},
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mais recebe encaixe" in i.title]
+    assert len(titles) == 1
+    assert "segunda-feira" in titles[0].title.lower()
+    assert titles[0].category == "agenda"
+    assert titles[0].action_href == "#agenda-resumo"
+
+
+def test_weekday_squeeze_in_close_to_average_is_not_flagged():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_squeeze_in_counts={1: (3, 10), 5: (2, 10)},  # 30% vs 20%, média 25% -> +5pp
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_weekday_squeeze_in_small_sample_is_ignored_as_noise():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_squeeze_in_counts={1: (2, 2), 5: (1, 10)},
+    )
+    assert generate_insights(current, _EMPTY_PERIOD) == []
+
+
+def test_weekday_squeeze_in_far_above_average_is_critical():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_squeeze_in_counts={1: (9, 10), 5: (1, 10)},  # segunda 90%, média 50% -> +40pp
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "mais recebe encaixe" in i.title]
+    assert len(titles) == 1
+    assert titles[0].severity == "critical"
+
+
+def test_weekday_squeeze_in_absent_without_any_data():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_weekday_squeeze_in_is_current_period_state_never_from_previous():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, weekday_squeeze_in_counts={1: (9, 10), 5: (1, 10)},
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "mais recebe encaixe" in i.title] == []
+
+
+# ---------------------------------------------------------------------
+# Onda 6 do Plano de Ação, item 19 — RFM "não pode perder" sumindo
+# ---------------------------------------------------------------------
+
+
+def test_rfm_cannot_lose_insight_fires_with_count_and_top_name():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, rfm_cannot_lose_count=3,
+        rfm_cannot_lose_top_name="Maria Souza", rfm_cannot_lose_top_revenue=12_500.0,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if "alto valor sumiu" in i.title.lower() or "alto valor sumiram" in i.title.lower()]
+    assert len(titles) == 1
+    assert titles[0].severity == "warning"
+    assert titles[0].category == "agenda"
+    assert "3 pacientes" in titles[0].message
+    assert "Maria Souza" in titles[0].message
+    assert "R$ 12,500.00" in titles[0].message
+    assert titles[0].action_href == "#carteira-inativa"
+
+
+def test_rfm_cannot_lose_insight_singular_wording_without_top_name():
+    current = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, rfm_cannot_lose_count=1,
+    )
+    insights = generate_insights(current, _EMPTY_PERIOD)
+    titles = [i for i in insights if i.title == "1 paciente de alto valor sumiu"]
+    assert len(titles) == 1
+    assert "1 paciente que já gerou" in titles[0].message
+    assert "maior receita histórica" not in titles[0].message
+
+
+def test_rfm_cannot_lose_insight_absent_without_any_case():
+    assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_rfm_cannot_lose_insight_is_current_period_state_never_from_previous():
+    previous = InsightsPeriodInput(
+        denial_reason_counts=[], financial_hole_total=0, total_value_saved=0, avg_capacity_utilization=None,
+        high_risk_no_show_count=0, rfm_cannot_lose_count=5, rfm_cannot_lose_top_name="Carlos Lima",
+    )
+    insights = generate_insights(_EMPTY_PERIOD, previous)
+    assert [i for i in insights if "alto valor" in i.title.lower()] == []

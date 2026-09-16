@@ -204,14 +204,14 @@ class AnalyticsRepository:
         start, end = _bounds(date_from, date_to)
         stmt = text(
             """
-            SELECT ip.id, ip.display_name,
+            SELECT ip.id, ip.display_name, ip.plan_type,
                    AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0) AS avg_days,
                    COUNT(*) AS settled_count
             FROM core.billing b
             JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
             WHERE b.created_at >= :start AND b.created_at <= :end
               AND b.settled_at IS NOT NULL
-            GROUP BY ip.id, ip.display_name
+            GROUP BY ip.id, ip.display_name, ip.plan_type
             ORDER BY avg_days DESC
             """
         )
@@ -220,8 +220,9 @@ class AnalyticsRepository:
             {
                 "insurance_plan_id": str(row[0]),
                 "insurance_plan_name": row[1],
-                "avg_days_to_receive": float(row[2]),
-                "billings_settled_count": int(row[3]),
+                "plan_type": row[2],
+                "avg_days_to_receive": float(row[3]),
+                "billings_settled_count": int(row[4]),
             }
             for row in result.all()
         ]
@@ -526,6 +527,48 @@ class AnalyticsRepository:
             for patient_id, full_name, revenue in result.all()
         ]
 
+    async def patient_rfm_metrics(self) -> list[dict]:
+        """
+        Insumo cru do RFM completo (Gaps Dossiê Insighta RCM, item 4) —
+        Recência (`last_appointment_at`), Frequência (`visit_count`) e
+        Valor (`total_revenue`) por paciente, os três SEMPRE histórico
+        completo (sem date_from/date_to), nunca uma janela de período:
+        RFM avalia o RELACIONAMENTO inteiro com o paciente, mesmo
+        raciocínio de `list_inactive_patients`/`vip_signals_for` (ambos
+        também "a partir de hoje", nunca um recorte).
+
+        Só entra paciente com pelo menos 1 atendimento NÃO cancelado
+        (mesmo critério de `vip_signals_for` em patient_repository.py) —
+        cadastro sem histórico não tem Recência/Frequência/Valor pra
+        calcular. `total_revenue` soma todo billing ligado a esses
+        atendimentos (LEFT JOIN — um atendimento sem billing ainda
+        emitido conta 0, nunca é excluído da Frequência por isso).
+        """
+        from app.models.patient import Patient
+
+        last_appointment_expr = func.max(Appointment.scheduled_at)
+        visit_count_expr = func.count(func.distinct(Appointment.id))
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, last_appointment_expr, visit_count_expr, revenue_expr)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .outerjoin(Billing, Billing.appointment_id == Appointment.id)
+            .where(Appointment.status != "cancelled")
+            .group_by(Patient.id, Patient.full_name)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {
+                "patient_id": str(patient_id),
+                "full_name": full_name,
+                "last_appointment_at": last_appointment_at,
+                "visit_count": int(visit_count),
+                "total_revenue": float(total_revenue),
+            }
+            for patient_id, full_name, last_appointment_at, visit_count, total_revenue in result.all()
+        ]
+
     async def active_patient_birth_dates(self, date_from: date, date_to: date) -> tuple[list[date], int]:
         """
         Achado do Dossiê Insighta RCM — insumo de faixa etária/
@@ -574,6 +617,19 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {name: float(total) for name, total in result.all() if total}
 
+    async def plan_types_by_name(self) -> dict[str, str]:
+        """
+        Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+        primeira classe") — lookup `display_name -> plan_type`, usado
+        pra anotar o ranking de perda por convênio (já agrupado por
+        NOME de plano em `financial_hole_by_plan`/`payment_gap_by_plan`/
+        `denial_risk_value_by_plan`) sem precisar reescrever essas 3
+        queries existentes. Mesma fragilidade de chave por NOME (não por
+        id) já presente nelas — não introduzida aqui.
+        """
+        result = await self.session.execute(select(InsurancePlan.display_name, InsurancePlan.plan_type))
+        return dict(result.all())
+
     async def contract_utilization(self, date_from: date, date_to: date) -> list[dict]:
         """
         Utilização de contrato: dos procedimentos NEGOCIADOS num contrato
@@ -606,6 +662,7 @@ class AnalyticsRepository:
             SELECT
                 c.id,
                 ip.display_name,
+                ip.plan_type,
                 c.valid_from,
                 c.valid_until,
                 COUNT(ci.id) AS total_items,
@@ -624,7 +681,7 @@ class AnalyticsRepository:
                 LIMIT 1
             ) billed ON true
             WHERE c.status = 'homologado'
-            GROUP BY c.id, ip.display_name, c.valid_from, c.valid_until
+            GROUP BY c.id, ip.display_name, ip.plan_type, c.valid_from, c.valid_until
             ORDER BY (COUNT(DISTINCT CASE WHEN billed.tuss_code IS NOT NULL THEN ci.tuss_code END)::float / NULLIF(COUNT(ci.id), 0)) ASC
             """
         )
@@ -633,11 +690,12 @@ class AnalyticsRepository:
             {
                 "contract_id": row[0],
                 "plan_name": row[1],
-                "valid_from": row[2],
-                "valid_until": row[3],
-                "total_items": row[4],
-                "items_billed": row[5],
-                "idle_catalog_value": float(row[6]),
+                "plan_type": row[2],
+                "valid_from": row[3],
+                "valid_until": row[4],
+                "total_items": row[5],
+                "items_billed": row[6],
+                "idle_catalog_value": float(row[7]),
             }
             for row in result.all()
         ]
@@ -1008,6 +1066,35 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {int(weekday): (int(cancelled), int(total)) for weekday, cancelled, total in result.all()}
+
+    async def weekday_squeeze_in_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+        agenda mais recebe encaixe (Appointment.is_squeeze_in). Diferente
+        de weekday_cancellation_rate_breakdown: o denominador aqui é só
+        quem tem is_squeeze_in INFORMADO (IS NOT NULL) — um agendamento
+        sem essa informação (a imensa maioria hoje, e todo dado vindo de
+        ingestão que não distingue isso) não pode contar nem a favor nem
+        contra a taxa, senão ela "afunda" artificialmente por falta de
+        dado, não por falta de encaixe de verdade.
+
+        Retorna {weekday: (squeeze_in_count, total_informed)}.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        squeeze_in_expr = func.sum(case((Appointment.is_squeeze_in.is_(True), 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, squeeze_in_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.is_squeeze_in.is_not(None),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(squeeze_in), int(total)) for weekday, squeeze_in, total in result.all()}
 
     async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
         """

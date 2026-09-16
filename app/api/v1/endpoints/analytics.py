@@ -25,6 +25,7 @@ from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.lote_repository import LoteRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.network_benchmark_repository import NetworkBenchmarkRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
@@ -32,8 +33,10 @@ from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
+    AgendaPlanPriorityResponse,
     AgendaRevenueForecastResponse,
     AverageTicketResponse,
+    DailySummaryResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
     DataFreshnessResponse,
@@ -58,6 +61,7 @@ from app.schemas.analytics import (
     PriorityQueueResponse,
     RecallCandidatesResponse,
     ReturnRateResponse,
+    RfmResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
     UpsellFunnelResponse,
@@ -113,6 +117,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         CostEntryRepository(db),
         InsightOutcomeRepository(db),
         IngestionRepository(db),
+        PatientOutreachLogRepository(db),
     )
 
 
@@ -326,6 +331,35 @@ async def get_inactive_patients(
     return await _build_service(db).get_inactive_patients()
 
 
+@router.get("/daily-summary", response_model=DailySummaryResponse)
+async def get_daily_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DailySummaryResponse:
+    """
+    Onda 6 do Plano de Ação, item 18 ("resumo diário narrado") — texto
+    corrido compondo faturamento/agenda/carteira inativa/priorização de
+    convênio de HOJE (ver DECISÃO completa em
+    AnalyticsService.get_daily_summary). Sem date_from/date_to de
+    propósito: é sempre o resumo do dia atual.
+    """
+    return await _build_service(db).get_daily_summary()
+
+
+@router.get("/patient-rfm", response_model=RfmResponse)
+async def get_patient_rfm(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> RfmResponse:
+    """
+    RFM completo (Gaps Dossiê Insighta RCM, item 4) — Recência,
+    Frequência e Valor de cada paciente, segmentados. Sem date_from/
+    date_to (mesmo espírito de inactive-patients): RFM avalia o
+    relacionamento inteiro com o paciente, não uma janela de período.
+    """
+    return await _build_service(db).get_patient_rfm()
+
+
 @router.get("/early-churn-risk", response_model=EarlyChurnRiskResponse)
 async def get_early_churn_risk(
     db: DbSession,
@@ -504,6 +538,24 @@ async def get_payment_lag_by_plan(
     """
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_payment_lag_by_plan(start, end)
+
+
+@router.get("/agenda-plan-priority", response_model=AgendaPlanPriorityResponse)
+async def get_agenda_plan_priority(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> AgendaPlanPriorityResponse:
+    """
+    Onda 4 do Plano de Ação, item 14 — evolução do PMR existente:
+    recomenda QUAL convênio priorizar ao encaixar um paciente novo/de
+    retorno, combinando prazo de recebimento e perda financeira por
+    ranking (ver DECISÃO completa em
+    AnalyticsService.get_agenda_plan_priority).
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_agenda_plan_priority(start, end)
 
 
 @router.get("/contract-utilization", response_model=ContractUtilizationResponse)

@@ -13,15 +13,17 @@ import pytest
 from sqlalchemy import text
 
 
-async def _create_insurance_plan(admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional") -> str:
+async def _create_insurance_plan(
+    admin_engine, tenant_id, display_name="Unimed Nacional", normalized_key="unimed_nacional", plan_type="convenio"
+) -> str:
     plan_id = str(uuid.uuid4())
     async with admin_engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO core.insurance_plans (id, tenant_id, display_name, normalized_key) "
-                "VALUES (:id, :t, :name, :key)"
+                "INSERT INTO core.insurance_plans (id, tenant_id, display_name, normalized_key, plan_type) "
+                "VALUES (:id, :t, :name, :key, :plan_type)"
             ),
-            {"id": plan_id, "t": tenant_id, "name": display_name, "key": normalized_key},
+            {"id": plan_id, "t": tenant_id, "name": display_name, "key": normalized_key, "plan_type": plan_type},
         )
     return plan_id
 
@@ -170,6 +172,128 @@ async def test_payment_lag_by_plan_orders_worst_first(client, auth_headers_a, ad
     assert [item["insurance_plan_name"] for item in body["items"]] == ["Convênio Lento", "Convênio Rápido"]
     assert body["items"][0]["avg_days_to_receive"] == 100.0
     assert body["items"][1]["avg_days_to_receive"] == 10.0
+    # Achado da Onda 3 do Plano de Ação — ambos os planos criados por
+    # `_create_insurance_plan` nascem "convenio" (default da coluna).
+    assert body["items"][0]["plan_type"] == "convenio"
+    assert body["items"][1]["plan_type"] == "convenio"
+
+
+async def test_payment_lag_by_plan_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+    primeira classe") — um plano `plan_type="particular"` aparece no
+    ranking de PMR marcado como tal, nunca escondido nem confundido com
+    convênio de verdade."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, particular_plan, days_to_receive=5.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/payment-lag-by-plan?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["plan_type"] == "particular"
+
+
+async def test_agenda_plan_priority_ranks_fast_and_clean_plan_first(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 4 do Plano de Ação, item 14 — evolução do PMR: recomenda
+    QUAL convênio priorizar. Convênio rápido de receber e sem buraco
+    financeiro deve vir antes do lento e com buraco, mesmo que nenhum
+    dos dois vença nas duas dimensões sozinho."""
+    fast_clean_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Convênio Rápido e Limpo", normalized_key="rapido_limpo"
+    )
+    slow_leaky_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Convênio Lento e Furado", normalized_key="lento_furado"
+    )
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular_prio", plan_type="particular"
+    )
+
+    # Convênio rápido: cid_code presente + contrato batendo com o valor
+    # cobrado — nem risco de glosa (sem CID) nem buraco financeiro,
+    # pra não contaminar total_loss=0 esperado. Os demais helpers
+    # `_create_settled_billing_direct` deste arquivo não setam CID de
+    # propósito (não é o foco deles) — aqui precisa, então monta na mão.
+    await _create_contract(admin_engine, tenant_a, fast_clean_plan, procedure_code="40404040", agreed_value=200.0)
+    fast_patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Rápido"}, headers=auth_headers_a)
+    fast_appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": fast_patient_resp.json()["id"],
+            "insurance_plan_id": fast_clean_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "40404040",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    fast_billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": fast_appointment_resp.json()["id"], "insurance_plan_id": fast_clean_plan, "charged_value": 200.0},
+        headers=auth_headers_a,
+    )
+    fast_created = datetime.now(timezone.utc)
+    async with admin_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE core.billing SET created_at = :created_at, settled_at = :settled_at, "
+                "received_value = charged_value, status = 'paid' WHERE id = :id"
+            ),
+            {"created_at": fast_created, "settled_at": fast_created + timedelta(days=10.0), "id": fast_billing_resp.json()["id"]},
+        )
+
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, slow_leaky_plan, days_to_receive=100.0)
+    await _create_settled_billing_direct(client, admin_engine, tenant_a, auth_headers_a, particular_plan, days_to_receive=1.0)
+
+    # Buraco financeiro só no convênio lento — o rápido fica com
+    # total_loss=0 (nunca teve buraco detectado no período).
+    await _create_contract(admin_engine, tenant_a, slow_leaky_plan, procedure_code="30303030", agreed_value=500.0)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Prioridade"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": slow_leaky_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "30303030",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": slow_leaky_plan, "charged_value": 100.0},
+        headers=auth_headers_a,
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/agenda-plan-priority?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Particular nunca entra — não é convênio, "priorizar" não faz
+    # sentido pra quem paga direto.
+    names = [item["insurance_plan_name"] for item in body["items"]]
+    assert "Atendimento Particular" not in names
+    assert names == ["Convênio Rápido e Limpo", "Convênio Lento e Furado"]
+    assert body["items"][0]["priority_rank"] == 1
+    assert body["items"][0]["total_loss"] == 0.0
+    assert body["items"][1]["priority_rank"] == 2
+    assert body["items"][1]["total_loss"] > 0.0
+
+
+async def test_agenda_plan_priority_empty_without_any_settled_billing(client, auth_headers_a):
+    date_from, date_to = _window()
+    response = await client.get(
+        f"/api/v1/analytics/agenda-plan-priority?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []
 
 
 async def test_smart_insights_flags_payment_lag_from_real_data(client, auth_headers_a, admin_engine, tenant_a):
@@ -312,6 +436,54 @@ async def test_financial_hole_billings_lists_the_underpriced_line(client, auth_h
     assert item["charged_value"] == 150.0
     assert item["agreed_price"] == 200.0
     assert item["hole_value"] == 50.0
+
+
+async def test_financial_hole_billings_audits_particular_pricing_table_too(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 3 item 11 do Plano de Ação ("particular como cidadão de
+    primeira classe") — prova que o motor de divergência de cobrança
+    (financial_hole_billings) já funciona genericamente pra um Contract
+    ligado a um InsurancePlan plan_type="particular" (uma tabela de
+    preço particular negociada, não convênio de verdade), SEM nenhum
+    código de produção novo: a query em
+    AnalyticsRepository._FINANCIAL_HOLE_BILLINGS_FROM só faz JOIN por
+    insurance_plan_id/contract_id, nunca filtra por plan_type — a mesma
+    auditoria de "cobrou menos do que devia" que já existe pra convênio
+    cobre cobrança particular incorreta de graça."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Tabela Particular", normalized_key="tabela_particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=300.0)
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Particular Cobrado a Menor"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": particular_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    billing_resp = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": particular_plan, "charged_value": 220.0},
+        headers=auth_headers_a,
+    )
+    assert billing_resp.status_code == 201
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/financial-hole-billings?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_count"] == 1
+    assert body["total_hole_value"] == 80.0  # 300 (tabela particular) - 220 (cobrado)
+    item = body["items"][0]
+    assert item["insurance_plan_name"] == "Tabela Particular"
+    assert item["hole_value"] == 80.0
 
 
 async def test_financial_hole_billings_shows_procedure_name_when_registered(client, admin_engine, tenant_a, auth_headers_a):
@@ -741,6 +913,44 @@ async def test_plan_loss_ranking_groups_financial_hole_by_plan(client, auth_head
     # 150 (charged_value sob risco) = 200.
     assert plans[0]["denial_risk_value"] == 150.0
     assert plans[0]["total_loss"] == 200.0
+    assert plans[0]["plan_type"] == "convenio"
+
+
+async def test_plan_loss_ranking_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação — mesma marcação de
+    `test_payment_lag_by_plan_reports_particular_plan_type`, agora no
+    ranking de perda por convênio (via `plan_types_by_name()`)."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=200.0)
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Particular"}, headers=auth_headers_a)
+    appointment_resp = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": particular_plan,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",
+        },
+        headers=auth_headers_a,
+    )
+    await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appointment_resp.json()["id"], "insurance_plan_id": particular_plan, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/plan-loss-ranking?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    plans = response.json()["plans"]
+    assert len(plans) == 1
+    assert plans[0]["plan_name"] == "Atendimento Particular"
+    assert plans[0]["plan_type"] == "particular"
 
 
 async def test_plan_loss_ranking_orders_by_total_loss_descending(client, auth_headers_a, admin_engine, tenant_a):
@@ -876,6 +1086,26 @@ async def test_contract_utilization_flags_unbilled_items(client, auth_headers_a,
     assert entry["items_billed"] == 1
     assert entry["utilization_pct"] == 50.0
     assert entry["idle_catalog_value"] == 80.0
+    assert entry["plan_type"] == "convenio"
+
+
+async def test_contract_utilization_reports_particular_plan_type(client, auth_headers_a, admin_engine, tenant_a):
+    """Achado da Onda 3 do Plano de Ação — mesma marcação de plan_type
+    aplicada à utilização de contrato, pra um contrato "homologado" com
+    um plano particular (ex: tabela particular negociada)."""
+    particular_plan = await _create_insurance_plan(
+        admin_engine, tenant_a, display_name="Atendimento Particular", normalized_key="particular", plan_type="particular"
+    )
+    await _create_contract(admin_engine, tenant_a, particular_plan, procedure_code="10101012", agreed_value=200.0)
+    date_from, date_to = _window()
+
+    response = await client.get(
+        f"/api/v1/analytics/contract-utilization?date_from={date_from}&date_to={date_to}", headers=auth_headers_a
+    )
+    assert response.status_code == 200
+    contracts = response.json()["contracts"]
+    assert len(contracts) == 1
+    assert contracts[0]["plan_type"] == "particular"
 
 
 async def test_agenda_metrics_includes_patient_no_show_ranking(client, auth_headers_a, admin_engine, tenant_a):

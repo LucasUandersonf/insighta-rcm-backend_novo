@@ -32,6 +32,7 @@ from app.repositories.health_score_snapshot_repository import HealthScoreSnapsho
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -39,8 +40,11 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgeBucketItem,
     AgendaMetricsResponse,
+    AgendaPlanPriorityItem,
+    AgendaPlanPriorityResponse,
     AgendaRevenueForecastResponse,
     AverageTicketChannelItem,
+    DailySummaryResponse,
     AverageTicketProcedureItem,
     AverageTicketResponse,
     ContractUtilizationItem,
@@ -87,6 +91,9 @@ from app.schemas.analytics import (
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
+    RfmPatientItem,
+    RfmResponse,
+    RfmSegmentCount,
     SatisfactionSummaryResponse,
     SmartInsightResponse,
     SmartInsightsResponse,
@@ -96,7 +103,9 @@ from app.schemas.analytics import (
     WeekdayBucket,
     WeekdayCancellationRateBucket,
     WeekdayNoShowRateBucket,
+    WeekdaySqueezeInBucket,
 )
+from app.services import rfm_engine
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 from app.services.health_score_engine import (
     compute_health_score,
@@ -206,6 +215,12 @@ CONTRACT_EXPIRING_ALERT_HORIZON_DAYS = 30
 # ruído de novo).
 RED_LIST_MIN_SAMPLE = 3
 RED_LIST_LIMIT = 10
+
+# RFM completo (Gaps Dossiê Insighta RCM, item 4) — mesmo espírito de
+# RED_LIST_LIMIT acima: "quem precisa de ação agora" é uma lista curta e
+# acionável, não um dump da base inteira (que já vem resumida em
+# RfmResponse.segment_counts).
+RFM_ACTION_ITEMS_LIMIT = 15
 
 
 @dataclass
@@ -454,6 +469,7 @@ class AnalyticsService:
         cost_entry_repo: CostEntryRepository,
         insight_outcome_repo: InsightOutcomeRepository,
         ingestion_repo: IngestionRepository,
+        outreach_log_repo: PatientOutreachLogRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -467,6 +483,7 @@ class AnalyticsService:
         self.cost_entry_repo = cost_entry_repo
         self.insight_outcome_repo = insight_outcome_repo
         self.ingestion_repo = ingestion_repo
+        self.outreach_log_repo = outreach_log_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -602,10 +619,77 @@ class AnalyticsService:
                 PaymentLagByPlanItem(
                     insurance_plan_id=uuid.UUID(row["insurance_plan_id"]),
                     insurance_plan_name=row["insurance_plan_name"],
+                    plan_type=row["plan_type"],
                     avg_days_to_receive=row["avg_days_to_receive"],
                     billings_settled_count=row["billings_settled_count"],
                 )
                 for row in rows
+            ],
+        )
+
+    async def get_agenda_plan_priority(self, date_from: date, date_to: date) -> AgendaPlanPriorityResponse:
+        """
+        Onda 4 do Plano de Ação, item 14 — evolução do PMR existente
+        (get_payment_lag_by_plan): não só REPORTA o prazo de
+        recebimento por convênio, RECOMENDA qual priorizar ao encaixar
+        um paciente novo/de retorno quando mais de um convênio é
+        candidato pra mesma vaga — melhor pagar rápido E não deixar
+        perda financeira em aberto vale mais a vaga escassa.
+
+        DECISÃO — combinação por RANKING, não por fórmula ponderada
+        -------------------------------------------------------------
+        `avg_days_to_receive` (dias) e `total_loss` (R$) não são a
+        mesma unidade nem a mesma escala — somar os dois valores
+        brutos, ou inventar um peso arbitrário (ex: "70% prazo, 30%
+        perda"), seria um número sem lastro. Em vez disso, cada convênio
+        recebe sua POSIÇÃO em cada ranking (1º melhor prazo, 1º menor
+        perda...) e a soma das duas posições decide a prioridade final
+        — mesmo raciocínio de "nunca inventa confiança sem amostra" do
+        resto do motor, aplicado aqui a "nunca inventa peso sem
+        validar".
+
+        Só convênio de verdade entra (plan_type="convenio") — não faz
+        sentido "priorizar" particular numa fila de convênios: quem
+        paga particular não depende de operadora nenhuma pra receber.
+        Só entra convênio com PMR calculável no período (billing
+        conciliado) — sem prazo de recebimento não há o que ranquear.
+        Convênio sem linha no ranking de perda (nunca teve buraco/glosa
+        detectado) entra com total_loss=0 — ausência de perda
+        conhecida É um sinal bom, não motivo pra excluir da
+        recomendação.
+        """
+        lag_response = await self.get_payment_lag_by_plan(date_from, date_to)
+        loss_response = await self.get_plan_loss_ranking(date_from, date_to)
+        loss_by_plan_name = {item.plan_name: item.total_loss for item in loss_response.plans}
+
+        candidates = [item for item in lag_response.items if item.plan_type == "convenio"]
+        if not candidates:
+            return AgendaPlanPriorityResponse(period_start=date_from, period_end=date_to, items=[])
+
+        lag_rank = {
+            item.insurance_plan_id: rank
+            for rank, item in enumerate(sorted(candidates, key=lambda i: i.avg_days_to_receive), start=1)
+        }
+        loss_rank = {
+            item.insurance_plan_id: rank
+            for rank, item in enumerate(
+                sorted(candidates, key=lambda i: loss_by_plan_name.get(i.insurance_plan_name, 0.0)), start=1
+            )
+        }
+        combined = sorted(candidates, key=lambda i: lag_rank[i.insurance_plan_id] + loss_rank[i.insurance_plan_id])
+
+        return AgendaPlanPriorityResponse(
+            period_start=date_from,
+            period_end=date_to,
+            items=[
+                AgendaPlanPriorityItem(
+                    insurance_plan_id=item.insurance_plan_id,
+                    insurance_plan_name=item.insurance_plan_name,
+                    avg_days_to_receive=item.avg_days_to_receive,
+                    total_loss=loss_by_plan_name.get(item.insurance_plan_name, 0.0),
+                    priority_rank=priority_rank,
+                )
+                for priority_rank, item in enumerate(combined, start=1)
             ],
         )
 
@@ -681,6 +765,19 @@ class AnalyticsService:
             for weekday, (cancelled, total) in sorted(weekday_cancellation_counts.items(), key=lambda item: item[0])
         ]
 
+        # Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+        # agenda mais recebe encaixe.
+        weekday_squeeze_in_counts = await self.analytics_repo.weekday_squeeze_in_breakdown(date_from, date_to)
+        weekday_squeeze_in_buckets = [
+            WeekdaySqueezeInBucket(
+                weekday=weekday,
+                squeeze_in_count=squeeze_in,
+                total_informed=total,
+                squeeze_in_rate=(squeeze_in / total) if total > 0 else None,
+            )
+            for weekday, (squeeze_in, total) in sorted(weekday_squeeze_in_counts.items(), key=lambda item: item[0])
+        ]
+
         # Quantos profissionais ativos ainda não têm NENHUM bloco de grade
         # cadastrado — checagem INDEPENDENTE da janela de período pedida
         # de propósito: `available_minutes <= 0` (usado por
@@ -719,6 +816,7 @@ class AnalyticsService:
             weekday_histogram=weekday_buckets,
             weekday_no_show_rates=weekday_no_show_buckets,
             weekday_cancellation_rates=weekday_cancellation_buckets,
+            weekday_squeeze_in_rates=weekday_squeeze_in_buckets,
             no_show_risk_breakdown=[NoShowRiskBucket(level=level, count=count) for level, count in risk_breakdown.items()],
             estimated_revenue_at_risk=estimated_revenue_at_risk,
             patient_no_show_ranking=[
@@ -754,11 +852,16 @@ class AnalyticsService:
         hole_by_plan = await self.analytics_repo.financial_hole_by_plan(date_from, date_to)
         gap_by_plan = await self.analytics_repo.payment_gap_by_plan(date_from, date_to)
         denial_by_plan = await self.analytics_repo.denial_risk_value_by_plan(date_from, date_to)
+        plan_types = await self.analytics_repo.plan_types_by_name()
 
         plan_names = set(hole_by_plan) | set(gap_by_plan) | set(denial_by_plan)
         items = [
             PlanLossItem(
                 plan_name=plan_name,
+                # Sem match no lookup (plano renomeado/excluído entre a
+                # query e essa chamada) cai em "convenio" — retrocompatível
+                # com o comportamento anterior à Onda 3, nunca quebra.
+                plan_type=plan_types.get(plan_name, "convenio"),
                 financial_hole=hole_by_plan.get(plan_name, 0.0),
                 payment_gap=gap_by_plan.get(plan_name, 0.0),
                 denial_risk_value=denial_by_plan.get(plan_name, 0.0),
@@ -784,6 +887,7 @@ class AnalyticsService:
             ContractUtilizationItem(
                 contract_id=row["contract_id"],
                 plan_name=row["plan_name"],
+                plan_type=row["plan_type"],
                 valid_from=row["valid_from"],
                 valid_until=row["valid_until"],
                 total_items=row["total_items"],
@@ -838,6 +942,7 @@ class AnalyticsService:
         payment_gap_without_appeal: tuple[int, float] = (0, 0.0),
         yoy_last_year_appointment_count: int | None = None,
         early_churn_risk_count: int = 0,
+        rfm_cannot_lose: tuple[int, str | None, float] = (0, None, 0.0),
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -895,6 +1000,11 @@ class AnalyticsService:
         risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
         weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
+        # Onda 6 do Plano de Ação, item 19 — mesmo raciocínio de
+        # weekday_no_show_counts acima (só faz sentido em `current`, mas
+        # buscado sempre: mesma query barata, sem quebrar o padrão deste
+        # helper de sempre montar o input inteiro).
+        weekday_squeeze_in_counts = await self.analytics_repo.weekday_squeeze_in_breakdown(date_from, date_to)
         # Achado do Dicionário de Dados: campos novos do Template de
         # Agenda (booking_channel/cancellation_reason) — ver DECISÃO em
         # smart_insights_engine.py::_booking_channel_no_show_insight /
@@ -968,6 +1078,7 @@ class AnalyticsService:
             appeals_due_soon_count=appeals_due_soon,
             weekday_appointment_counts=weekday_histogram,
             weekday_no_show_counts=weekday_no_show_counts,
+            weekday_squeeze_in_counts=weekday_squeeze_in_counts,
             denial_risk_pct=denial_risk_pct,
             denial_at_risk_value=denial_at_risk_value,
             annual_revenue_goal=annual_goal_context.annual_revenue_goal if annual_goal_context else None,
@@ -1006,6 +1117,9 @@ class AnalyticsService:
             payment_gap_without_appeal_value=payment_gap_without_appeal[1],
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
             early_churn_risk_count=early_churn_risk_count,
+            rfm_cannot_lose_count=rfm_cannot_lose[0],
+            rfm_cannot_lose_top_name=rfm_cannot_lose[1],
+            rfm_cannot_lose_top_revenue=rfm_cannot_lose[2],
         )
 
     async def get_smart_insights(
@@ -1066,6 +1180,29 @@ class AnalyticsService:
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 
+        # Onda 6 do Plano de Ação, item 19 — reaproveita a classificação
+        # RFM já pronta (get_patient_rfm) em vez de duplicar a lógica de
+        # segmentação, mesmo raciocínio de "nunca duplicar cálculo que já
+        # existe em outro lugar" do resto do motor. `segment_counts` traz
+        # a contagem TOTAL do segmento (nunca truncada, ao contrário de
+        # `action_items`, que é limitado a RFM_ACTION_ITEMS_LIMIT); o
+        # "top" vem de `action_items` (já ordenado por receita
+        # decrescente) filtrando só quem é "não pode perder" (não
+        # "em risco", que também aparece em action_items). Estado
+        # "AGORA", mesmo raciocínio de appeals_due_soon acima.
+        rfm_for_insights = await self.get_patient_rfm()
+        rfm_cannot_lose_count = next(
+            (sc.patient_count for sc in rfm_for_insights.segment_counts if sc.segment == "nao_pode_perder"), 0
+        )
+        rfm_cannot_lose_top = next(
+            (item for item in rfm_for_insights.action_items if item.segment == "nao_pode_perder"), None
+        )
+        rfm_cannot_lose = (
+            rfm_cannot_lose_count,
+            rfm_cannot_lose_top.full_name if rfm_cannot_lose_top else None,
+            rfm_cannot_lose_top.total_revenue if rfm_cannot_lose_top else 0.0,
+        )
+
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
         # redesenho) — só calculado para o período ATUAL, nunca para o
         # anterior (não existe "meta do período anterior", ver
@@ -1118,6 +1255,7 @@ class AnalyticsService:
             payment_gap_without_appeal=payment_gap_without_appeal,
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
             early_churn_risk_count=early_churn_risk_count,
+            rfm_cannot_lose=rfm_cannot_lose,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False
@@ -1676,18 +1814,142 @@ class AnalyticsService:
         today = date.today()
         total_count = await self.analytics_repo.inactive_patients_count(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
         rows = await self.analytics_repo.list_inactive_patients(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
-        return InactivePatientsResponse(
-            items=[
+        # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — anota
+        # quem já foi contatado, pra recepção nunca ligar duas vezes pro
+        # mesmo paciente sem saber.
+        outreach_by_patient = await self.outreach_log_repo.latest_by_patient_ids(
+            [uuid.UUID(patient_id) for patient_id, _, _ in rows]
+        )
+        items = []
+        for patient_id, full_name, last_appointment_at in rows:
+            outreach = outreach_by_patient.get(uuid.UUID(patient_id))
+            items.append(
                 InactivePatientItem(
                     patient_id=uuid.UUID(patient_id),
                     full_name=full_name,
                     last_appointment_at=last_appointment_at,
                     days_since_last_appointment=(datetime.now(timezone.utc) - last_appointment_at).days,
+                    last_outreach_at=outreach.created_at if outreach else None,
+                    last_outreach_outcome=outreach.outcome if outreach else None,
                 )
-                for patient_id, full_name, last_appointment_at in rows
-            ],
+            )
+        return InactivePatientsResponse(
+            items=items,
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
+    async def get_daily_summary(self) -> DailySummaryResponse:
+        """
+        Onda 6 do Plano de Ação, item 18 ("resumo diário narrado") — ver
+        DECISÃO completa no schema DailySummaryResponse: composição em
+        texto corrido do que já existe espalhado em telas diferentes
+        (faturamento, agenda, carteira inativa, priorização de
+        convênio), sempre para HOJE. Reaproveita os próprios métodos
+        deste service (mesma fonte de verdade das telas que já mostram
+        cada peça isolada) — não introduz nenhuma query nova.
+        """
+        today = date.today()
+        summary = await self.get_executive_summary(today, today)
+        agenda = await self.get_agenda_metrics(today, today)
+        inactive = await self.get_inactive_patients()
+        priority = await self.get_agenda_plan_priority(today, today)
+
+        sentences: list[str] = []
+
+        total_appointments_today = sum(b.appointment_count for b in agenda.peak_hours)
+        if total_appointments_today > 0:
+            plural = "s" if total_appointments_today != 1 else ""
+            sentences.append(f"A agenda de hoje tem {total_appointments_today} atendimento{plural} previsto{plural}.")
+        else:
+            sentences.append("Nenhum atendimento agendado pra hoje ainda.")
+
+        high_risk_count = next((b.count for b in agenda.no_show_risk_breakdown if b.level == "alto"), 0)
+        if high_risk_count > 0:
+            plural = "s" if high_risk_count != 1 else ""
+            sentences.append(
+                f"{high_risk_count} atendimento{plural} com risco alto de falta "
+                f"(estimativa de receita em risco: R$ {agenda.estimated_revenue_at_risk:,.2f})."
+            )
+
+        if summary.total_billed.value > 0:
+            trend = f", {summary.total_billed.delta_pct:+.0f}% vs. ontem" if summary.total_billed.delta_pct is not None else ""
+            sentences.append(f"Faturado hoje: R$ {summary.total_billed.value:,.2f}{trend}.")
+
+        if summary.financial_hole.value > 0:
+            sentences.append(f"Buraco financeiro detectado hoje: R$ {summary.financial_hole.value:,.2f}.")
+
+        if inactive.total_count > 0:
+            plural = "s" if inactive.total_count != 1 else ""
+            sentences.append(f"{inactive.total_count} paciente{plural} inativo{plural} há mais de 1 ano aguardando reativação.")
+
+        if priority.items:
+            top = priority.items[0]
+            sentences.append(
+                f"Ao encaixar um paciente novo hoje, priorize {top.insurance_plan_name} — melhor combinação de "
+                "prazo de recebimento e perda financeira."
+            )
+
+        headline = sentences[0] if sentences else "Sem dado suficiente pra montar o resumo de hoje ainda."
+        return DailySummaryResponse(date=today, headline=headline, sentences=sentences)
+
+    async def get_patient_rfm(self) -> RfmResponse:
+        """
+        RFM completo (Gaps Dossiê Insighta RCM, item 4) — Recência,
+        Frequência e Valor de CADA paciente com histórico, classificados
+        em 7 segmentos (ver DECISÃO completa em
+        app/services/rfm_engine.py). Sem date_from/date_to de propósito,
+        mesmo espírito de get_inactive_patients: RFM avalia o
+        relacionamento inteiro com o paciente, não uma janela.
+        """
+        today = datetime.now(timezone.utc)
+        rows = await self.analytics_repo.patient_rfm_metrics()
+
+        monetary = rfm_engine.monetary_scores([row["total_revenue"] for row in rows])
+        segment_counts = {segment: 0 for segment in rfm_engine.RFM_SEGMENTS}
+        action_items: list[RfmPatientItem] = []
+        for row, monetary_score in zip(rows, monetary):
+            days_since_last = (today - row["last_appointment_at"]).days
+            recency_score = rfm_engine.score_recency(days_since_last)
+            frequency_score = rfm_engine.score_frequency(row["visit_count"])
+            segment = rfm_engine.classify_segment(recency_score, frequency_score, monetary_score)
+            segment_counts[segment] += 1
+            if segment in ("nao_pode_perder", "em_risco"):
+                action_items.append(
+                    RfmPatientItem(
+                        patient_id=uuid.UUID(row["patient_id"]),
+                        full_name=row["full_name"],
+                        days_since_last_appointment=days_since_last,
+                        visit_count=row["visit_count"],
+                        total_revenue=row["total_revenue"],
+                        recency_score=recency_score,
+                        frequency_score=frequency_score,
+                        monetary_score=monetary_score,
+                        segment=segment,
+                    )
+                )
+        action_items.sort(key=lambda item: item.total_revenue, reverse=True)
+
+        # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — só busca
+        # outreach de quem de fato entrou na fila de ação (a base
+        # inteira não precisa desse lookup, só quem vai aparecer na
+        # tela).
+        outreach_by_patient = await self.outreach_log_repo.latest_by_patient_ids(
+            [item.patient_id for item in action_items]
+        )
+        for item in action_items:
+            outreach = outreach_by_patient.get(item.patient_id)
+            if outreach:
+                item.last_outreach_at = outreach.created_at
+                item.last_outreach_outcome = outreach.outcome
+
+        return RfmResponse(
+            as_of=today.date(),
+            total_patients=len(rows),
+            segment_counts=[
+                RfmSegmentCount(segment=segment, patient_count=count) for segment, count in segment_counts.items()
+            ],
+            action_items=action_items[:RFM_ACTION_ITEMS_LIMIT],
         )
 
     async def get_early_churn_risk(self) -> EarlyChurnRiskResponse:
