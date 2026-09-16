@@ -36,6 +36,7 @@ from app.schemas.analytics import (
     AgendaPlanPriorityResponse,
     AgendaRevenueForecastResponse,
     AverageTicketResponse,
+    DailySummaryResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
     DataFreshnessResponse,
@@ -328,6 +329,21 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/daily-summary", response_model=DailySummaryResponse)
+async def get_daily_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> DailySummaryResponse:
+    """
+    Onda 6 do Plano de Ação, item 18 ("resumo diário narrado") — texto
+    corrido compondo faturamento/agenda/carteira inativa/priorização de
+    convênio de HOJE (ver DECISÃO completa em
+    AnalyticsService.get_daily_summary). Sem date_from/date_to de
+    propósito: é sempre o resumo do dia atual.
+    """
+    return await _build_service(db).get_daily_summary()
 
 
 @router.get("/patient-rfm", response_model=RfmResponse)

@@ -85,3 +85,34 @@ async def test_appointments_without_squeeze_in_info_are_never_counted(client, au
     )
     assert response.status_code == 200
     assert response.json()["weekday_squeeze_in_rates"] == []
+
+
+async def test_smart_insights_flags_weekday_with_most_squeeze_in(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 6 do Plano de Ação, item 19 — mesmo cenário acima, agora
+    ponta a ponta via GET /analytics/smart-insights (motor de insights,
+    não só o breakdown cru de agenda-metrics)."""
+    patient_id = await _create_patient(client, auth_headers_a)
+    monday = _target_monday()
+    wednesday = monday + timedelta(days=2)
+
+    # Segunda: 9 de 10 (90%) são encaixe. Quarta: 1 de 10 (10%). Média
+    # geral = 10/20 = 50% -> segunda fica +40pp acima (crítico, >=25pp).
+    for _ in range(9):
+        await _seed_appointment(admin_engine, tenant_a, patient_id, scheduled_at=monday, is_squeeze_in=True)
+    await _seed_appointment(admin_engine, tenant_a, patient_id, scheduled_at=monday, is_squeeze_in=False)
+    await _seed_appointment(admin_engine, tenant_a, patient_id, scheduled_at=wednesday, is_squeeze_in=True)
+    for _ in range(9):
+        await _seed_appointment(admin_engine, tenant_a, patient_id, scheduled_at=wednesday, is_squeeze_in=False)
+
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={monday.date().isoformat()}&date_to={wednesday.date().isoformat()}",
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    squeeze_insight = next((i for i in insights if "mais recebe encaixe" in i["title"]), None)
+    assert squeeze_insight is not None
+    assert "segunda-feira" in squeeze_insight["title"].lower()
+    assert squeeze_insight["severity"] == "critical"
+    assert squeeze_insight["category"] == "agenda"
+    assert squeeze_insight["action_href"] == "#agenda-resumo"

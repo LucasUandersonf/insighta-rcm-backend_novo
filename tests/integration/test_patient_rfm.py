@@ -199,6 +199,32 @@ async def test_rfm_isolates_between_tenants(client, auth_headers_a, auth_headers
     assert response_b.json()["total_patients"] == 0
 
 
+async def test_smart_insights_flags_rfm_cannot_lose_patients(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 6 do Plano de Ação, item 19 — o segmento 'não pode perder' do
+    RFM (ver rfm_engine.classify_segment) alimenta um card dedicado no
+    motor de insights, ponta a ponta via GET /analytics/smart-insights.
+    Reaproveita a mesma base de 5 pacientes que já prova a classificação
+    em app/services/rfm_engine.py — só "Paciente Não Pode Perder" deve
+    aparecer, nunca "Paciente Em Risco" (segmento diferente)."""
+    await _seed_five_patient_rfm_base(client, admin_engine, tenant_a, auth_headers_a)
+
+    today = datetime.now(timezone.utc).date()
+    date_to = today + timedelta(days=2)
+    response = await client.get(
+        f"/api/v1/analytics/smart-insights?date_from={today.isoformat()}&date_to={date_to.isoformat()}",
+        headers=auth_headers_a,
+    )
+    assert response.status_code == 200
+    insights = response.json()["insights"]
+    cannot_lose = next((i for i in insights if "alto valor sumiu" in i["title"].lower()), None)
+    assert cannot_lose is not None
+    assert cannot_lose["severity"] == "warning"
+    assert cannot_lose["category"] == "agenda"
+    assert "Paciente Não Pode Perder" in cannot_lose["message"]
+    assert "R$ 3,000.00" in cannot_lose["message"]
+    assert cannot_lose["action_href"] == "#carteira-inativa"
+
+
 async def test_atendimento_cannot_access_patient_rfm(client, admin_engine, tenant_a):
     from tests.conftest import _insert_user, _login
 

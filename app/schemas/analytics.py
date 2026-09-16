@@ -1180,3 +1180,24 @@ class PatientDemographicsResponse(BaseModel):
     period_end: date
     buckets: list[AgeBucketItem]  # sempre as 5 faixas, mesmo com contagem 0
     unknown_age_count: int
+
+
+class DailySummaryResponse(BaseModel):
+    """GET /api/v1/analytics/daily-summary — Onda 6 do Plano de Ação,
+    item 18 ("resumo diário narrado"). NÃO é uma fonte de dado nova:
+    compõe em texto corrido métricas que já existem espalhadas em telas
+    diferentes (executive-summary, agenda-metrics, inactive-patients,
+    agenda-plan-priority), sempre para HOJE — mesmo espírito "sempre a
+    partir de hoje" de InactivePatientsResponse/HealthScoreResponse,
+    nunca uma janela de período configurável (é um resumo do DIA, não
+    do período escolhido em outra tela).
+
+    `sentences` nunca inventa uma frase sobre um dado ausente — cada
+    frase só entra na lista quando o número por trás dela é
+    genuinamente informativo (ex: só menciona risco alto de falta
+    quando `high_risk_count > 0`, nunca "0 atendimentos em risco" como
+    se fosse notícia)."""
+
+    date: date
+    headline: str
+    sentences: list[str]

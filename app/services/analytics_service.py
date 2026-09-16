@@ -44,6 +44,7 @@ from app.schemas.analytics import (
     AgendaPlanPriorityResponse,
     AgendaRevenueForecastResponse,
     AverageTicketChannelItem,
+    DailySummaryResponse,
     AverageTicketProcedureItem,
     AverageTicketResponse,
     ContractUtilizationItem,
@@ -941,6 +942,7 @@ class AnalyticsService:
         payment_gap_without_appeal: tuple[int, float] = (0, 0.0),
         yoy_last_year_appointment_count: int | None = None,
         early_churn_risk_count: int = 0,
+        rfm_cannot_lose: tuple[int, str | None, float] = (0, None, 0.0),
     ) -> InsightsPeriodInput:
         # Achado 8 da Auditoria de Templates e Insights (baixo) —
         # `booking_channel_no_show_counts`/`cancellation_reason_counts`
@@ -998,6 +1000,11 @@ class AnalyticsService:
         risk_breakdown = await self.analytics_repo.no_show_risk_breakdown(as_of=datetime.now(timezone.utc))
         weekday_histogram = await self.analytics_repo.appointment_weekday_histogram(date_from, date_to)
         weekday_no_show_counts = await self.analytics_repo.weekday_no_show_rate_breakdown(date_from, date_to)
+        # Onda 6 do Plano de Ação, item 19 — mesmo raciocínio de
+        # weekday_no_show_counts acima (só faz sentido em `current`, mas
+        # buscado sempre: mesma query barata, sem quebrar o padrão deste
+        # helper de sempre montar o input inteiro).
+        weekday_squeeze_in_counts = await self.analytics_repo.weekday_squeeze_in_breakdown(date_from, date_to)
         # Achado do Dicionário de Dados: campos novos do Template de
         # Agenda (booking_channel/cancellation_reason) — ver DECISÃO em
         # smart_insights_engine.py::_booking_channel_no_show_insight /
@@ -1071,6 +1078,7 @@ class AnalyticsService:
             appeals_due_soon_count=appeals_due_soon,
             weekday_appointment_counts=weekday_histogram,
             weekday_no_show_counts=weekday_no_show_counts,
+            weekday_squeeze_in_counts=weekday_squeeze_in_counts,
             denial_risk_pct=denial_risk_pct,
             denial_at_risk_value=denial_at_risk_value,
             annual_revenue_goal=annual_goal_context.annual_revenue_goal if annual_goal_context else None,
@@ -1109,6 +1117,9 @@ class AnalyticsService:
             payment_gap_without_appeal_value=payment_gap_without_appeal[1],
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
             early_churn_risk_count=early_churn_risk_count,
+            rfm_cannot_lose_count=rfm_cannot_lose[0],
+            rfm_cannot_lose_top_name=rfm_cannot_lose[1],
+            rfm_cannot_lose_top_revenue=rfm_cannot_lose[2],
         )
 
     async def get_smart_insights(
@@ -1169,6 +1180,29 @@ class AnalyticsService:
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 
+        # Onda 6 do Plano de Ação, item 19 — reaproveita a classificação
+        # RFM já pronta (get_patient_rfm) em vez de duplicar a lógica de
+        # segmentação, mesmo raciocínio de "nunca duplicar cálculo que já
+        # existe em outro lugar" do resto do motor. `segment_counts` traz
+        # a contagem TOTAL do segmento (nunca truncada, ao contrário de
+        # `action_items`, que é limitado a RFM_ACTION_ITEMS_LIMIT); o
+        # "top" vem de `action_items` (já ordenado por receita
+        # decrescente) filtrando só quem é "não pode perder" (não
+        # "em risco", que também aparece em action_items). Estado
+        # "AGORA", mesmo raciocínio de appeals_due_soon acima.
+        rfm_for_insights = await self.get_patient_rfm()
+        rfm_cannot_lose_count = next(
+            (sc.patient_count for sc in rfm_for_insights.segment_counts if sc.segment == "nao_pode_perder"), 0
+        )
+        rfm_cannot_lose_top = next(
+            (item for item in rfm_for_insights.action_items if item.segment == "nao_pode_perder"), None
+        )
+        rfm_cannot_lose = (
+            rfm_cannot_lose_count,
+            rfm_cannot_lose_top.full_name if rfm_cannot_lose_top else None,
+            rfm_cannot_lose_top.total_revenue if rfm_cannot_lose_top else 0.0,
+        )
+
         # Meta anual (Auditoria Go-Live, terceiro exemplo do briefing de
         # redesenho) — só calculado para o período ATUAL, nunca para o
         # anterior (não existe "meta do período anterior", ver
@@ -1221,6 +1255,7 @@ class AnalyticsService:
             payment_gap_without_appeal=payment_gap_without_appeal,
             yoy_last_year_appointment_count=yoy_last_year_appointment_count,
             early_churn_risk_count=early_churn_risk_count,
+            rfm_cannot_lose=rfm_cannot_lose,
         )
         previous_input = await self._period_insights_input(
             previous.start, previous.end, include_agenda_text_breakdowns=False
@@ -1803,6 +1838,60 @@ class AnalyticsService:
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
+
+    async def get_daily_summary(self) -> DailySummaryResponse:
+        """
+        Onda 6 do Plano de Ação, item 18 ("resumo diário narrado") — ver
+        DECISÃO completa no schema DailySummaryResponse: composição em
+        texto corrido do que já existe espalhado em telas diferentes
+        (faturamento, agenda, carteira inativa, priorização de
+        convênio), sempre para HOJE. Reaproveita os próprios métodos
+        deste service (mesma fonte de verdade das telas que já mostram
+        cada peça isolada) — não introduz nenhuma query nova.
+        """
+        today = date.today()
+        summary = await self.get_executive_summary(today, today)
+        agenda = await self.get_agenda_metrics(today, today)
+        inactive = await self.get_inactive_patients()
+        priority = await self.get_agenda_plan_priority(today, today)
+
+        sentences: list[str] = []
+
+        total_appointments_today = sum(b.appointment_count for b in agenda.peak_hours)
+        if total_appointments_today > 0:
+            plural = "s" if total_appointments_today != 1 else ""
+            sentences.append(f"A agenda de hoje tem {total_appointments_today} atendimento{plural} previsto{plural}.")
+        else:
+            sentences.append("Nenhum atendimento agendado pra hoje ainda.")
+
+        high_risk_count = next((b.count for b in agenda.no_show_risk_breakdown if b.level == "alto"), 0)
+        if high_risk_count > 0:
+            plural = "s" if high_risk_count != 1 else ""
+            sentences.append(
+                f"{high_risk_count} atendimento{plural} com risco alto de falta "
+                f"(estimativa de receita em risco: R$ {agenda.estimated_revenue_at_risk:,.2f})."
+            )
+
+        if summary.total_billed.value > 0:
+            trend = f", {summary.total_billed.delta_pct:+.0f}% vs. ontem" if summary.total_billed.delta_pct is not None else ""
+            sentences.append(f"Faturado hoje: R$ {summary.total_billed.value:,.2f}{trend}.")
+
+        if summary.financial_hole.value > 0:
+            sentences.append(f"Buraco financeiro detectado hoje: R$ {summary.financial_hole.value:,.2f}.")
+
+        if inactive.total_count > 0:
+            plural = "s" if inactive.total_count != 1 else ""
+            sentences.append(f"{inactive.total_count} paciente{plural} inativo{plural} há mais de 1 ano aguardando reativação.")
+
+        if priority.items:
+            top = priority.items[0]
+            sentences.append(
+                f"Ao encaixar um paciente novo hoje, priorize {top.insurance_plan_name} — melhor combinação de "
+                "prazo de recebimento e perda financeira."
+            )
+
+        headline = sentences[0] if sentences else "Sem dado suficiente pra montar o resumo de hoje ainda."
+        return DailySummaryResponse(date=today, headline=headline, sentences=sentences)
 
     async def get_patient_rfm(self) -> RfmResponse:
         """

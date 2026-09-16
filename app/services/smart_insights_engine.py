@@ -156,6 +156,16 @@ def suggest_denial_risk_thresholds(monthly_denial_risk_pcts: list[float]) -> Den
 _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP = 20.0  # pontos percentuais acima da média do período
 _WEEKDAY_NO_SHOW_RATE_WARNING_PP = 10.0
 
+# Onda 6 do Plano de Ação, item 19 — mesmo raciocínio comparativo
+# (intra-período, contra a própria média) de _WEEKDAY_NO_SHOW_RATE_*
+# acima, agora pra encaixe. Diferente de falta (sempre ruim), encaixe
+# concentrado não é em si um problema — é um sinal de sobrecarga
+# operacional NUM dia específico, então o piso é mais alto (só vira
+# alerta quando o desvio é grande o bastante pra sugerir que aquele dia
+# está sistematicamente espremido, não uma exceção pontual).
+_WEEKDAY_SQUEEZE_IN_CRITICAL_PP = 25.0
+_WEEKDAY_SQUEEZE_IN_WARNING_PP = 15.0
+
 # Terceiro exemplo do briefing de redesenho: meta anual vs. ritmo real.
 # "Atrás do ritmo" é medido contra o esperado NA DATA DE HOJE (meta *
 # fração do ano decorrida), não contra a meta inteira — do contrário
@@ -549,6 +559,25 @@ class InsightsPeriodInput:
     # "AGORA" (mesmo raciocínio de appeals_due_soon_count): só o período
     # atual recebe o valor real.
     early_churn_risk_count: int = 0
+    # Onda 6 do Plano de Ação, item 19 — em quais dias da semana a
+    # agenda mais recebe encaixe (Appointment.is_squeeze_in, ver
+    # AnalyticsRepository.weekday_squeeze_in_breakdown e
+    # _weekday_squeeze_in_insight). Mesmo formato de
+    # weekday_no_show_counts ({weekday: (squeeze_in_count,
+    # total_informado)}) — só faz sentido em `current` (comparação
+    # intra-período), default {} pelo motivo de sempre.
+    weekday_squeeze_in_counts: dict[int, tuple[int, int]] = field(default_factory=dict)
+    # Onda 6 do Plano de Ação, item 19 — pacientes no segmento RFM
+    # "não pode perder" (alto valor histórico, sumiu — ver
+    # rfm_engine.classify_segment e AnalyticsService.get_patient_rfm).
+    # Estado "AGORA" (mesmo raciocínio de early_churn_risk_count): só o
+    # período atual recebe o valor real. `top_name`/`top_revenue`
+    # identificam o caso de maior receita histórica entre eles, pro
+    # texto do insight nomear um exemplo concreto em vez de só um
+    # número solto.
+    rfm_cannot_lose_count: int = 0
+    rfm_cannot_lose_top_name: str | None = None
+    rfm_cannot_lose_top_revenue: float = 0.0
 
 
 @dataclass
@@ -1437,6 +1466,116 @@ def _booking_channel_no_show_insight(current: InsightsPeriodInput) -> Insight | 
     )
 
 
+def _worst_squeeze_in_weekday(current: InsightsPeriodInput) -> tuple[int, float, float] | None:
+    """Onda 6 do Plano de Ação, item 19 — mesmo cálculo de
+    `_worst_no_show_weekday` (amostra mínima por dia, maior desvio
+    acima da MÉDIA do próprio período), agora sobre
+    `weekday_squeeze_in_counts`. Retorna (weekday, taxa_do_dia,
+    taxa_média_do_período), ou None sem amostra suficiente ou sem
+    nenhum dia acima do piso de aviso."""
+    total_squeeze_in = sum(squeeze_in for squeeze_in, _ in current.weekday_squeeze_in_counts.values())
+    total_relevant = sum(total for _, total in current.weekday_squeeze_in_counts.values())
+    if total_relevant == 0:
+        return None
+    overall_rate = total_squeeze_in / total_relevant
+
+    candidates: list[tuple[int, float, float]] = []  # (weekday, rate, gap_pp)
+    for weekday in range(7):
+        squeeze_in_count, total = current.weekday_squeeze_in_counts.get(weekday, (0, 0))
+        if total < _MIN_WEEKDAY_SAMPLE:
+            continue
+        rate = squeeze_in_count / total
+        gap_pp = (rate - overall_rate) * 100
+        if gap_pp < _WEEKDAY_SQUEEZE_IN_WARNING_PP:
+            continue
+        candidates.append((weekday, rate, gap_pp))
+
+    if not candidates:
+        return None
+
+    weekday, rate, _gap_pp = max(candidates, key=lambda c: c[2])
+    return weekday, rate, overall_rate
+
+
+def _weekday_squeeze_in_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Onda 6 do Plano de Ação, item 19 — "em quais dias a agenda mais
+    recebe encaixe" (Appointment.is_squeeze_in, ver DECISÃO completa em
+    056_appointment_squeeze_in.sql e AnalyticsRepository.
+    weekday_squeeze_in_breakdown). Diferente de falta/cancelamento
+    (sempre ruim), encaixe concentrado não é em si um problema — é um
+    sinal de sobrecarga operacional NUM dia específico: a clínica pode
+    estar sistematicamente espremendo vagas na mesma agenda em vez de
+    abrir mais horário fixo naquele dia, o que aumenta risco de atraso
+    em cadeia e desgaste da equipe.
+
+    Mesmo raciocínio intra-período de _weekday_no_show_rate_insight
+    (compara contra a própria média do período, não um corte absoluto),
+    só que com piso mais alto (_WEEKDAY_SQUEEZE_IN_WARNING_PP) — um
+    pouco mais de encaixe num dia é normal, só vira alerta quando o
+    desvio é grande o bastante pra sugerir um padrão sistemático.
+    """
+    worst = _worst_squeeze_in_weekday(current)
+    if worst is None:
+        return None
+    weekday, rate, overall_rate = worst
+    gap_pp = (rate - overall_rate) * 100
+    severity = "critical" if gap_pp >= _WEEKDAY_SQUEEZE_IN_CRITICAL_PP else "warning"
+    label = _WEEKDAY_LABELS[weekday]
+    comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title=f"{label.capitalize()} é o dia que mais recebe encaixe",
+        message=(
+            f"Numa {label} comum, {rate * 100:.0f}% dos agendamentos com essa informação preenchida são "
+            f"encaixe — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Vale avaliar se "
+            f"compensa abrir mais horário fixo pras {label}s em vez de depender de encaixe toda semana."
+        ),
+        action_label="Ver agenda por dia da semana",
+        action_href="#agenda-resumo",
+    )
+
+
+def _rfm_cannot_lose_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Onda 6 do Plano de Ação, item 19 — segmento RFM "não pode perder"
+    (ver rfm_engine.classify_segment): paciente de alto valor histórico
+    (Recência ruim + Valor alto, mesmo sem necessariamente ter sido
+    frequente) que sumiu. Diferente de `_early_churn_insight` (todo
+    mundo saindo do próprio ritmo, sem distinguir valor) e de
+    `_annual_goal_insight` (carteira inativa inteira, sem priorizar por
+    valor): este insight aponta especificamente QUEM já provou mais
+    valor pra clínica — reativar esses tende a valer mais a pena por
+    contato do que a carteira inativa genérica.
+
+    Estado "AGORA" (mesmo raciocínio de early_churn_risk_count): sempre
+    calculado a partir de hoje, não escopado pelo período do dashboard.
+    """
+    if current.rfm_cannot_lose_count <= 0:
+        return None
+    plural = "s" if current.rfm_cannot_lose_count != 1 else ""
+    top_note = (
+        f" O caso de maior receita histórica é {current.rfm_cannot_lose_top_name}, com "
+        f"R$ {current.rfm_cannot_lose_top_revenue:,.2f} faturados no total."
+        if current.rfm_cannot_lose_top_name
+        else ""
+    )
+    verb = "gerou" if current.rfm_cannot_lose_count == 1 else "geraram"
+    return Insight(
+        severity="warning",
+        category="agenda",
+        title=f"{current.rfm_cannot_lose_count} paciente{plural} de alto valor sumiu{'' if current.rfm_cannot_lose_count == 1 else 'ram'}",
+        message=(
+            f"{current.rfm_cannot_lose_count} paciente{plural} que já {verb} bastante receita histórica pra sua "
+            f"clínica não volta há muito tempo.{top_note} Reativar esses pacientes específicos costuma valer "
+            "mais a pena por contato do que atrair um paciente novo, que ainda não provou o próprio valor."
+        ),
+        action_label="Ver fila de reativação por valor",
+        action_href="#carteira-inativa",
+    )
+
+
 def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None:
     """
     Responde "por que as pessoas estão cancelando" em vez de só "quantas
@@ -1947,7 +2086,9 @@ def generate_insights(
         _weekday_drop_insight(current, previous),
         _yoy_seasonality_insight(current),
         _early_churn_insight(current),
+        _rfm_cannot_lose_insight(current),
         _weekday_no_show_rate_insight(current),
+        _weekday_squeeze_in_insight(current),
         _appeals_due_soon_insight(current),
         _payment_gap_without_appeal_insight(current),
         _stale_open_lotes_insight(current),
