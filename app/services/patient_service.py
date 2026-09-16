@@ -7,6 +7,7 @@ from app.models.patient import Patient
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.patient import PatientCreateRequest, PatientResponse, PatientUpdateRequest
+from app.services.patient_value_engine import compute_vip_status
 
 # Placeholder usado por anonymize_patient() — nunca um nome real, nunca
 # vazio (um `full_name` vazio quebraria qualquer tela que assume o campo
@@ -144,6 +145,23 @@ class PatientService:
         return [PatientResponse.model_validate(i) for i in items]
 
     async def list_patients_paginated(self, limit: int = 50, offset: int = 0) -> tuple[list[PatientResponse], int]:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 1): cada paciente já sai desta listagem com o sinal de
+        alto valor ("VIP") calculado — é esta MESMA listagem que alimenta
+        o seletor de paciente na tela de Agenda (ver AppointmentsPage.tsx,
+        frontend), então a recepção já vê o selo VIP no momento exato de
+        marcar a consulta, sem precisar de uma tela separada.
+        """
         items = await self.repo.list_all(limit=limit, offset=offset)
         total = await self.repo.count_all()
-        return [PatientResponse.model_validate(i) for i in items], total
+        vip_signals = await self.repo.vip_signals_for([i.id for i in items])
+        responses = []
+        for item in items:
+            visit_count, referral_count = vip_signals.get(item.id, (0, 0))
+            vip = compute_vip_status(visit_count=visit_count, referral_count=referral_count)
+            response = PatientResponse.model_validate(item).model_copy(
+                update={"is_vip": vip.is_vip, "vip_reasons": vip.reasons}
+            )
+            responses.append(response)
+        return responses, total

@@ -100,5 +100,12 @@ class PatientResponse(BaseModel):
     communication_consent: bool | None = None
     preferred_time_window: str | None = None
     zip_code: str | None = None
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente) — ver
+    # DECISÃO completa em patient_value_engine.py. Só GET /patients
+    # (PatientService.list_patients_paginated) de fato calcula isso —
+    # create/update/anonymize devolvem o default (False/[]) de propósito,
+    # nunca um valor calculado só pela metade.
+    is_vip: bool = False
+    vip_reasons: list[str] = []
 
     model_config = {"from_attributes": True}
