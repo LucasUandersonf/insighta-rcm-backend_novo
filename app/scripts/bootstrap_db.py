@@ -344,6 +344,7 @@ _POST_UPGRADE_SQL_FILES = [
     # primeira classe"). ADD COLUMN IF NOT EXISTS + CHECK guardado por
     # DO $$ — auto-idempotente, roda em todo deploy, sem marcador.
     "054_insurance_plan_type.sql",
+    "055_patient_outreach_log.sql",
 ]
 
 _ROLES_SQL = """

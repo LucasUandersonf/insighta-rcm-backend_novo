@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.pagination import PaginatedResponse
 from app.schemas.patient import (
@@ -30,6 +31,8 @@ from app.schemas.patient import (
     PatientResponse,
     PatientUpdateRequest,
 )
+from app.schemas.patient_outreach_log import PatientOutreachLogCreateRequest, PatientOutreachLogResponse
+from app.services.patient_outreach_log_service import PatientOutreachLogService
 from app.services.patient_service import PatientService
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -45,6 +48,10 @@ _CAN_ANONYMIZE = ("admin", "owner")
 
 def _build_service(db: DbSession) -> PatientService:
     return PatientService(PatientRepository(db), AuditLogRepository(db))
+
+
+def _build_outreach_log_service(db: DbSession) -> PatientOutreachLogService:
+    return PatientOutreachLogService(PatientOutreachLogRepository(db), PatientRepository(db))
 
 
 @router.post("", response_model=PatientResponse, status_code=201)
@@ -120,3 +127,32 @@ async def anonymize_patient(
     "desanonimizar".
     """
     return await _build_service(db).anonymize_patient(current_user.tenant_id, uuid.UUID(current_user.id), patient_id)
+
+
+@router.post("/{patient_id}/outreach-log", response_model=PatientOutreachLogResponse, status_code=201)
+async def create_patient_outreach_log(
+    patient_id: uuid.UUID,
+    payload: PatientOutreachLogCreateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> PatientOutreachLogResponse:
+    """
+    Onda 4 do Plano de Ação, item 12 ("CRM de verdade: ação, não só
+    leitura") — registra que a clínica de fato tentou reativar este
+    paciente (ligou, mandou WhatsApp...) e o resultado. Mesmo RBAC de
+    criar paciente: é rotina de recepção, não decisão gerencial.
+    """
+    return await _build_outreach_log_service(db).create_outreach_log(
+        current_user.tenant_id, uuid.UUID(current_user.id), patient_id, payload
+    )
+
+
+@router.get("/{patient_id}/outreach-log", response_model=list[PatientOutreachLogResponse])
+async def list_patient_outreach_log(
+    patient_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+) -> list[PatientOutreachLogResponse]:
+    """Histórico de tentativas de contato com este paciente, mais
+    recente primeiro — mesmo RBAC de leitura de GET /patients."""
+    return await _build_outreach_log_service(db).list_outreach_log(patient_id)

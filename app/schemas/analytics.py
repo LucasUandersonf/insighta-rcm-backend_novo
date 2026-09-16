@@ -81,6 +81,32 @@ class PaymentLagByPlanResponse(BaseModel):
     items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
 
 
+class AgendaPlanPriorityItem(BaseModel):
+    """Uma linha da recomendação de priorização de agenda por convênio
+    (Onda 4 do Plano de Ação, item 14 — evolução do PMR existente). Ver
+    DECISÃO completa em AnalyticsService.get_agenda_plan_priority."""
+
+    insurance_plan_id: UUID
+    insurance_plan_name: str
+    avg_days_to_receive: float
+    total_loss: float
+    # 1 = prioridade MÁXIMA pra encaixar um paciente novo/de retorno
+    # quando há mais de um convênio candidato pra mesma vaga.
+    priority_rank: int
+
+
+class AgendaPlanPriorityResponse(BaseModel):
+    """GET /api/v1/analytics/agenda-plan-priority — Painel → Agenda.
+    Só entram convênios de verdade (`plan_type="convenio"`) com PMR
+    calculável no período (billing conciliado) — sem prazo de
+    recebimento não há o que ranquear. `items` já vem ordenado por
+    `priority_rank` crescente."""
+
+    period_start: date
+    period_end: date
+    items: list[AgendaPlanPriorityItem]
+
+
 class AgendaRevenueForecastResponse(BaseModel):
     """GET /api/v1/analytics/agenda-revenue-forecast — Sala de Comando.
     Previsão de receita a partir dos agendamentos FUTUROS (status
@@ -697,6 +723,11 @@ class InactivePatientItem(BaseModel):
     full_name: str
     last_appointment_at: datetime
     days_since_last_appointment: int
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — fecha o
+    # ciclo desta lista: `None` = ninguém tentou reativar este paciente
+    # ainda (ver PatientOutreachLogRepository.latest_by_patient_ids).
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
 
 
 class InactivePatientsResponse(BaseModel):
@@ -740,6 +771,10 @@ class RfmPatientItem(BaseModel):
     frequency_score: int
     monetary_score: int
     segment: RfmSegment
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — mesma
+    # anotação de InactivePatientItem.last_outreach_at.
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
 
 
 class RfmResponse(BaseModel):

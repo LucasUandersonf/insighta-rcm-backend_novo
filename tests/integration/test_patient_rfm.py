@@ -160,6 +160,28 @@ async def test_rfm_action_items_only_at_risk_segments_ordered_by_revenue_desc(cl
     assert "Paciente Hibernando" not in action_names
 
 
+async def test_rfm_action_items_annotates_last_outreach(client, auth_headers_a, admin_engine, tenant_a):
+    """Onda 4, item 12 — mesma anotação de test_inactive_patients_annotates_last_outreach
+    (tests/integration/test_patient_outreach_log.py), agora na fila de
+    ação do RFM."""
+    patient_ids = await _seed_five_patient_rfm_base(client, admin_engine, tenant_a, auth_headers_a)
+
+    before = await client.get("/api/v1/analytics/patient-rfm", headers=auth_headers_a)
+    action_item = next(i for i in before.json()["action_items"] if i["full_name"] == "Paciente Não Pode Perder")
+    assert action_item["last_outreach_at"] is None
+
+    await client.post(
+        f"/api/v1/patients/{patient_ids['Paciente Não Pode Perder']}/outreach-log",
+        json={"channel": "telefone", "outcome": "agendou"},
+        headers=auth_headers_a,
+    )
+
+    after = await client.get("/api/v1/analytics/patient-rfm", headers=auth_headers_a)
+    action_item = next(i for i in after.json()["action_items"] if i["full_name"] == "Paciente Não Pode Perder")
+    assert action_item["last_outreach_at"] is not None
+    assert action_item["last_outreach_outcome"] == "agendou"
+
+
 async def test_rfm_with_no_patient_history_is_all_zero(client, auth_headers_a):
     response = await client.get("/api/v1/analytics/patient-rfm", headers=auth_headers_a)
     assert response.status_code == 200

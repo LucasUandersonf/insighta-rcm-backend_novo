@@ -32,6 +32,7 @@ from app.repositories.health_score_snapshot_repository import HealthScoreSnapsho
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -39,6 +40,8 @@ from app.repositories.tenant_repository import TenantRepository
 from app.schemas.analytics import (
     AgeBucketItem,
     AgendaMetricsResponse,
+    AgendaPlanPriorityItem,
+    AgendaPlanPriorityResponse,
     AgendaRevenueForecastResponse,
     AverageTicketChannelItem,
     AverageTicketProcedureItem,
@@ -464,6 +467,7 @@ class AnalyticsService:
         cost_entry_repo: CostEntryRepository,
         insight_outcome_repo: InsightOutcomeRepository,
         ingestion_repo: IngestionRepository,
+        outreach_log_repo: PatientOutreachLogRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -477,6 +481,7 @@ class AnalyticsService:
         self.cost_entry_repo = cost_entry_repo
         self.insight_outcome_repo = insight_outcome_repo
         self.ingestion_repo = ingestion_repo
+        self.outreach_log_repo = outreach_log_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -617,6 +622,72 @@ class AnalyticsService:
                     billings_settled_count=row["billings_settled_count"],
                 )
                 for row in rows
+            ],
+        )
+
+    async def get_agenda_plan_priority(self, date_from: date, date_to: date) -> AgendaPlanPriorityResponse:
+        """
+        Onda 4 do Plano de Ação, item 14 — evolução do PMR existente
+        (get_payment_lag_by_plan): não só REPORTA o prazo de
+        recebimento por convênio, RECOMENDA qual priorizar ao encaixar
+        um paciente novo/de retorno quando mais de um convênio é
+        candidato pra mesma vaga — melhor pagar rápido E não deixar
+        perda financeira em aberto vale mais a vaga escassa.
+
+        DECISÃO — combinação por RANKING, não por fórmula ponderada
+        -------------------------------------------------------------
+        `avg_days_to_receive` (dias) e `total_loss` (R$) não são a
+        mesma unidade nem a mesma escala — somar os dois valores
+        brutos, ou inventar um peso arbitrário (ex: "70% prazo, 30%
+        perda"), seria um número sem lastro. Em vez disso, cada convênio
+        recebe sua POSIÇÃO em cada ranking (1º melhor prazo, 1º menor
+        perda...) e a soma das duas posições decide a prioridade final
+        — mesmo raciocínio de "nunca inventa confiança sem amostra" do
+        resto do motor, aplicado aqui a "nunca inventa peso sem
+        validar".
+
+        Só convênio de verdade entra (plan_type="convenio") — não faz
+        sentido "priorizar" particular numa fila de convênios: quem
+        paga particular não depende de operadora nenhuma pra receber.
+        Só entra convênio com PMR calculável no período (billing
+        conciliado) — sem prazo de recebimento não há o que ranquear.
+        Convênio sem linha no ranking de perda (nunca teve buraco/glosa
+        detectado) entra com total_loss=0 — ausência de perda
+        conhecida É um sinal bom, não motivo pra excluir da
+        recomendação.
+        """
+        lag_response = await self.get_payment_lag_by_plan(date_from, date_to)
+        loss_response = await self.get_plan_loss_ranking(date_from, date_to)
+        loss_by_plan_name = {item.plan_name: item.total_loss for item in loss_response.plans}
+
+        candidates = [item for item in lag_response.items if item.plan_type == "convenio"]
+        if not candidates:
+            return AgendaPlanPriorityResponse(period_start=date_from, period_end=date_to, items=[])
+
+        lag_rank = {
+            item.insurance_plan_id: rank
+            for rank, item in enumerate(sorted(candidates, key=lambda i: i.avg_days_to_receive), start=1)
+        }
+        loss_rank = {
+            item.insurance_plan_id: rank
+            for rank, item in enumerate(
+                sorted(candidates, key=lambda i: loss_by_plan_name.get(i.insurance_plan_name, 0.0)), start=1
+            )
+        }
+        combined = sorted(candidates, key=lambda i: lag_rank[i.insurance_plan_id] + loss_rank[i.insurance_plan_id])
+
+        return AgendaPlanPriorityResponse(
+            period_start=date_from,
+            period_end=date_to,
+            items=[
+                AgendaPlanPriorityItem(
+                    insurance_plan_id=item.insurance_plan_id,
+                    insurance_plan_name=item.insurance_plan_name,
+                    avg_days_to_receive=item.avg_days_to_receive,
+                    total_loss=loss_by_plan_name.get(item.insurance_plan_name, 0.0),
+                    priority_rank=priority_rank,
+                )
+                for priority_rank, item in enumerate(combined, start=1)
             ],
         )
 
@@ -1693,16 +1764,27 @@ class AnalyticsService:
         today = date.today()
         total_count = await self.analytics_repo.inactive_patients_count(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
         rows = await self.analytics_repo.list_inactive_patients(today, inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS)
-        return InactivePatientsResponse(
-            items=[
+        # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — anota
+        # quem já foi contatado, pra recepção nunca ligar duas vezes pro
+        # mesmo paciente sem saber.
+        outreach_by_patient = await self.outreach_log_repo.latest_by_patient_ids(
+            [uuid.UUID(patient_id) for patient_id, _, _ in rows]
+        )
+        items = []
+        for patient_id, full_name, last_appointment_at in rows:
+            outreach = outreach_by_patient.get(uuid.UUID(patient_id))
+            items.append(
                 InactivePatientItem(
                     patient_id=uuid.UUID(patient_id),
                     full_name=full_name,
                     last_appointment_at=last_appointment_at,
                     days_since_last_appointment=(datetime.now(timezone.utc) - last_appointment_at).days,
+                    last_outreach_at=outreach.created_at if outreach else None,
+                    last_outreach_outcome=outreach.outcome if outreach else None,
                 )
-                for patient_id, full_name, last_appointment_at in rows
-            ],
+            )
+        return InactivePatientsResponse(
+            items=items,
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
@@ -1743,6 +1825,19 @@ class AnalyticsService:
                     )
                 )
         action_items.sort(key=lambda item: item.total_revenue, reverse=True)
+
+        # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — só busca
+        # outreach de quem de fato entrou na fila de ação (a base
+        # inteira não precisa desse lookup, só quem vai aparecer na
+        # tela).
+        outreach_by_patient = await self.outreach_log_repo.latest_by_patient_ids(
+            [item.patient_id for item in action_items]
+        )
+        for item in action_items:
+            outreach = outreach_by_patient.get(item.patient_id)
+            if outreach:
+                item.last_outreach_at = outreach.created_at
+                item.last_outreach_outcome = outreach.outcome
 
         return RfmResponse(
             as_of=today.date(),

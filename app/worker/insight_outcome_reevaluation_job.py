@@ -45,6 +45,7 @@ from app.repositories.health_score_snapshot_repository import HealthScoreSnapsho
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -97,6 +98,7 @@ async def _process_tenant(tenant: Tenant, as_of: datetime) -> int:
             CostEntryRepository(session),
             outcome_repo,
             IngestionRepository(session),
+            PatientOutreachLogRepository(session),
         )
         window_end = date.today()
         window_start = window_end - timedelta(days=_REEVALUATION_WINDOW_DAYS - 1)
