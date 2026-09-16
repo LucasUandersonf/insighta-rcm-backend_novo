@@ -37,6 +37,13 @@ class NetworkBenchmarkService:
 
     async def get_benchmark(self, tenant_id: UUID) -> NetworkBenchmarkResponse:
         row = await self.repo.get_benchmark(tenant_id, window_days=_WINDOW_DAYS, min_cohort=_MIN_COHORT)
+        # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        # mecanismo 4) — mesma arquitetura de denial/no_show acima, só
+        # que SEM window_days (churn precoce é sempre "a partir de
+        # agora", ver DECISÃO em app/sql/053_network_churn_benchmark.sql).
+        # `window_days` na resposta continua descrevendo só denial/no_show;
+        # o metric de churn não segue essa janela.
+        churn_row = await self.repo.get_churn_benchmark(tenant_id, min_cohort=_MIN_COHORT)
         return NetworkBenchmarkResponse(
             metrics=[
                 NetworkBenchmarkMetric(
@@ -56,6 +63,15 @@ class NetworkBenchmarkService:
                     network_median=row.network_no_show_median,
                     cohort_size=row.no_show_cohort_size,
                     cohort_is_segmented_by_specialty=row.no_show_cohort_is_segmented,
+                ),
+                NetworkBenchmarkMetric(
+                    key="churn",
+                    label="Churn precoce",
+                    your_rate=churn_row.your_churn_rate,
+                    your_sample=churn_row.your_churn_sample,
+                    network_median=churn_row.network_churn_median,
+                    cohort_size=churn_row.churn_cohort_size,
+                    cohort_is_segmented_by_specialty=churn_row.churn_cohort_is_segmented,
                 ),
             ],
             window_days=_WINDOW_DAYS,

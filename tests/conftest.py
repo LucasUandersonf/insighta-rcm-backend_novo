@@ -143,6 +143,7 @@ _SCHEMA_FILES = [
     "050_appointment_addon_upsell.sql",
     "051_professional_contract_commission.sql",
     "052_appointment_satisfaction.sql",
+    "053_network_churn_benchmark.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
@@ -226,6 +227,12 @@ GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) T
 ALTER FUNCTION core.network_revenue_growth_benchmark(UUID, INT) OWNER TO network_benchmark_owner_test;
 REVOKE ALL ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) TO app_test_runtime;
+
+-- "Equilíbrio Insighta" (ver 053_network_churn_benchmark.sql) — MESMA
+-- role network_benchmark_owner_test acima.
+ALTER FUNCTION core.network_churn_benchmark(UUID, INT) OWNER TO network_benchmark_owner_test;
+REVOKE ALL ON FUNCTION core.network_churn_benchmark(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_churn_benchmark(UUID, INT) TO app_test_runtime;
 
 -- Dashboard consolidado multi-unidade (ver 042_organizations.sql) —
 -- role PRÓPRIA, mesmo raciocínio de network_benchmark_owner_test acima

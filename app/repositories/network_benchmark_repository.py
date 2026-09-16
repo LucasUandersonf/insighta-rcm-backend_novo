@@ -34,6 +34,19 @@ class NetworkBenchmarkRow:
 
 
 @dataclass
+class NetworkChurnRow:
+    """"Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+    mecanismo 4) — mesmo formato de NetworkBenchmarkRow acima, ver
+    DECISÃO completa em app/sql/053_network_churn_benchmark.sql."""
+
+    your_churn_rate: float | None
+    your_churn_sample: int
+    network_churn_median: float | None  # None = cohort abaixo do mínimo, nunca "0%"
+    churn_cohort_size: int
+    churn_cohort_is_segmented: bool
+
+
+@dataclass
 class NetworkRevenueGrowthRow:
     your_trailing_12mo_total: float
     your_prior_12mo_total: float
@@ -80,4 +93,22 @@ class NetworkBenchmarkRepository:
             network_no_show_median=float(row.network_no_show_median) if row.network_no_show_median is not None else None,
             no_show_cohort_size=int(row.no_show_cohort_size),
             no_show_cohort_is_segmented=bool(row.no_show_cohort_is_segmented),
+        )
+
+    async def get_churn_benchmark(self, tenant_id: UUID, *, min_cohort: int = 5) -> NetworkChurnRow:
+        """"Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 4) — ver DECISÃO completa em
+        app/sql/053_network_churn_benchmark.sql. Sem window_days de
+        propósito: churn precoce é sempre "a partir de agora" (mesmo
+        espírito de AnalyticsService.get_early_churn_risk), nunca uma
+        janela de período."""
+        stmt = text("SELECT * FROM core.network_churn_benchmark(:tenant_id, :min_cohort)")
+        result = await self.session.execute(stmt, {"tenant_id": str(tenant_id), "min_cohort": min_cohort})
+        row = result.one()
+        return NetworkChurnRow(
+            your_churn_rate=float(row.your_churn_rate) if row.your_churn_rate is not None else None,
+            your_churn_sample=int(row.your_churn_sample),
+            network_churn_median=float(row.network_churn_median) if row.network_churn_median is not None else None,
+            churn_cohort_size=int(row.churn_cohort_size),
+            churn_cohort_is_segmented=bool(row.churn_cohort_is_segmented),
         )
