@@ -87,6 +87,9 @@ from app.schemas.analytics import (
     ProfessionalCapacityMetric,
     RecallCandidateItem,
     RecallCandidatesResponse,
+    RfmPatientItem,
+    RfmResponse,
+    RfmSegmentCount,
     SatisfactionSummaryResponse,
     SmartInsightResponse,
     SmartInsightsResponse,
@@ -97,6 +100,7 @@ from app.schemas.analytics import (
     WeekdayCancellationRateBucket,
     WeekdayNoShowRateBucket,
 )
+from app.services import rfm_engine
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
 from app.services.health_score_engine import (
     compute_health_score,
@@ -206,6 +210,12 @@ CONTRACT_EXPIRING_ALERT_HORIZON_DAYS = 30
 # ruído de novo).
 RED_LIST_MIN_SAMPLE = 3
 RED_LIST_LIMIT = 10
+
+# RFM completo (Gaps Dossiê Insighta RCM, item 4) — mesmo espírito de
+# RED_LIST_LIMIT acima: "quem precisa de ação agora" é uma lista curta e
+# acionável, não um dump da base inteira (que já vem resumida em
+# RfmResponse.segment_counts).
+RFM_ACTION_ITEMS_LIMIT = 15
 
 
 @dataclass
@@ -1695,6 +1705,52 @@ class AnalyticsService:
             ],
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
+        )
+
+    async def get_patient_rfm(self) -> RfmResponse:
+        """
+        RFM completo (Gaps Dossiê Insighta RCM, item 4) — Recência,
+        Frequência e Valor de CADA paciente com histórico, classificados
+        em 7 segmentos (ver DECISÃO completa em
+        app/services/rfm_engine.py). Sem date_from/date_to de propósito,
+        mesmo espírito de get_inactive_patients: RFM avalia o
+        relacionamento inteiro com o paciente, não uma janela.
+        """
+        today = datetime.now(timezone.utc)
+        rows = await self.analytics_repo.patient_rfm_metrics()
+
+        monetary = rfm_engine.monetary_scores([row["total_revenue"] for row in rows])
+        segment_counts = {segment: 0 for segment in rfm_engine.RFM_SEGMENTS}
+        action_items: list[RfmPatientItem] = []
+        for row, monetary_score in zip(rows, monetary):
+            days_since_last = (today - row["last_appointment_at"]).days
+            recency_score = rfm_engine.score_recency(days_since_last)
+            frequency_score = rfm_engine.score_frequency(row["visit_count"])
+            segment = rfm_engine.classify_segment(recency_score, frequency_score, monetary_score)
+            segment_counts[segment] += 1
+            if segment in ("nao_pode_perder", "em_risco"):
+                action_items.append(
+                    RfmPatientItem(
+                        patient_id=uuid.UUID(row["patient_id"]),
+                        full_name=row["full_name"],
+                        days_since_last_appointment=days_since_last,
+                        visit_count=row["visit_count"],
+                        total_revenue=row["total_revenue"],
+                        recency_score=recency_score,
+                        frequency_score=frequency_score,
+                        monetary_score=monetary_score,
+                        segment=segment,
+                    )
+                )
+        action_items.sort(key=lambda item: item.total_revenue, reverse=True)
+
+        return RfmResponse(
+            as_of=today.date(),
+            total_patients=len(rows),
+            segment_counts=[
+                RfmSegmentCount(segment=segment, patient_count=count) for segment, count in segment_counts.items()
+            ],
+            action_items=action_items[:RFM_ACTION_ITEMS_LIMIT],
         )
 
     async def get_early_churn_risk(self) -> EarlyChurnRiskResponse:

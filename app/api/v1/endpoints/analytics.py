@@ -58,6 +58,7 @@ from app.schemas.analytics import (
     PriorityQueueResponse,
     RecallCandidatesResponse,
     ReturnRateResponse,
+    RfmResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
     UpsellFunnelResponse,
@@ -324,6 +325,20 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/patient-rfm", response_model=RfmResponse)
+async def get_patient_rfm(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> RfmResponse:
+    """
+    RFM completo (Gaps Dossiê Insighta RCM, item 4) — Recência,
+    Frequência e Valor de cada paciente, segmentados. Sem date_from/
+    date_to (mesmo espírito de inactive-patients): RFM avalia o
+    relacionamento inteiro com o paciente, não uma janela de período.
+    """
+    return await _build_service(db).get_patient_rfm()
 
 
 @router.get("/early-churn-risk", response_model=EarlyChurnRiskResponse)

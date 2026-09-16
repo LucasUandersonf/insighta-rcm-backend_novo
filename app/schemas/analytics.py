@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -709,6 +710,57 @@ class InactivePatientsResponse(BaseModel):
     items: list[InactivePatientItem]
     total_count: int
     inactive_after_days: int
+
+
+# Gaps Dossiê Insighta RCM, item 4 — RFM completo (Recência, Frequência,
+# Valor). Recência e Frequência já existiam espalhadas em outras
+# features (InactivePatientsResponse, patient_value_engine); Valor era a
+# dimensão que faltava pra virar RFM DE VERDADE. Ver DECISÃO completa em
+# app/services/rfm_engine.py sobre os limiares/quantis usados.
+RfmSegment = Literal["campeoes", "fieis", "nao_pode_perder", "em_risco", "novos", "hibernando", "precisa_atencao"]
+
+
+class RfmSegmentCount(BaseModel):
+    segment: RfmSegment
+    patient_count: int
+
+
+class RfmPatientItem(BaseModel):
+    """Uma linha da lista de pacientes que mais precisam de ação —
+    segmento "não pode perder" (alto valor histórico, sumiu) ou "em
+    risco" (vinha com frequência, sumiu), maior receita histórica
+    primeiro. Ver DECISÃO em AnalyticsService.get_patient_rfm."""
+
+    patient_id: UUID
+    full_name: str
+    days_since_last_appointment: int
+    visit_count: int
+    total_revenue: float
+    recency_score: int
+    frequency_score: int
+    monetary_score: int
+    segment: RfmSegment
+
+
+class RfmResponse(BaseModel):
+    """GET /api/v1/analytics/patient-rfm — a base de pacientes inteira
+    (todo mundo com pelo menos 1 atendimento não cancelado) classificada
+    em Recência × Frequência × Valor, sempre "a partir de hoje" (sem
+    date_from/date_to — mesmo espírito de InactivePatientsResponse: RFM
+    avalia o relacionamento inteiro, não uma janela de período).
+
+    `segment_counts` sempre traz os 7 segmentos (mesmo os com 0
+    pacientes — é uma taxonomia fixa, diferente de uma quebra por dado
+    variável como dia da semana): a distribuição completa da carteira.
+    `action_items` é só quem precisa de ação AGORA (segmentos
+    "nao_pode_perder"/"em_risco"), maior receita histórica primeiro —
+    mesmo espírito de "lista vermelha" de PatientNoShowRankingItem, não
+    um dump da base inteira."""
+
+    as_of: date
+    total_patients: int
+    segment_counts: list[RfmSegmentCount]
+    action_items: list[RfmPatientItem]
 
 
 class EarlyChurnRiskItem(BaseModel):

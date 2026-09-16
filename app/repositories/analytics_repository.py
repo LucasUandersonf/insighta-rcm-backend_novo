@@ -527,6 +527,48 @@ class AnalyticsRepository:
             for patient_id, full_name, revenue in result.all()
         ]
 
+    async def patient_rfm_metrics(self) -> list[dict]:
+        """
+        Insumo cru do RFM completo (Gaps Dossiê Insighta RCM, item 4) —
+        Recência (`last_appointment_at`), Frequência (`visit_count`) e
+        Valor (`total_revenue`) por paciente, os três SEMPRE histórico
+        completo (sem date_from/date_to), nunca uma janela de período:
+        RFM avalia o RELACIONAMENTO inteiro com o paciente, mesmo
+        raciocínio de `list_inactive_patients`/`vip_signals_for` (ambos
+        também "a partir de hoje", nunca um recorte).
+
+        Só entra paciente com pelo menos 1 atendimento NÃO cancelado
+        (mesmo critério de `vip_signals_for` em patient_repository.py) —
+        cadastro sem histórico não tem Recência/Frequência/Valor pra
+        calcular. `total_revenue` soma todo billing ligado a esses
+        atendimentos (LEFT JOIN — um atendimento sem billing ainda
+        emitido conta 0, nunca é excluído da Frequência por isso).
+        """
+        from app.models.patient import Patient
+
+        last_appointment_expr = func.max(Appointment.scheduled_at)
+        visit_count_expr = func.count(func.distinct(Appointment.id))
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, last_appointment_expr, visit_count_expr, revenue_expr)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .outerjoin(Billing, Billing.appointment_id == Appointment.id)
+            .where(Appointment.status != "cancelled")
+            .group_by(Patient.id, Patient.full_name)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {
+                "patient_id": str(patient_id),
+                "full_name": full_name,
+                "last_appointment_at": last_appointment_at,
+                "visit_count": int(visit_count),
+                "total_revenue": float(total_revenue),
+            }
+            for patient_id, full_name, last_appointment_at, visit_count, total_revenue in result.all()
+        ]
+
     async def active_patient_birth_dates(self, date_from: date, date_to: date) -> tuple[list[date], int]:
         """
         Achado do Dossiê Insighta RCM — insumo de faixa etária/
