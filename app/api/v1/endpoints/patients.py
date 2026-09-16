@@ -16,6 +16,7 @@ src/pages/AppointmentsPage.tsx) — o call site do frontend precisa ser
 atualizado para ler `.items` em vez do array direto.
 """
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 
@@ -23,7 +24,12 @@ from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.pagination import PaginatedResponse
-from app.schemas.patient import PatientCreateRequest, PatientResponse, PatientUpdateRequest
+from app.schemas.patient import (
+    PatientBirthdaysResponse,
+    PatientCreateRequest,
+    PatientResponse,
+    PatientUpdateRequest,
+)
 from app.services.patient_service import PatientService
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -62,6 +68,23 @@ async def list_patients(
     anterior deste endpoint."""
     items, total = await _build_service(db).list_patients_paginated(limit=limit, offset=offset)
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/birthdays", response_model=PatientBirthdaysResponse)
+async def list_patient_birthdays(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+    month: int = Query(default=None, ge=1, le=12),
+) -> PatientBirthdaysResponse:
+    """
+    Achado do Dossiê Insighta RCM — aniversariantes do mês, a partir de
+    `Patient.birth_date` (capturado desde sempre, nunca agregado antes).
+    Mesmo RBAC de GET /patients (leitura pura de cadastro). `month`
+    default é o mês ATUAL (não faz sentido pedir "aniversariantes" sem
+    dizer de qual mês, e "hoje" é a pergunta óbvia da recepção).
+    """
+    resolved_month = month or date.today().month
+    return await _build_service(db).list_birthdays_in_month(resolved_month)
 
 
 @router.patch("/{patient_id}", response_model=PatientResponse)

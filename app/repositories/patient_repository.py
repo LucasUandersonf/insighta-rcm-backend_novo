@@ -72,3 +72,25 @@ class PatientRepository:
         referral_counts = {row[0]: row[1] for row in (await self.session.execute(referral_stmt)).all()}
 
         return {pid: (visit_counts.get(pid, 0), referral_counts.get(pid, 0)) for pid in patient_ids}
+
+    async def list_birthdays_in_month(self, month: int) -> list[Patient]:
+        """
+        Achado do Dossiê Insighta RCM — `Patient.birth_date` é capturado
+        pela normalização (Template de Faturamento) desde sempre, mas
+        nenhuma tela lista aniversariantes do mês (ação clássica de
+        relacionamento/retenção de clínica). Anonimização LGPD (ver
+        `anonymized_at`, DECISÃO em app/sql/022_patient_lgpd_erasure.sql)
+        já zera `birth_date` do titular — o filtro IS NOT NULL abaixo
+        já exclui esses pacientes automaticamente, sem checagem extra.
+
+        Ordenado por DIA do mês (não por nome): é assim que o gestor usa
+        a lista — "quem faz aniversário essa semana", não uma lista
+        alfabética.
+        """
+        stmt = (
+            select(Patient)
+            .where(Patient.birth_date.is_not(None), func.extract("month", Patient.birth_date) == month)
+            .order_by(func.extract("day", Patient.birth_date))
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
