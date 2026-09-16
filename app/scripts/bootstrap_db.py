@@ -340,6 +340,10 @@ _POST_UPGRADE_SQL_FILES = [
     # core.appointments). Idempotente por construção, roda em todo
     # deploy sem marcador. Ver DECISÃO completa no próprio .sql.
     "053_network_churn_benchmark.sql",
+    # Plano de Ação Insighta — Onda 3 ("particular como cidadão de
+    # primeira classe"). ADD COLUMN IF NOT EXISTS + CHECK guardado por
+    # DO $$ — auto-idempotente, roda em todo deploy, sem marcador.
+    "054_insurance_plan_type.sql",
 ]
 
 _ROLES_SQL = """

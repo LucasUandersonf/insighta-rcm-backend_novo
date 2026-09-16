@@ -148,3 +148,67 @@ async def test_deactivated_plan_still_resolves_during_ingestion(client, auth_hea
     # linha teria caído em "unknown_insurance_plan" (error_row_count=1).
     assert upload_resp.json()["row_count"] == 1
     assert upload_resp.json()["error_row_count"] == 0
+
+
+# ---------------------------------------------------------------------
+# Plano de Ação Insighta — Onda 3 ("particular como cidadão de primeira
+# classe"): InsurancePlan.plan_type.
+# ---------------------------------------------------------------------
+
+
+async def test_plan_defaults_to_convenio_type(client, auth_headers_a):
+    company_id = await _create_company(client, auth_headers_a)
+    resp = await client.post(
+        "/api/v1/insurance-companies/plans",
+        json={"insurance_company_id": company_id, "display_name": "Unimed Default"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["plan_type"] == "convenio"
+
+
+async def test_creates_particular_plan_without_insurance_company(client, auth_headers_a):
+    resp = await client.post(
+        "/api/v1/insurance-companies/plans",
+        json={"display_name": "Particular", "plan_type": "particular"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["plan_type"] == "particular"
+    assert body["insurance_company_id"] is None
+
+
+async def test_convenio_plan_without_company_is_rejected(client, auth_headers_a):
+    resp = await client.post(
+        "/api/v1/insurance-companies/plans",
+        json={"display_name": "Convênio Sem Operadora"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422
+
+
+async def test_particular_plan_with_company_is_rejected(client, auth_headers_a):
+    company_id = await _create_company(client, auth_headers_a)
+    resp = await client.post(
+        "/api/v1/insurance-companies/plans",
+        json={"insurance_company_id": company_id, "display_name": "Particular Errado", "plan_type": "particular"},
+        headers=auth_headers_a,
+    )
+    assert resp.status_code == 422
+
+
+async def test_updates_plan_type_via_patch(client, auth_headers_a):
+    company_id = await _create_company(client, auth_headers_a)
+    create_resp = await client.post(
+        "/api/v1/insurance-companies/plans",
+        json={"insurance_company_id": company_id, "display_name": "Plano De Mentira"},
+        headers=auth_headers_a,
+    )
+    plan_id = create_resp.json()["id"]
+
+    patch_resp = await client.patch(
+        f"/api/v1/insurance-companies/plans/{plan_id}", json={"plan_type": "particular"}, headers=auth_headers_a
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["plan_type"] == "particular"

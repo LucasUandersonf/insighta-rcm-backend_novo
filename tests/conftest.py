@@ -144,6 +144,7 @@ _SCHEMA_FILES = [
     "051_professional_contract_commission.sql",
     "052_appointment_satisfaction.sql",
     "053_network_churn_benchmark.sql",
+    "054_insurance_plan_type.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em
