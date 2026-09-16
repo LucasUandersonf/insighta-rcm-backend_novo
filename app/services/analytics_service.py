@@ -80,6 +80,8 @@ from app.schemas.analytics import (
     SmartInsightResponse,
     SmartInsightsResponse,
     UpcomingRiskAppointmentItem,
+    UpsellFunnelItem,
+    UpsellFunnelResponse,
     WeekdayBucket,
     WeekdayNoShowRateBucket,
 )
@@ -1728,6 +1730,36 @@ class AnalyticsService:
             period_end=date_to,
             total_spend=sum(row["spend"] for row in rows),
             items=[MarketingChannelItem(**row) for row in rows],
+        )
+
+    async def get_upsell_funnel(self, date_from: date, date_to: date) -> UpsellFunnelResponse:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 3) — funil de upsell (oferecido × aceito). Complementa
+        get_marketing_channels (aquisição) olhando expansão de receita
+        em paciente já conquistado — ver DECISÃO completa em
+        AnalyticsRepository.addon_upsell_breakdown.
+        """
+        rows = await self.analytics_repo.addon_upsell_breakdown(date_from, date_to)
+        items = [
+            UpsellFunnelItem(
+                procedure_name=procedure,
+                offered_count=offered,
+                accepted_count=accepted,
+                acceptance_rate=(accepted / offered) if offered > 0 else None,
+            )
+            for procedure, offered, accepted in rows
+        ]
+        items.sort(key=lambda i: i.offered_count, reverse=True)
+        total_offered = sum(i.offered_count for i in items)
+        total_accepted = sum(i.accepted_count for i in items)
+        return UpsellFunnelResponse(
+            period_start=date_from,
+            period_end=date_to,
+            total_offered=total_offered,
+            total_accepted=total_accepted,
+            overall_acceptance_rate=(total_accepted / total_offered) if total_offered > 0 else None,
+            items=items,
         )
 
     async def get_recall_candidates(

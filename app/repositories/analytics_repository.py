@@ -1473,6 +1473,39 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(score): count for score, count in result.all()}
 
+    async def addon_upsell_breakdown(self, date_from: date, date_to: date) -> list[tuple[str, int, int]]:
+        """
+        Funil de upsell (oferecido × aceito) — "Equilíbrio Insighta"
+        (Balanced Scorecard, perna Cliente, mecanismo 3). Agrupa por
+        `Appointment.addon_offered_procedure` (texto livre — mesmo
+        critério de "canal_agendamento"/"motivo_cancelamento": sem
+        vocabulário fechado ainda, ver DECISÃO em
+        _regroup_text_no_show_counts, analytics_service.py). Só
+        atendimentos onde uma oferta de fato aconteceu (addon_offered_procedure
+        preenchido) entram — quem nunca recebeu oferta não é "recusa
+        silenciosa", é ausência de amostra.
+
+        Retorna [(procedimento, ofertas, aceitas)] — `aceitas` conta só
+        `addon_declined = false` explicitamente; uma oferta com desfecho
+        ainda não registrado (`addon_declined IS NULL`) entra em
+        `ofertas` mas não em `aceitas`, nunca é contada como recusa por
+        omissão.
+        """
+        start, end = _bounds(date_from, date_to)
+        offered_expr = func.count()
+        accepted_expr = func.sum(case((Appointment.addon_declined.is_(False), 1), else_=0))
+        stmt = (
+            select(Appointment.addon_offered_procedure, offered_expr, accepted_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.addon_offered_procedure.is_not(None),
+            )
+            .group_by(Appointment.addon_offered_procedure)
+        )
+        result = await self.session.execute(stmt)
+        return [(procedure, offered, int(accepted or 0)) for procedure, offered, accepted in result.all()]
+
     async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
         """
         Taxa de falta agregada do período inteiro (não por dia da semana

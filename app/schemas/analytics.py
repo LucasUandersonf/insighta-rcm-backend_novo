@@ -887,3 +887,34 @@ class MarketingChannelsResponse(BaseModel):
     period_end: date
     total_spend: float
     items: list[MarketingChannelItem]
+
+
+class UpsellFunnelItem(BaseModel):
+    """Uma linha do funil de upsell — "Equilíbrio Insighta" (Balanced
+    Scorecard, perna Cliente, mecanismo 3): por procedimento adicional
+    OFERECIDO, quantas vezes foi aceito. `acceptance_rate` é None só
+    quando `offered_count` é 0, o que não deveria acontecer (a linha só
+    existe porque houve oferta), mas o campo é opcional pela mesma
+    cautela de divisão-por-zero do resto do produto."""
+
+    procedure_name: str
+    offered_count: int
+    accepted_count: int
+    acceptance_rate: float | None
+
+
+class UpsellFunnelResponse(BaseModel):
+    """GET /api/v1/analytics/upsell-funnel — "Equilíbrio Insighta"
+    (Balanced Scorecard, perna Cliente, mecanismo 3). Complementa
+    MarketingChannelsResponse (CAC/LTV, olhando AQUISIÇÃO): este
+    endpoint olha EXPANSÃO de receita em paciente já conquistado —
+    ordenado por offered_count (maior primeiro), mesmo critério de
+    "onde vale mais a pena prestar atenção primeiro" do resto da Sala de
+    Comando."""
+
+    period_start: date
+    period_end: date
+    total_offered: int
+    total_accepted: int
+    overall_acceptance_rate: float | None  # None quando total_offered == 0
+    items: list[UpsellFunnelItem]

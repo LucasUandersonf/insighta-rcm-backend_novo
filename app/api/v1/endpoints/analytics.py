@@ -54,6 +54,7 @@ from app.schemas.analytics import (
     RecallCandidatesResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
+    UpsellFunnelResponse,
 )
 from app.services.analytics_service import AnalyticsService
 from app.services.network_benchmark_service import NetworkBenchmarkService
@@ -195,6 +196,23 @@ async def get_health_score(
     # Sem date_from/date_to de propósito — janela é fixa dentro do
     # service (ver DECISÃO em AnalyticsService.get_health_score).
     return await _build_service(db).get_health_score(current_user.tenant_id)
+
+
+@router.get("/upsell-funnel", response_model=UpsellFunnelResponse)
+async def get_upsell_funnel(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> UpsellFunnelResponse:
+    """
+    "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    3) — funil de upsell (oferecido × aceito) por procedimento adicional.
+    Complementa /marketing-channels (aquisição) olhando expansão de
+    receita em paciente já conquistado.
+    """
+    start, end = _default_period(date_from, date_to)
+    return await _build_service(db).get_upsell_funnel(start, end)
 
 
 @router.get("/satisfaction-summary", response_model=SatisfactionSummaryResponse)
