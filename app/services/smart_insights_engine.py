@@ -612,6 +612,25 @@ class Insight:
     action_href: str | None = None
 
 
+def derive_fact_key(insight: Insight) -> str:
+    """
+    Identificador estável de uma SITUAÇÃO, para a memória contínua
+    dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3 — ver
+    app/repositories/tracked_alert_repository.py). `title` já é
+    naturalmente estável e específico o bastante pra maioria dos
+    insights deste motor: card por convênio nomeia o convênio no título
+    (_denial_spike_insights), card de dia da semana nomeia o dia
+    (_weekday_drop_insight/_weekday_no_show_rate_insight), card de
+    profissional nomeia o profissional (_professional_outlier_insight) —
+    a mesma SITUAÇÃO real sempre produz o mesmo título, mesmo que a
+    frase completa (com números atualizados) mude de um dia pro outro.
+    `category` entra só como precaução contra colisão entre as duas
+    áreas (faturamento/agenda nunca deveriam produzir o mesmo título,
+    mas nada nesse motor garante isso estruturalmente).
+    """
+    return f"{insight.category}:{insight.title}"
+
+
 def describe_denial_reason(code: str) -> str:
     """Tradução em português simples de um reason_code do motor de glosa
     (denial_risk_engine.py) — pública porque analytics_service.py também
@@ -1166,8 +1185,14 @@ def _no_show_risk_insight(current: InsightsPeriodInput, estimated_revenue_at_ris
             "mensagem confirmando a presença costuma reduzir bastante esse risco."
         ),
         financial_impact=estimated_revenue_at_risk,
+        # DECISÃO — Roadmap "Rumo à Nota 9" (Fase 2, Auditoria UX): antes
+        # só rolava até o card de CONTAGEM agregada dentro da própria Sala
+        # de Comando ("#agenda-resumo") — o gestor via "12 em risco" mas
+        # não tinha como ver QUEM, exceto os 6 nomes de prévia. Agora
+        # aponta pra tela dedicada com a lista nominal completa, paginada
+        # (ver AnalyticsService.list_upcoming_risk_appointments).
         action_label="Ver quem está em risco",
-        action_href="#agenda-resumo",
+        action_href="/agenda-risco",
     )
 
 
@@ -1702,8 +1727,13 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
         # AnalyticsRepository.list_inactive_patients e
         # InactivePatientsPanel.tsx (frontend). Sem lista pra mostrar,
         # sem botão — nunca um link pra uma seção vazia.
+        #
+        # Roadmap "Rumo à Nota 9" (Fase 5) — Carteira de Inativos saiu do
+        # Diagnóstico e virou o conteúdo principal da aba CRM dedicada;
+        # o destino agora troca de aba ("#tab:crm"), não rola mais até
+        # uma seção dentro do Diagnóstico.
         action_label="Ver quem não voltou" if current.inactive_patients_count > 0 else None,
-        action_href="#carteira-inativa" if current.inactive_patients_count > 0 else None,
+        action_href="#tab:crm" if current.inactive_patients_count > 0 else None,
         financial_impact=expected_by_now - current.ytd_billed_total,
     )
 

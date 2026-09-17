@@ -147,6 +147,19 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str | None = None
     CONTRACT_EXTRACTION_MODEL: str = "claude-sonnet-4-5"
 
+    # --- Resumo executivo narrado por IA (Sala de Comando) ---
+    # Mesma credencial ANTHROPIC_API_KEY acima (mesma plataforma, dois
+    # usos diferentes) — ver app/services/executive_narrative_service.py.
+    # Modelo separado (não CONTRACT_EXTRACTION_MODEL) de propósito: são
+    # tarefas de natureza diferente (extração estruturada de tabela vs.
+    # prosa em português) que podem evoluir/calibrar independente uma da
+    # outra. Sonnet, não Haiku: o custo real da narrativa é irrisório de
+    # qualquer forma (poucas centenas de tokens, 1x/tenant/dia — ver
+    # DECISÃO no service), então a escolha aqui é 100% sobre qualidade de
+    # texto (é a peça do produto que precisa "parecer viva" para o
+    # gestor), não economia.
+    EXECUTIVE_NARRATIVE_MODEL: str = "claude-sonnet-5"
+
     # --- Recurso de Glosa (conformidade ANS) ---
     # Bucket separado dos outros dois (mesma lógica de sempre: natureza e
     # retenção diferentes — aqui são comprovantes de protocolo/anexos

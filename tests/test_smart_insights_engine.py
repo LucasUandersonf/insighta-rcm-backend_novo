@@ -11,8 +11,10 @@ from app.services.smart_insights_engine import (
     _DENIAL_RISK_PCT_CRITICAL,
     _DENIAL_RISK_PCT_WARNING,
     DenialReasonCount,
+    Insight,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    derive_fact_key,
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
@@ -31,6 +33,19 @@ _EMPTY_PERIOD = InsightsPeriodInput(
 
 def test_no_insights_when_nothing_changed():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_derive_fact_key_is_stable_for_the_same_situation_and_differs_across_categories():
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) — a
+    # mesma situação real (mesmo título, mesma categoria) precisa sempre
+    # produzir a MESMA chave, mesmo com mensagem/financial_impact
+    # diferentes (números do dia mudam, a chave não pode mudar).
+    yesterday = Insight(severity="warning", category="faturamento", title="X", message="ontem", financial_impact=10.0)
+    today = Insight(severity="critical", category="faturamento", title="X", message="hoje", financial_impact=99.0)
+    assert derive_fact_key(yesterday) == derive_fact_key(today)
+
+    other_category = Insight(severity="warning", category="agenda", title="X", message="hoje", financial_impact=None)
+    assert derive_fact_key(other_category) != derive_fact_key(today)
 
 
 def test_denial_spike_above_threshold_is_flagged_critical():
@@ -316,6 +331,10 @@ def test_high_risk_no_show_volume_uses_estimated_revenue_at_risk():
     insights = generate_insights(current, _EMPTY_PERIOD, estimated_no_show_revenue_at_risk=1600.0)
     assert len(insights) == 1
     assert insights[0].financial_impact == 1600.0
+    # Roadmap "Rumo à Nota 9" (Fase 2) — aponta pra tela dedicada "Agenda
+    # de risco" (lista nominal completa), não mais só pro card de
+    # contagem agregada dentro da própria Sala de Comando.
+    assert insights[0].action_href == "/agenda-risco"
 
 
 def test_weekday_drop_above_threshold_is_flagged_critical():
@@ -1145,10 +1164,12 @@ def test_annual_goal_insight_has_action_pointing_to_inactive_patients_when_prese
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label == "Ver quem não voltou"
-    assert insights[0].action_href == "#carteira-inativa"
+    # Roadmap "Rumo à Nota 9" (Fase 5) — Carteira de Inativos agora mora
+    # na aba CRM dedicada, não numa seção do Diagnóstico.
+    assert insights[0].action_href == "#tab:crm"
     # Categoria é faturamento (meta de faturamento anual) mesmo o botão
-    # apontando pra uma seção de Agenda — categoria segue o QUE o
-    # insight mede, não pra onde o botão leva.
+    # apontando pra uma aba de CRM — categoria segue o QUE o insight
+    # mede, não pra onde o botão leva.
     assert insights[0].category == "faturamento"
 
 

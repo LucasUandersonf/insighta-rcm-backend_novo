@@ -17,17 +17,20 @@ os N dias imediatamente anteriores ao período pedido (N = duração do
 período atual) generaliza a mesma ideia sem assumir semana fixa — se o
 usuário pedir 7 dias, o resultado JÁ é "semana vs. semana anterior".
 """
+import logging
 import calendar
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from app.core.config import get_settings
 from app.core.text_utils import slugify
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
@@ -37,6 +40,8 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
+from app.schemas.pagination import PaginatedResponse
 from app.schemas.analytics import (
     AgeBucketItem,
     AgendaMetricsResponse,
@@ -49,6 +54,7 @@ from app.schemas.analytics import (
     AverageTicketResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    CrmSummaryResponse,
     DataFreshnessItem,
     DataFreshnessResponse,
     DataQualityByUserItem,
@@ -58,6 +64,7 @@ from app.schemas.analytics import (
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
     DenialRiskDistributionResponse,
+    ExecutiveNarrativeResponse,
     EarlyChurnRiskItem,
     EarlyChurnRiskResponse,
     ExecutiveSummaryResponse,
@@ -107,6 +114,13 @@ from app.schemas.analytics import (
 )
 from app.services import rfm_engine
 from app.services.capacity_service import CapacityService, estimate_idle_capacity_revenue_lost
+from app.services.executive_narrative_service import (
+    AnthropicNarrativeGenerator,
+    NarrativeFacts,
+    NarrativeGenerationError,
+    build_narrative_prompt,
+)
+from app.services.health_score_engine import compute_health_score
 from app.services.health_score_engine import (
     compute_health_score,
     resolve_health_score_ceilings,
@@ -118,6 +132,7 @@ from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    derive_fact_key,
     describe_denial_reason,
     describe_worst_no_show_weekday,
     generate_insights,
@@ -135,6 +150,20 @@ from app.services.smart_insights_engine import (
 # demais limiares deste produto).
 DENIAL_REASON_CONFIRMATION_MIN_SAMPLE = 5
 
+settings = get_settings()
+logger = logging.getLogger("analytics_service")
+
+# Janela do resumo executivo narrado por IA (ver
+# AnalyticsService.get_executive_narrative) — fixa em 7 dias, mesmo
+# raciocínio de _HEALTH_SCORE_WINDOW_DAYS logo abaixo: independente do
+# seletor de período da tela, pra narrativa não mudar de assunto toda
+# vez que o gestor troca o filtro.
+_EXECUTIVE_NARRATIVE_WINDOW_DAYS = 7
+# Home estilo Jarvis (Roadmap "Rumo à Nota 9", Fase 1) — no máximo 3
+# prioridades, nunca a lista inteira de insights: a Home existe
+# justamente pra responder "por onde eu começo", não pra repetir o feed
+# completo que já vive na Sala de Comando.
+_EXECUTIVE_BRIEFING_MAX_PRIORITIES = 3
 # Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") — amostra
 # mínima de atendimentos lançados por um atendente antes de reportar sua
 # taxa de completude, mesmo raciocínio de DENIAL_REASON_CONFIRMATION_MIN_SAMPLE
@@ -465,6 +494,8 @@ class AnalyticsService:
         tenant_repo: TenantRepository,
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
+        narrative_repo: ExecutiveNarrativeRepository,
+        tracked_alert_repo: TrackedAlertRepository,
         contract_repo: ContractRepository,
         cost_entry_repo: CostEntryRepository,
         insight_outcome_repo: InsightOutcomeRepository,
@@ -479,6 +510,8 @@ class AnalyticsService:
         self.availability_repo = availability_repo
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
+        self.narrative_repo = narrative_repo
+        self.tracked_alert_repo = tracked_alert_repo
         self.contract_repo = contract_repo
         self.cost_entry_repo = cost_entry_repo
         self.insight_outcome_repo = insight_outcome_repo
@@ -841,6 +874,37 @@ class AnalyticsService:
             total_idle_minutes=idle_minutes,
             estimated_revenue_lost_to_idle_capacity=estimated_revenue_lost_to_idle_capacity,
             professionals_without_availability_count=professionals_without_availability_count,
+        )
+
+    async def list_upcoming_risk_appointments(self, *, limit: int, offset: int) -> PaginatedResponse[UpcomingRiskAppointmentItem]:
+        """
+        Tela dedicada "Agenda de risco" (Painel → Agenda) — Roadmap "Rumo
+        à Nota 9" (Fase 2). Achado da Auditoria UX: o card de risco de
+        falta na Sala de Comando só mostra CONTAGEM agregada (ver
+        no_show_risk_breakdown) e, no máximo, uma prévia de 6 nomes (ver
+        upcoming_risk_appointments, usado por get_agenda_metrics) — sem
+        lugar nenhum pra ver a lista COMPLETA de quem está em risco. Esta
+        tela existe só pra isso; os insights de agenda passam a linkar
+        pra cá em vez de só informar um número.
+        """
+        items, total = await self.analytics_repo.upcoming_risk_appointments_paginated(
+            as_of=datetime.now(timezone.utc), limit=limit, offset=offset
+        )
+        return PaginatedResponse(
+            items=[
+                UpcomingRiskAppointmentItem(
+                    appointment_id=row["appointment_id"],
+                    patient_full_name=row["patient_full_name"],
+                    scheduled_at=row["scheduled_at"],
+                    risk_level=row["risk_level"],
+                    professional_name=row["professional_name"],
+                    patient_id=row["patient_id"],
+                )
+                for row in items
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
         )
 
     async def get_plan_loss_ranking(self, date_from: date, date_to: date) -> PlanLossRankingResponse:
@@ -1338,6 +1402,20 @@ class AnalyticsService:
             denial_risk_warning_threshold=denial_risk_warning_threshold,
             denial_risk_critical_threshold=denial_risk_critical_threshold,
         )
+
+        # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+        # só "critical"/"warning" são SITUAÇÕES rastreáveis (algo errado
+        # que pode ser corrigido); "positive" já é a celebração de uma
+        # melhora, e "comparativo" é uma comparação com a rede, não um
+        # problema desta clínica — nenhum dos dois faz sentido como "isto
+        # foi resolvido". Roda a CADA chamada (não só 1x/dia): é uma
+        # sincronização idempotente (ver DECISÃO em
+        # TrackedAlertRepository.sync), nunca chama IA nem tem custo
+        # relevante.
+        active_situations = {
+            derive_fact_key(i): (i.category, i.title) for i in insights if i.severity in ("critical", "warning")
+        }
+        await self.tracked_alert_repo.sync(uuid.UUID(tenant_id), active=active_situations, today=date.today())
 
         return SmartInsightsResponse(
             period_start=date_from,
@@ -1839,6 +1917,11 @@ class AnalyticsService:
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
 
+    async def get_crm_summary(self) -> CrmSummaryResponse:
+        """Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — ver DECISÃO
+        completa em AnalyticsRepository.crm_summary."""
+        row = await self.analytics_repo.crm_summary()
+        return CrmSummaryResponse(**row)
     async def get_daily_summary(self) -> DailySummaryResponse:
         """
         Onda 6 do Plano de Ação, item 18 ("resumo diário narrado") — ver
@@ -2389,6 +2472,105 @@ class AnalyticsService:
             baseline_denial_rate=baseline_rate,
             items=items,
             min_sample=DENIAL_REASON_CONFIRMATION_MIN_SAMPLE,
+        )
+
+    async def get_executive_narrative(self, tenant_id: str) -> ExecutiveNarrativeResponse:
+        """
+        Resumo executivo narrado por IA — ver DECISÃO completa em
+        executive_narrative_service.py. Janela FIXA de 7 dias fechados
+        (mesmo espírito de get_health_score: independente do seletor de
+        período da tela, pra não ficar recalculando/reescrevendo a
+        narrativa toda vez que o gestor troca o filtro).
+
+        Cache diário (ExecutiveNarrativeRepository, chave (tenant_id,
+        hoje)) — só chama a IA de verdade na PRIMEIRA visita do dia.
+        Nunca lança: sem ANTHROPIC_API_KEY configurada, ou qualquer falha
+        na chamada de IA, devolve `narrative=None` (degradação graciosa,
+        mesmo princípio de SENTRY_DSN/SMTP ausentes) — a Sala de Comando
+        continua funcionando normalmente sem o resumo.
+        """
+        today = date.today()
+        period_end = today
+        period_start = today - timedelta(days=_EXECUTIVE_NARRATIVE_WINDOW_DAYS - 1)
+
+        # Prioridades da Home (Roadmap "Rumo à Nota 9", Fase 1): mesma
+        # janela e mesma chamada que já alimentava só o texto da IA (ver
+        # `insight_lines` abaixo) — reaproveitada aqui para expor os
+        # insights, já ranqueados por generate_insights (impacto
+        # financeiro, depois severidade). Recalculado a CADA request,
+        # mesmo quando a narrativa em si vem do cache diário: é uma
+        # agregação determinística (sem custo de IA), então as prioridades
+        # ficam sempre atuais mesmo num dia em que o texto já foi gerado
+        # de manhã e os dados mudaram à tarde.
+        insights = await self.get_smart_insights(period_start, period_end, tenant_id=tenant_id)
+        top_priorities = insights.insights[:_EXECUTIVE_BRIEFING_MAX_PRIORITIES]
+
+        # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+        # a chamada a get_smart_insights logo acima já rodou o sync de
+        # hoje (side effect, ver DECISÃO em TrackedAlertRepository.sync),
+        # possivelmente numa visita ANTERIOR à Sala de Comando neste
+        # mesmo dia. Por isso lê "tudo resolvido hoje" de volta do banco
+        # (get_resolved_on) em vez de confiar no retorno de sync() — e
+        # SEMPRE, independente de cache hit/miss/falha de IA (Avaliação
+        # Home/Sala de Comando, Achado 3): antes isso só entrava no
+        # prompt da IA, então a única forma do gestor saber "isto foi
+        # corrigido" era a IA decidir mencionar — sem garantia nenhuma.
+        # Expor no schema deixa o frontend mostrar um selo determinístico,
+        # independente do texto gerado.
+        recently_resolved = await self.tracked_alert_repo.get_resolved_on(uuid.UUID(tenant_id), resolved_date=today)
+
+        cached = await self.narrative_repo.get_for_date(today)
+        if cached is not None:
+            return ExecutiveNarrativeResponse(
+                period_start=cached.period_start,
+                period_end=cached.period_end,
+                narrative=cached.narrative_text,
+                generated_at=None,
+                top_priorities=top_priorities,
+                recently_resolved=recently_resolved,
+            )
+
+        try:
+            summary = await self.get_executive_summary(period_start, period_end)
+            facts = NarrativeFacts(
+                period_start=period_start,
+                period_end=period_end,
+                total_billed=summary.total_billed.value,
+                financial_hole=summary.financial_hole.value,
+                payment_gap=summary.payment_gap.value,
+                denial_at_risk_value=summary.denial_at_risk_value,
+                avg_days_to_receive=summary.avg_days_to_receive.value if summary.avg_days_to_receive else None,
+                insight_lines=[f"{i.title}: {i.message}" for i in insights.insights],
+                resolved_since_yesterday_titles=recently_resolved,
+            )
+            generator = AnthropicNarrativeGenerator()
+            narrative_text = await generator.generate(build_narrative_prompt(facts))
+        except NarrativeGenerationError as exc:
+            logger.warning("Resumo executivo narrado indisponível para tenant %s: %s", tenant_id, exc)
+            return ExecutiveNarrativeResponse(
+                period_start=period_start,
+                period_end=period_end,
+                narrative=None,
+                generated_at=None,
+                top_priorities=top_priorities,
+                recently_resolved=recently_resolved,
+            )
+
+        await self.narrative_repo.upsert(
+            uuid.UUID(tenant_id),
+            digest_date=today,
+            period_start=period_start,
+            period_end=period_end,
+            narrative_text=narrative_text,
+            model=settings.EXECUTIVE_NARRATIVE_MODEL,
+        )
+        return ExecutiveNarrativeResponse(
+            period_start=period_start,
+            period_end=period_end,
+            narrative=narrative_text,
+            generated_at=datetime.now(timezone.utc),
+            top_priorities=top_priorities,
+            recently_resolved=recently_resolved,
         )
 
     async def get_data_quality_by_user(self, date_from: date, date_to: date) -> DataQualityResponse:

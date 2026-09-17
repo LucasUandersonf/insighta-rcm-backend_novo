@@ -103,6 +103,30 @@ async def list_high_risk_billing(
     )
 
 
+@router.get("/medium-risk", response_model=PaginatedResponse[BillingResponse])
+async def list_medium_risk_billing(
+    db: DbSession,
+    limit: int = 20,
+    offset: int = 0,
+    insurance_plan_id: UUID | None = None,
+    current_user: CurrentUser = Depends(require_role("financeiro", "admin", "owner")),
+) -> PaginatedResponse[BillingResponse]:
+    """
+    "Contas que valem revisão" (Roadmap "Rumo à Nota 9", Fase 2) —
+    achado da Auditoria UX: risco MÉDIO de glosa hoje só existe como
+    contagem agregada no donut de distribuição (denial-risk-distribution),
+    nunca como lista navegável — só o risco ALTO vira fila acionável (ver
+    /high-risk acima). Mesmo envelope de paginação, endpoint separado de
+    propósito: nunca misturar as duas filas, uma é bloqueante e a outra
+    é preventiva.
+    """
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    return await _build_service(db).list_medium_risk_paginated(
+        limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+    )
+
+
 @router.post("/{billing_id}/settle", response_model=BillingResponse)
 async def settle_billing(
     billing_id: UUID,

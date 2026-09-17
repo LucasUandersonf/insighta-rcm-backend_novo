@@ -1208,6 +1208,50 @@ async def test_agenda_metrics_lists_upcoming_risk_appointments_soonest_first(cli
     assert "Paciente Sem Histórico" not in names  # indeterminado nunca entra na lista
 
 
+async def test_upcoming_risk_appointments_endpoint_paginates_the_full_list(client, auth_headers_a, admin_engine, tenant_a):
+    """Tela "Agenda de risco" (Roadmap "Rumo à Nota 9", Fase 2) — mesmo
+    critério de risco do card acima, mas paginado e sem o teto de 6 do
+    card resumido: precisa devolver a lista NOMINAL inteira, com total."""
+    patients = []
+    for i in range(3):
+        patient = (await client.post("/api/v1/patients", json={"full_name": f"Paciente Risco {i}"}, headers=auth_headers_a)).json()
+        patients.append(patient)
+        async with admin_engine.begin() as conn:
+            for j in range(3):
+                await conn.execute(
+                    text(
+                        "INSERT INTO core.appointments (tenant_id, patient_id, scheduled_at, status) "
+                        "VALUES (:t, :p, :dt, 'no_show')"
+                    ),
+                    {"t": tenant_a, "p": patient["id"], "dt": datetime.now(timezone.utc) - timedelta(days=30 + j)},
+                )
+        resp = await client.post(
+            "/api/v1/appointments",
+            json={
+                "patient_id": patient["id"],
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=i + 1)).isoformat(),
+                "procedure_code": "10101012",
+                "cid_code": "Z00.0",
+            },
+            headers=auth_headers_a,
+        )
+        assert resp.status_code == 201
+
+    first_page = await client.get("/api/v1/analytics/upcoming-risk-appointments?limit=2&offset=0", headers=auth_headers_a)
+    assert first_page.status_code == 200
+    body = first_page.json()
+    assert body["total"] == 3
+    assert len(body["items"]) == 2
+    assert body["items"][0]["patient_full_name"] == "Paciente Risco 0"
+    # Ficha do Paciente (Fase 4) — cada linha precisa do patient_id, não
+    # só do nome, pra linkar pra GET /patients/{id}/ficha.
+    assert body["items"][0]["patient_id"] == patients[0]["id"]
+
+    second_page = await client.get("/api/v1/analytics/upcoming-risk-appointments?limit=2&offset=2", headers=auth_headers_a)
+    assert len(second_page.json()["items"]) == 1
+    assert second_page.json()["items"][0]["patient_full_name"] == "Paciente Risco 2"
+
+
 async def test_denial_risk_distribution_counts_by_level(client, auth_headers_a, admin_engine, tenant_a):
     """Donut 'Distribuição de risco de glosa' do Painel: CONTA
     faturamentos por nível (não soma valor, ver denial_risk_value_breakdown

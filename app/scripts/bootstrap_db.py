@@ -257,6 +257,16 @@ _POST_UPGRADE_SQL_FILES = [
     # INDEX IF NOT EXISTS — auto-idempotente, roda em todo deploy, sem
     # entrar em _POST_UPGRADE_MARKER_TABLE.
     "037_billing_glosa_hardening.sql",
+    # Resumo executivo narrado por IA — core.executive_narratives (RLS
+    # normal, dado da clínica — ver DECISÃO no próprio .sql). CREATE
+    # TABLE sem IF NOT EXISTS — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE).
+    "038_executive_narratives.sql",
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+    # core.tracked_alerts (RLS normal, dado da clínica — ver DECISÃO no
+    # próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa do
+    # marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "039_tracked_alerts.sql",
     # Plano Diretor Insighta, épicos F1.2 (ciclo fechado de insight) +
     # F1.3 (atribuição/workflow), mesma tabela — ver DECISÃO completa no
     # próprio .sql. TABLE sem IF NOT EXISTS — precisa do marcador (ver
@@ -539,6 +549,8 @@ _POST_UPGRADE_MARKER_TABLE = {
     "028_webhook_delivery_queue.sql": "webhook_delivery_queue",
     "029_platform_users.sql": "platform_users",
     "034_health_score_snapshots.sql": "health_score_snapshots",
+    "038_executive_narratives.sql": "executive_narratives",
+    "039_tracked_alerts.sql": "tracked_alerts",
     "038_insight_outcomes.sql": "insight_outcomes",
     "039_cost_entries.sql": "cost_entries",
     "047_professional_planned_absences.sql": "professional_planned_absences",

@@ -36,6 +36,7 @@ from app.repositories.capacity_repository import CapacityRepository
 from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.insight_outcome_repository import InsightOutcomeRepository
@@ -45,6 +46,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
 from app.services.analytics_service import AnalyticsService
 from app.worker.active_tenants import list_active_tenants
 
@@ -77,6 +79,8 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             TenantRepository(session),
             HealthScoreSnapshotRepository(session),
             LoteRepository(session),
+            ExecutiveNarrativeRepository(session),
+            TrackedAlertRepository(session),
             ContractRepository(session),
             CostEntryRepository(session),
             InsightOutcomeRepository(session),

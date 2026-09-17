@@ -128,6 +128,8 @@ _SCHEMA_FILES = [
     "035_glosa_ingestion.sql",
     "036_billing_appointment_extended_fields.sql",
     "037_billing_glosa_hardening.sql",
+    "038_executive_narratives.sql",
+    "039_tracked_alerts.sql",
     "038_insight_outcomes.sql",
     "039_cost_entries.sql",
     "040_tenant_calibration_fields.sql",

@@ -339,6 +339,44 @@ async def test_list_high_risk_billing_filters_by_insurance_plan_id(client, auth_
     assert body["items"][0]["charged_value"] == 150.0
 
 
+async def test_medium_risk_billing_lives_in_its_own_queue_never_mixed_with_high_risk(client, auth_headers_a, admin_engine, tenant_a):
+    """"Contas que valem revisão" (Roadmap "Rumo à Nota 9", Fase 2) —
+    convênio sem tabela de preço cadastrada (nenhum contrato) vira risco
+    MÉDIO (no_contract_reference), não alto: precisa aparecer em
+    /billing/medium-risk e NUNCA em /billing/high-risk, mesmo os dois
+    endpoints olhando pra mesma tabela."""
+    plan_id = await _create_insurance_plan(admin_engine, tenant_a)
+    # Sem _create_contract de propósito — é exatamente essa ausência de
+    # tabela de preço que o motor classifica como risco médio.
+
+    patient_resp = await client.post("/api/v1/patients", json={"full_name": "Paciente Risco Médio"}, headers=auth_headers_a)
+    appt = await client.post(
+        "/api/v1/appointments",
+        json={
+            "patient_id": patient_resp.json()["id"],
+            "insurance_plan_id": plan_id,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "procedure_code": "10101012",
+            "cid_code": "J06",  # CID e procedimento presentes -> nenhum achado de severidade alta
+        },
+        headers=auth_headers_a,
+    )
+    billing = await client.post(
+        "/api/v1/billing",
+        json={"appointment_id": appt.json()["id"], "insurance_plan_id": plan_id, "charged_value": 150.0},
+        headers=auth_headers_a,
+    )
+    assert billing.json()["denial_risk_level"] == "medium"
+
+    medium_risk = await client.get("/api/v1/billing/medium-risk", headers=auth_headers_a)
+    assert medium_risk.status_code == 200
+    assert medium_risk.json()["total"] == 1
+    assert medium_risk.json()["items"][0]["id"] == billing.json()["id"]
+
+    high_risk = await client.get("/api/v1/billing/high-risk", headers=auth_headers_a)
+    assert high_risk.json()["total"] == 0
+
+
 # Achados 10/11 da Auditoria de Templates e Insights: BillingCreateRequest
 # (endpoint manual, POST /billing) grava as MESMAS colunas
 # (member_card_number/item_type) que o Template de Faturamento (ingestão

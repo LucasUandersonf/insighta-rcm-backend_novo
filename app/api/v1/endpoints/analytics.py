@@ -20,6 +20,7 @@ from app.repositories.contract_price_benchmark_repository import ContractPriceBe
 from app.repositories.contract_repository import ContractRepository
 from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
+from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
 from app.repositories.ingestion_repository import IngestionRepository
 from app.repositories.lote_repository import LoteRepository
@@ -31,6 +32,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaPlanPriorityResponse,
@@ -39,10 +41,12 @@ from app.schemas.analytics import (
     DailySummaryResponse,
     CapitalDecisionBaseDataResponse,
     ContractUtilizationResponse,
+    CrmSummaryResponse,
     DataFreshnessResponse,
     DataQualityResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
+    ExecutiveNarrativeResponse,
     ExecutiveSummaryResponse,
     FinancialHoleBillingsResponse,
     HealthScoreResponse,
@@ -64,8 +68,10 @@ from app.schemas.analytics import (
     RfmResponse,
     SatisfactionSummaryResponse,
     SmartInsightsResponse,
+    UpcomingRiskAppointmentItem,
     UpsellFunnelResponse,
 )
+from app.schemas.pagination import PaginatedResponse
 from app.services.analytics_service import AnalyticsService
 from app.services.network_benchmark_service import NetworkBenchmarkService
 from app.services.oportunidades_service import OportunidadesService
@@ -113,6 +119,8 @@ def _build_service(db: DbSession) -> AnalyticsService:
         TenantRepository(db),
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
+        ExecutiveNarrativeRepository(db),
+        TrackedAlertRepository(db),
         ContractRepository(db),
         CostEntryRepository(db),
         InsightOutcomeRepository(db),
@@ -141,6 +149,25 @@ async def get_agenda_metrics(
 ) -> AgendaMetricsResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_agenda_metrics(start, end)
+
+
+@router.get("/upcoming-risk-appointments", response_model=PaginatedResponse[UpcomingRiskAppointmentItem])
+async def list_upcoming_risk_appointments(
+    db: DbSession,
+    limit: int = 20,
+    offset: int = 0,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PaginatedResponse[UpcomingRiskAppointmentItem]:
+    """
+    Tela "Agenda de risco" (Painel → Agenda) — Roadmap "Rumo à Nota 9"
+    (Fase 2). Lista completa e paginada de agendamentos futuros com risco
+    médio/alto de falta — o card da Sala de Comando (dentro de
+    agenda-metrics) só mostra uma prévia de 6; aqui é a lista inteira,
+    mesmo envelope de paginação de /billing/high-risk.
+    """
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    return await _build_service(db).list_upcoming_risk_appointments(limit=limit, offset=offset)
 
 
 @router.get("/smart-insights", response_model=SmartInsightsResponse)
@@ -331,6 +358,18 @@ async def get_inactive_patients(
     return await _build_service(db).get_inactive_patients()
 
 
+@router.get("/crm-summary", response_model=CrmSummaryResponse)
+async def get_crm_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> CrmSummaryResponse:
+    """
+    Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — idade média da carteira,
+    dias médios desde a última visita e taxa de retorno. Sem
+    date_from/date_to (mesmo espírito de inactive-patients acima): é
+    sempre o estado atual da carteira inteira, não uma janela de período.
+    """
+    return await _build_service(db).get_crm_summary()
 @router.get("/daily-summary", response_model=DailySummaryResponse)
 async def get_daily_summary(
     db: DbSession,
@@ -595,6 +634,22 @@ async def get_agenda_revenue_forecast(
     """
     start, end = _default_future_period(date_from, date_to)
     return await _build_service(db).get_agenda_revenue_forecast(start, end)
+
+
+@router.get("/executive-narrative", response_model=ExecutiveNarrativeResponse)
+async def get_executive_narrative(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> ExecutiveNarrativeResponse:
+    """
+    Resumo executivo narrado por IA (Sala de Comando) — "o Jarvis pegando
+    os cálculos e transformando em texto explicativo", pedido direto do
+    usuário. Sem date_from/date_to: janela sempre fixa de 7 dias (ver
+    DECISÃO em AnalyticsService.get_executive_narrative), cache 1x/dia.
+    `narrative` vem `None` quando a IA não está configurada ou a geração
+    falhou — nunca quebra a tela por causa disso.
+    """
+    return await _build_service(db).get_executive_narrative(current_user.tenant_id)
 
 
 @router.get("/denial-reason-confirmation", response_model=DenialReasonConfirmationResponse)

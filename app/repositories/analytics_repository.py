@@ -822,6 +822,63 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
+    async def upcoming_risk_appointments_paginated(
+        self,
+        *,
+        as_of: datetime,
+        min_level: tuple[str, ...] = ("medio", "alto"),
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        Versão paginada de `upcoming_risk_appointments` — Roadmap "Rumo à
+        Nota 9" (Fase 2, achado da Auditoria UX: "o insight de agenda tem
+        CONTAGEM, não LISTA"). O card da Sala de Comando continua usando
+        o método acima (top 6, sem contagem total — não precisa disso pra
+        uma prévia). Esta versão alimenta a tela dedicada "Agenda de
+        risco" (Painel → Agenda): mesma consulta, mesmo critério de nível
+        mínimo, agora com offset + contagem total (mesmo padrão de
+        BillingRepository.list_high_risk_paginated). Inclui o nome do
+        profissional (LEFT JOIN — agendamento pode não ter profissional
+        vinculado) para a tela poder mostrar "quem" além de "quando", e o
+        `patient_id` (não devolvido pela versão resumida acima) — a
+        linha desta tela linka pra Ficha do Paciente (Fase 4), que
+        precisa do id, não só do nome.
+        """
+        base_from = """
+            FROM core.appointments a
+            JOIN core.patients p ON p.id = a.patient_id
+            LEFT JOIN core.professionals prof ON prof.id = a.professional_id
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :as_of
+              AND a.no_show_risk_level = ANY(:levels)
+        """
+        params = {"as_of": as_of, "levels": list(min_level)}
+        total = (
+            await self.session.execute(text(f"SELECT COUNT(*) {base_from}"), params)
+        ).scalar_one()
+        stmt = text(
+            f"""
+            SELECT a.id, p.full_name, a.scheduled_at, a.no_show_risk_level, prof.full_name, a.patient_id
+            {base_from}
+            ORDER BY a.scheduled_at ASC
+            LIMIT :limit OFFSET :offset
+            """
+        )
+        result = await self.session.execute(stmt, {**params, "limit": limit, "offset": offset})
+        items = [
+            {
+                "appointment_id": row[0],
+                "patient_full_name": row[1],
+                "scheduled_at": row[2],
+                "risk_level": row[3],
+                "professional_name": row[4],
+                "patient_id": row[5],
+            }
+            for row in result.all()
+        ]
+        return items, total
+
     async def upcoming_risk_count_by_weekday(self, *, as_of: datetime) -> dict[int, int]:
         """
         Mesmo filtro de `upcoming_risk_appointments` (agendamento futuro,
@@ -1555,6 +1612,72 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
+
+    async def crm_summary(self) -> dict:
+        """
+        Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — resposta direta ao
+        que o usuário apontou faltar: "ninguém sabe a média de idade dos
+        pacientes, ninguém sabe quanto tempo os pacientes estão sem ir à
+        unidade". Três números, cada um só calculado sobre quem tem o
+        dado preenchido (nunca finge amostra que não existe):
+
+        - Idade média: só pacientes com `birth_date` preenchido (campo
+          opcional no cadastro).
+        - Dias médios desde a última visita: só pacientes com pelo menos
+          1 atendimento — mesma base de `list_inactive_patients`, mas
+          SEM o corte de 365 dias (aqui é a média de TODOS, não só os
+          inativos).
+        - Taxa de retorno: fração de atendimentos com `visit_type =
+          'retorno'` entre os que têm `visit_type` preenchido (campo
+          novo do Template de Agenda, nem todo ERP de origem distingue
+          isso) — "retorno" é sinal de que o paciente confia na
+          continuidade do tratamento, não só voltou por acaso.
+        """
+        avg_age_years = (
+            await self.session.execute(
+                text(
+                    "SELECT AVG(EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_date))) "
+                    "FROM core.patients WHERE birth_date IS NOT NULL"
+                )
+            )
+        ).scalar_one()
+
+        avg_days_since_last_visit = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT AVG(EXTRACT(EPOCH FROM (now() - last_appointment_at)) / 86400.0)
+                    FROM (
+                        SELECT MAX(scheduled_at) AS last_appointment_at
+                        FROM core.appointments
+                        GROUP BY patient_id
+                    ) per_patient
+                    """
+                )
+            )
+        ).scalar_one()
+
+        return_rate_row = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE visit_type = 'retorno') AS return_count,
+                        COUNT(*) AS classified_count
+                    FROM core.appointments
+                    WHERE visit_type IS NOT NULL
+                    """
+                )
+            )
+        ).mappings().one()
+
+        classified_count = return_rate_row["classified_count"]
+        return {
+            "avg_patient_age_years": float(avg_age_years) if avg_age_years is not None else None,
+            "avg_days_since_last_visit": float(avg_days_since_last_visit) if avg_days_since_last_visit is not None else None,
+            "return_rate": (return_rate_row["return_count"] / classified_count) if classified_count > 0 else None,
+            "return_rate_sample_size": classified_count,
+        }
 
     # Raio-X da Receita, frente "Prevendo movimentos": `inactive_patients_count`
     # acima só avisa quem sumiu há mais de 1 ano — um alerta TARDIO, depois

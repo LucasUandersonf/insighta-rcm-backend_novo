@@ -222,6 +222,16 @@ class UpcomingRiskAppointmentItem(BaseModel):
     patient_full_name: str
     scheduled_at: datetime
     risk_level: str  # "medio" | "alto"
+    # Tela "Agenda de risco" (Roadmap "Rumo à Nota 9", Fase 2) — None no
+    # card resumido de sempre (ver AnalyticsService.get_agenda_metrics,
+    # que não busca isso), preenchido só na versão paginada
+    # (AnalyticsRepository.upcoming_risk_appointments_paginated), já que
+    # o agendamento pode não ter profissional vinculado.
+    professional_name: str | None = None
+    # Ficha do Paciente (Fase 4) — None no card resumido (mesmo motivo de
+    # professional_name acima); a tela dedicada usa isto pra linkar cada
+    # linha pra GET /patients/{id}/ficha, não só mostrar o nome.
+    patient_id: UUID | None = None
 
 
 class AgendaMetricsResponse(BaseModel):
@@ -758,6 +768,17 @@ class InactivePatientsResponse(BaseModel):
     inactive_after_days: int
 
 
+class CrmSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/crm-summary — aba CRM (Roadmap "Rumo à
+    Nota 9", Fase 5). Ver DECISÃO completa em
+    AnalyticsRepository.crm_summary. Cada campo é None quando não há
+    amostra pra calculá-lo (nunca inventa um número sobre base zero,
+    mesmo princípio do resto do produto)."""
+
+    avg_patient_age_years: float | None
+    avg_days_since_last_visit: float | None
+    return_rate: float | None  # fração 0.0-1.0
+    return_rate_sample_size: int
 # Gaps Dossiê Insighta RCM, item 4 — RFM completo (Recência, Frequência,
 # Valor). Recência e Frequência já existiam espalhadas em outras
 # features (InactivePatientsResponse, patient_value_engine); Valor era a
@@ -916,6 +937,39 @@ class FinancialHoleBillingsResponse(BaseModel):
     offset: int
 
 
+class ExecutiveNarrativeResponse(BaseModel):
+    """GET /api/v1/analytics/executive-narrative — Sala de Comando: o
+    resumo dos KPIs/insights do período em prosa, escrito por IA (ver
+    DECISÃO completa em app/services/executive_narrative_service.py).
+
+    `narrative` é `None` quando a IA não está configurada
+    (ANTHROPIC_API_KEY ausente) ou a geração falhou — degradação
+    graciosa, nunca quebra a Sala de Comando por causa disso (mesmo
+    princípio de SENTRY_DSN/SMTP ausentes no resto do produto).
+    `period_start`/`period_end` são sempre os últimos 7 dias fechados
+    (ver DECISÃO no service — fixo, independente do seletor de período
+    da tela, mesmo espírito de health-score), presentes mesmo quando
+    `narrative` é `None` para a UI poder dizer "sobre qual janela".
+
+    `top_priorities` — Home estilo Jarvis (Roadmap "Rumo à Nota 9",
+    Fase 1): até 3 insights, já ranqueados por generate_insights (mesma
+    ordem de prioridade que decide a manchete da Sala de Comando),
+    presentes mesmo quando `narrative` é `None` — a Home não depende da
+    IA estar disponível pra mostrar prioridades acionáveis.
+
+    `recently_resolved` — memória contínua dia-a-dia (Fase 3): títulos de
+    situações que a memória contínua (TrackedAlertRepository) detectou
+    como resolvidas HOJE. Presente mesmo quando `narrative` é `None`
+    (Avaliação Home/Sala de Comando, Achado 3) — antes só entrava no
+    prompt da IA, dependendo dela decidir mencionar; agora o frontend
+    pode mostrar um selo determinístico independente do texto gerado."""
+
+    period_start: date
+    period_end: date
+    narrative: str | None
+    generated_at: datetime | None
+    top_priorities: list[SmartInsightResponse] = []
+    recently_resolved: list[str] = []
 class ProfessionalProfitabilityItem(BaseModel):
     """Uma linha de rentabilidade por profissional — Raio-X da Receita,
     frente "Gestão eficiente" (ver DECISÃO completa em
