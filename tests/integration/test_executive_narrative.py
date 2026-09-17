@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import text
 
 from app.services import executive_narrative_service as narrative_module
+from tests.integration.test_analytics import _seed_revenue_leak_billing
 
 
 async def test_executive_narrative_is_none_when_ai_not_configured(client, auth_headers_a):
@@ -26,6 +27,28 @@ async def test_executive_narrative_is_none_when_ai_not_configured(client, auth_h
     assert body["narrative"] is None
     assert body["period_start"] is not None
     assert body["period_end"] is not None
+    assert body["top_priorities"] == []
+
+
+async def test_executive_narrative_exposes_top_priorities_for_the_home_briefing(
+    client, auth_headers_a, admin_engine, tenant_a
+):
+    """Home estilo Jarvis (Roadmap "Rumo à Nota 9", Fase 1): a Home não
+    repete o feed inteiro de insights, só as prioridades — mesmo dado que
+    a Sala de Comando já calcula (ver AnalyticsService.get_smart_insights),
+    exposto aqui pra a Home não precisar de outra chamada nem de outro
+    ranking. `_seed_revenue_leak_billing` grava a fatura com created_at =
+    agora, dentro da janela fixa de 7 dias da narrativa."""
+    await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=300.0, charged_value=250.0)
+
+    response = await client.get("/api/v1/analytics/executive-narrative", headers=auth_headers_a)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["top_priorities"]) <= 3
+    assert any(
+        p["title"] == "Você está cobrando menos do que devia de alguns convênios" and p["financial_impact"] == 50.0
+        for p in body["top_priorities"]
+    )
 
 
 @pytest.fixture

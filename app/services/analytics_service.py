@@ -105,6 +105,11 @@ logger = logging.getLogger("analytics_service")
 # seletor de período da tela, pra narrativa não mudar de assunto toda
 # vez que o gestor troca o filtro.
 _EXECUTIVE_NARRATIVE_WINDOW_DAYS = 7
+# Home estilo Jarvis (Roadmap "Rumo à Nota 9", Fase 1) — no máximo 3
+# prioridades, nunca a lista inteira de insights: a Home existe
+# justamente pra responder "por onde eu começo", não pra repetir o feed
+# completo que já vive na Sala de Comando.
+_EXECUTIVE_BRIEFING_MAX_PRIORITIES = 3
 
 # Janela FIXA da Nota de Saúde Financeira — de propósito independente do
 # seletor de período da Sala de Comando (que pode ser 7 dias). Um score
@@ -1143,6 +1148,18 @@ class AnalyticsService:
         period_end = today
         period_start = today - timedelta(days=_EXECUTIVE_NARRATIVE_WINDOW_DAYS - 1)
 
+        # Prioridades da Home (Roadmap "Rumo à Nota 9", Fase 1): mesma
+        # janela e mesma chamada que já alimentava só o texto da IA (ver
+        # `insight_lines` abaixo) — reaproveitada aqui para expor os
+        # insights, já ranqueados por generate_insights (impacto
+        # financeiro, depois severidade). Recalculado a CADA request,
+        # mesmo quando a narrativa em si vem do cache diário: é uma
+        # agregação determinística (sem custo de IA), então as prioridades
+        # ficam sempre atuais mesmo num dia em que o texto já foi gerado
+        # de manhã e os dados mudaram à tarde.
+        insights = await self.get_smart_insights(period_start, period_end, tenant_id=tenant_id)
+        top_priorities = insights.insights[:_EXECUTIVE_BRIEFING_MAX_PRIORITIES]
+
         cached = await self.narrative_repo.get_for_date(today)
         if cached is not None:
             return ExecutiveNarrativeResponse(
@@ -1150,11 +1167,11 @@ class AnalyticsService:
                 period_end=cached.period_end,
                 narrative=cached.narrative_text,
                 generated_at=None,
+                top_priorities=top_priorities,
             )
 
         try:
             summary = await self.get_executive_summary(period_start, period_end)
-            insights = await self.get_smart_insights(period_start, period_end, tenant_id=tenant_id)
             facts = NarrativeFacts(
                 period_start=period_start,
                 period_end=period_end,
@@ -1170,7 +1187,11 @@ class AnalyticsService:
         except NarrativeGenerationError as exc:
             logger.warning("Resumo executivo narrado indisponível para tenant %s: %s", tenant_id, exc)
             return ExecutiveNarrativeResponse(
-                period_start=period_start, period_end=period_end, narrative=None, generated_at=None
+                period_start=period_start,
+                period_end=period_end,
+                narrative=None,
+                generated_at=None,
+                top_priorities=top_priorities,
             )
 
         await self.narrative_repo.upsert(
@@ -1186,4 +1207,5 @@ class AnalyticsService:
             period_end=period_end,
             narrative=narrative_text,
             generated_at=datetime.now(timezone.utc),
+            top_priorities=top_priorities,
         )

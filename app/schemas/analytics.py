@@ -555,9 +555,16 @@ class ExecutiveNarrativeResponse(BaseModel):
     `period_start`/`period_end` são sempre os últimos 7 dias fechados
     (ver DECISÃO no service — fixo, independente do seletor de período
     da tela, mesmo espírito de health-score), presentes mesmo quando
-    `narrative` é `None` para a UI poder dizer "sobre qual janela"."""
+    `narrative` é `None` para a UI poder dizer "sobre qual janela".
+
+    `top_priorities` — Home estilo Jarvis (Roadmap "Rumo à Nota 9",
+    Fase 1): até 3 insights, já ranqueados por generate_insights (mesma
+    ordem de prioridade que decide a manchete da Sala de Comando),
+    presentes mesmo quando `narrative` é `None` — a Home não depende da
+    IA estar disponível pra mostrar prioridades acionáveis."""
 
     period_start: date
     period_end: date
     narrative: str | None
     generated_at: datetime | None
+    top_priorities: list[SmartInsightResponse] = []
