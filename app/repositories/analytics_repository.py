@@ -1142,6 +1142,72 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return [(str(patient_id), full_name, last_appointment_at) for patient_id, full_name, last_appointment_at in result.all()]
 
+    async def crm_summary(self) -> dict:
+        """
+        Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — resposta direta ao
+        que o usuário apontou faltar: "ninguém sabe a média de idade dos
+        pacientes, ninguém sabe quanto tempo os pacientes estão sem ir à
+        unidade". Três números, cada um só calculado sobre quem tem o
+        dado preenchido (nunca finge amostra que não existe):
+
+        - Idade média: só pacientes com `birth_date` preenchido (campo
+          opcional no cadastro).
+        - Dias médios desde a última visita: só pacientes com pelo menos
+          1 atendimento — mesma base de `list_inactive_patients`, mas
+          SEM o corte de 365 dias (aqui é a média de TODOS, não só os
+          inativos).
+        - Taxa de retorno: fração de atendimentos com `visit_type =
+          'retorno'` entre os que têm `visit_type` preenchido (campo
+          novo do Template de Agenda, nem todo ERP de origem distingue
+          isso) — "retorno" é sinal de que o paciente confia na
+          continuidade do tratamento, não só voltou por acaso.
+        """
+        avg_age_years = (
+            await self.session.execute(
+                text(
+                    "SELECT AVG(EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_date))) "
+                    "FROM core.patients WHERE birth_date IS NOT NULL"
+                )
+            )
+        ).scalar_one()
+
+        avg_days_since_last_visit = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT AVG(EXTRACT(EPOCH FROM (now() - last_appointment_at)) / 86400.0)
+                    FROM (
+                        SELECT MAX(scheduled_at) AS last_appointment_at
+                        FROM core.appointments
+                        GROUP BY patient_id
+                    ) per_patient
+                    """
+                )
+            )
+        ).scalar_one()
+
+        return_rate_row = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE visit_type = 'retorno') AS return_count,
+                        COUNT(*) AS classified_count
+                    FROM core.appointments
+                    WHERE visit_type IS NOT NULL
+                    """
+                )
+            )
+        ).mappings().one()
+
+        classified_count = return_rate_row["classified_count"]
+        return {
+            "avg_patient_age_years": float(avg_age_years) if avg_age_years is not None else None,
+            "avg_days_since_last_visit": float(avg_days_since_last_visit) if avg_days_since_last_visit is not None else None,
+            "return_rate": (return_rate_row["return_count"] / classified_count) if classified_count > 0 else None,
+            "return_rate_sample_size": classified_count,
+        }
+
     def _recall_candidates_last_appointment(self, as_of: datetime, weekday: int | None, professional_id: uuid.UUID | None):
         """
         Base compartilhada de list_recall_candidates/count_recall_candidates

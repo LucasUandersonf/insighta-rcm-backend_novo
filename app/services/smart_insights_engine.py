@@ -1119,8 +1119,13 @@ def _annual_goal_insight(current: InsightsPeriodInput) -> Insight | None:
         # AnalyticsRepository.list_inactive_patients e
         # InactivePatientsPanel.tsx (frontend). Sem lista pra mostrar,
         # sem botão — nunca um link pra uma seção vazia.
+        #
+        # Roadmap "Rumo à Nota 9" (Fase 5) — Carteira de Inativos saiu do
+        # Diagnóstico e virou o conteúdo principal da aba CRM dedicada;
+        # o destino agora troca de aba ("#tab:crm"), não rola mais até
+        # uma seção dentro do Diagnóstico.
         action_label="Ver quem não voltou" if current.inactive_patients_count > 0 else None,
-        action_href="#carteira-inativa" if current.inactive_patients_count > 0 else None,
+        action_href="#tab:crm" if current.inactive_patients_count > 0 else None,
         financial_impact=expected_by_now - current.ytd_billed_total,
     )
 

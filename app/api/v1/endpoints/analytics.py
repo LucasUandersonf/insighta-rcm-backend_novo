@@ -31,6 +31,7 @@ from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
     ContractUtilizationResponse,
+    CrmSummaryResponse,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionResponse,
     ExecutiveNarrativeResponse,
@@ -192,6 +193,20 @@ async def get_inactive_patients(
     janela de período.
     """
     return await _build_service(db).get_inactive_patients()
+
+
+@router.get("/crm-summary", response_model=CrmSummaryResponse)
+async def get_crm_summary(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> CrmSummaryResponse:
+    """
+    Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — idade média da carteira,
+    dias médios desde a última visita e taxa de retorno. Sem
+    date_from/date_to (mesmo espírito de inactive-patients acima): é
+    sempre o estado atual da carteira inteira, não uma janela de período.
+    """
+    return await _build_service(db).get_crm_summary()
 
 
 @router.get("/recall-candidates", response_model=RecallCandidatesResponse)

@@ -41,6 +41,7 @@ from app.schemas.analytics import (
     AgendaRevenueForecastResponse,
     ContractUtilizationItem,
     ContractUtilizationResponse,
+    CrmSummaryResponse,
     DenialReasonConfirmationItem,
     DenialReasonConfirmationResponse,
     DenialRiskDistributionItem,
@@ -1044,6 +1045,12 @@ class AnalyticsService:
             total_count=total_count,
             inactive_after_days=_INACTIVE_PATIENT_AFTER_DAYS,
         )
+
+    async def get_crm_summary(self) -> CrmSummaryResponse:
+        """Aba CRM (Roadmap "Rumo à Nota 9", Fase 5) — ver DECISÃO
+        completa em AnalyticsRepository.crm_summary."""
+        row = await self.analytics_repo.crm_summary()
+        return CrmSummaryResponse(**row)
 
     async def get_recall_candidates(
         self, *, weekday: int | None = None, professional_id: str | None = None, limit: int = 15

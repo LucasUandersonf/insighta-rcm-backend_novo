@@ -884,10 +884,12 @@ def test_annual_goal_insight_has_action_pointing_to_inactive_patients_when_prese
     )
     insights = generate_insights(current, _EMPTY_PERIOD)
     assert insights[0].action_label == "Ver quem não voltou"
-    assert insights[0].action_href == "#carteira-inativa"
+    # Roadmap "Rumo à Nota 9" (Fase 5) — Carteira de Inativos agora mora
+    # na aba CRM dedicada, não numa seção do Diagnóstico.
+    assert insights[0].action_href == "#tab:crm"
     # Categoria é faturamento (meta de faturamento anual) mesmo o botão
-    # apontando pra uma seção de Agenda — categoria segue o QUE o
-    # insight mede, não pra onde o botão leva.
+    # apontando pra uma aba de CRM — categoria segue o QUE o insight
+    # mede, não pra onde o botão leva.
     assert insights[0].category == "faturamento"
 
 

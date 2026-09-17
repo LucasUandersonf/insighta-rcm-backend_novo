@@ -480,6 +480,19 @@ class InactivePatientsResponse(BaseModel):
     inactive_after_days: int
 
 
+class CrmSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/crm-summary — aba CRM (Roadmap "Rumo à
+    Nota 9", Fase 5). Ver DECISÃO completa em
+    AnalyticsRepository.crm_summary. Cada campo é None quando não há
+    amostra pra calculá-lo (nunca inventa um número sobre base zero,
+    mesmo princípio do resto do produto)."""
+
+    avg_patient_age_years: float | None
+    avg_days_since_last_visit: float | None
+    return_rate: float | None  # fração 0.0-1.0
+    return_rate_sample_size: int
+
+
 class RecallCandidateItem(BaseModel):
     """Uma linha de "candidato a recontato" — ver DECISÃO em
     AnalyticsRepository._recall_candidates_last_appointment. Diferente de
