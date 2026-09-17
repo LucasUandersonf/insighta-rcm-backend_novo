@@ -104,3 +104,42 @@ async def test_executive_narrative_mentions_a_recently_resolved_situation(
     assert len(captured_prompts) == 2
     assert "Situações que estavam sinalizadas e foram corrigidas desde a última checagem:" in captured_prompts[1]
     assert "Você está cobrando menos do que devia de alguns convênios" in captured_prompts[1]
+    # Avaliação Home/Sala de Comando, Achado 3 — o dado tem que estar
+    # exposto no schema também, não só embutido no prompt da IA.
+    assert second_narrative.json()["recently_resolved"] == ["Você está cobrando menos do que devia de alguns convênios"]
+
+
+async def test_recently_resolved_is_exposed_even_when_narrative_comes_from_cache(
+    client, auth_headers_a, admin_engine, tenant_a, monkeypatch
+):
+    """Achado 3 da Avaliação Home/Sala de Comando: antes, uma correção
+    feita DEPOIS da narrativa já ter sido gerada hoje só apareceria na IA
+    no dia seguinte — mas o frontend não tinha como saber "isto foi
+    corrigido" sem depender do texto. `recently_resolved` precisa vir
+    atualizado mesmo quando `narrative` é servido do cache diário."""
+    from app.services import executive_narrative_service as narrative_module
+
+    monkeypatch.setattr(narrative_module.settings, "ANTHROPIC_API_KEY", "fake-key-de-teste")
+
+    async def _fake_generate(self, facts_text: str) -> str:
+        return "Resumo de teste."
+
+    monkeypatch.setattr(narrative_module.AnthropicNarrativeGenerator, "generate", _fake_generate)
+
+    billing = await _seed_revenue_leak_billing(client, admin_engine, tenant_a, auth_headers_a, agreed_value=300.0, charged_value=250.0)
+
+    # Gera e cacheia a narrativa de hoje, com a situação ainda ativa.
+    first = await client.get("/api/v1/analytics/executive-narrative", headers=auth_headers_a)
+    assert first.json()["recently_resolved"] == []
+    cached_narrative_text = first.json()["narrative"]
+
+    # Corrige a causa DEPOIS da narrativa já ter sido cacheada — sem
+    # apagar o cache (diferente do outro teste): o texto servido de volta
+    # continua sendo o de mais cedo, mas o dado de "resolvido hoje" não
+    # pode ficar preso a esse cache.
+    async with admin_engine.begin() as conn:
+        await conn.execute(text("UPDATE core.billing SET charged_value = 300.0 WHERE id = :id"), {"id": billing["id"]})
+
+    second = await client.get("/api/v1/analytics/executive-narrative", headers=auth_headers_a)
+    assert second.json()["narrative"] == cached_narrative_text  # veio do cache, texto igual
+    assert second.json()["recently_resolved"] == ["Você está cobrando menos do que devia de alguns convênios"]

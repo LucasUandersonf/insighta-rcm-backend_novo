@@ -28,6 +28,7 @@ async def test_executive_narrative_is_none_when_ai_not_configured(client, auth_h
     assert body["period_start"] is not None
     assert body["period_end"] is not None
     assert body["top_priorities"] == []
+    assert body["recently_resolved"] == []
 
 
 async def test_executive_narrative_exposes_top_priorities_for_the_home_briefing(

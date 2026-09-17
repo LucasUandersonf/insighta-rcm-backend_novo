@@ -584,10 +584,18 @@ class ExecutiveNarrativeResponse(BaseModel):
     Fase 1): até 3 insights, já ranqueados por generate_insights (mesma
     ordem de prioridade que decide a manchete da Sala de Comando),
     presentes mesmo quando `narrative` é `None` — a Home não depende da
-    IA estar disponível pra mostrar prioridades acionáveis."""
+    IA estar disponível pra mostrar prioridades acionáveis.
+
+    `recently_resolved` — memória contínua dia-a-dia (Fase 3): títulos de
+    situações que a memória contínua (TrackedAlertRepository) detectou
+    como resolvidas HOJE. Presente mesmo quando `narrative` é `None`
+    (Avaliação Home/Sala de Comando, Achado 3) — antes só entrava no
+    prompt da IA, dependendo dela decidir mencionar; agora o frontend
+    pode mostrar um selo determinístico independente do texto gerado."""
 
     period_start: date
     period_end: date
     narrative: str | None
     generated_at: datetime | None
     top_priorities: list[SmartInsightResponse] = []
+    recently_resolved: list[str] = []

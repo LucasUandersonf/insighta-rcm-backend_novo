@@ -1217,6 +1217,20 @@ class AnalyticsService:
         insights = await self.get_smart_insights(period_start, period_end, tenant_id=tenant_id)
         top_priorities = insights.insights[:_EXECUTIVE_BRIEFING_MAX_PRIORITIES]
 
+        # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+        # a chamada a get_smart_insights logo acima já rodou o sync de
+        # hoje (side effect, ver DECISÃO em TrackedAlertRepository.sync),
+        # possivelmente numa visita ANTERIOR à Sala de Comando neste
+        # mesmo dia. Por isso lê "tudo resolvido hoje" de volta do banco
+        # (get_resolved_on) em vez de confiar no retorno de sync() — e
+        # SEMPRE, independente de cache hit/miss/falha de IA (Avaliação
+        # Home/Sala de Comando, Achado 3): antes isso só entrava no
+        # prompt da IA, então a única forma do gestor saber "isto foi
+        # corrigido" era a IA decidir mencionar — sem garantia nenhuma.
+        # Expor no schema deixa o frontend mostrar um selo determinístico,
+        # independente do texto gerado.
+        recently_resolved = await self.tracked_alert_repo.get_resolved_on(uuid.UUID(tenant_id), resolved_date=today)
+
         cached = await self.narrative_repo.get_for_date(today)
         if cached is not None:
             return ExecutiveNarrativeResponse(
@@ -1225,19 +1239,11 @@ class AnalyticsService:
                 narrative=cached.narrative_text,
                 generated_at=None,
                 top_priorities=top_priorities,
+                recently_resolved=recently_resolved,
             )
 
         try:
             summary = await self.get_executive_summary(period_start, period_end)
-            # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3)
-            # — a chamada a get_smart_insights logo acima já rodou o sync
-            # de hoje (side effect, ver DECISÃO em TrackedAlertRepository.
-            # sync), possivelmente numa visita ANTERIOR à Sala de Comando
-            # neste mesmo dia. Por isso lê "tudo resolvido hoje" de volta
-            # do banco (get_resolved_on) em vez de confiar no retorno de
-            # sync() — a narrativa pode ser gerada bem depois da correção
-            # ter sido detectada.
-            resolved_titles = await self.tracked_alert_repo.get_resolved_on(uuid.UUID(tenant_id), resolved_date=today)
             facts = NarrativeFacts(
                 period_start=period_start,
                 period_end=period_end,
@@ -1247,7 +1253,7 @@ class AnalyticsService:
                 denial_at_risk_value=summary.denial_at_risk_value,
                 avg_days_to_receive=summary.avg_days_to_receive.value if summary.avg_days_to_receive else None,
                 insight_lines=[f"{i.title}: {i.message}" for i in insights.insights],
-                resolved_since_yesterday_titles=resolved_titles,
+                resolved_since_yesterday_titles=recently_resolved,
             )
             generator = AnthropicNarrativeGenerator()
             narrative_text = await generator.generate(build_narrative_prompt(facts))
@@ -1259,6 +1265,7 @@ class AnalyticsService:
                 narrative=None,
                 generated_at=None,
                 top_priorities=top_priorities,
+                recently_resolved=recently_resolved,
             )
 
         await self.narrative_repo.upsert(
@@ -1275,4 +1282,5 @@ class AnalyticsService:
             narrative=narrative_text,
             generated_at=datetime.now(timezone.utc),
             top_priorities=top_priorities,
+            recently_resolved=recently_resolved,
         )
