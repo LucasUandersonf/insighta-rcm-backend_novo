@@ -62,7 +62,11 @@ class RiskAssessment:
 
 
 def _rule_missing_cid(
-    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: Decimal,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
 ) -> RiskFinding | None:
     """CID ausente é o exemplo canônico citado no briefing do produto."""
     if not appointment.cid_code:
@@ -71,7 +75,11 @@ def _rule_missing_cid(
 
 
 def _rule_missing_procedure_code(
-    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: Decimal,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
 ) -> RiskFinding | None:
     if not appointment.procedure_code:
         return RiskFinding(reason_code="missing_procedure_code", severity="high")
@@ -79,7 +87,11 @@ def _rule_missing_procedure_code(
 
 
 def _rule_no_contract_reference(
-    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: Decimal,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
 ) -> RiskFinding | None:
     if contract_item is None:
         # Sem tabela de repasse cadastrada para este convênio+procedimento
@@ -90,8 +102,41 @@ def _rule_no_contract_reference(
     return None
 
 
+def _rule_duplicate_billing(
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: Decimal,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
+) -> RiskFinding | None:
+    """
+    Raio-X da Receita, frente "Evitando perdas": duplo clique no botão
+    "Salvar", ou duas pessoas da recepção lançando o mesmo atendimento —
+    um erro operacional comum, que sem esta regra só é descoberto quando
+    a OPERADORA percebe primeiro e glosa por duplicidade (o pior momento
+    possível para descobrir, depois de já ter sido enviado).
+
+    `has_duplicate_billing` é resolvido ANTES de chamar `assess()` (ver
+    BillingService.create_billing e BillingRepository.find_duplicate) —
+    este motor continua puro/sem banco (mesma DECISÃO documentada no
+    topo do arquivo): compara o appointment+valor+tipo de item contra
+    uma linha JÁ EXISTENTE, algo que só o repositório pode responder.
+    Severidade alta (barra o envio, mesmo critério de CID/procedimento
+    ausente): enviar a mesma cobrança duas vezes pro convênio é o tipo
+    de erro que mancha o relacionamento com a operadora, não só perde
+    uma glosa isolada.
+    """
+    if has_duplicate_billing:
+        return RiskFinding(reason_code="duplicate_billing", severity="high")
+    return None
+
+
 def _rule_value_mismatch(
-    appointment: Appointment, contract_item: ContractItem | None, charged_value: Decimal, quantity: int = 1
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: Decimal,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
 ) -> RiskFinding | None:
     if contract_item is None:
         return None  # já coberto por _rule_no_contract_reference
@@ -122,19 +167,36 @@ _RULES = (
     _rule_missing_cid,
     _rule_missing_procedure_code,
     _rule_no_contract_reference,
+    _rule_duplicate_billing,
     _rule_value_mismatch,
 )
 
 
 def assess(
-    appointment: Appointment, contract_item: ContractItem | None, charged_value: float, *, quantity: int = 1
+    appointment: Appointment,
+    contract_item: ContractItem | None,
+    charged_value: float,
+    *,
+    quantity: int = 1,
+    has_duplicate_billing: bool = False,
 ) -> RiskAssessment:
     """`quantity` (achado do Dicionário de Dados): unidades do mesmo
     procedimento cobradas na linha, multiplica ContractItem.agreed_price
     em _rule_value_mismatch. default=1 preserva o comportamento de sempre
-    para todo chamador que ainda não passa isso (ver DECISÃO lá)."""
+    para todo chamador que ainda não passa isso (ver DECISÃO lá).
+
+    `has_duplicate_billing` (Raio-X da Receita, frente "Evitando
+    perdas"): já resolvido pelo chamador via
+    BillingRepository.find_duplicate — ver DECISÃO completa em
+    _rule_duplicate_billing. default=False pelo mesmo motivo de
+    `quantity`: não quebra chamador antigo/teste que ainda não passa
+    esse dado."""
     charged = Decimal(str(charged_value))
-    findings = [result for rule in _RULES if (result := rule(appointment, contract_item, charged, quantity)) is not None]
+    findings = [
+        result
+        for rule in _RULES
+        if (result := rule(appointment, contract_item, charged, quantity, has_duplicate_billing)) is not None
+    ]
 
     if not findings:
         return RiskAssessment(level="low")

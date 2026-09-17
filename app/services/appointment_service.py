@@ -1,20 +1,27 @@
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import HTTPException, status
 
+from app.core.config import get_settings
+from app.core.security import generate_satisfaction_token
 from app.models.appointment import Appointment
+from app.models.appointment_satisfaction_token import AppointmentSatisfactionToken
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.appointment_satisfaction_token_repository import AppointmentSatisfactionTokenRepository
 from app.repositories.local_repository import LocalRepository
 from app.repositories.patient_repository import PatientRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.schemas.appointment import AppointmentCreateRequest, AppointmentListItem, AppointmentResponse, AppointmentUpdateRequest
+from app.schemas.appointment_satisfaction import SatisfactionLinkResponse
 from app.schemas.pagination import PaginatedResponse
 from app.services.no_show_risk_engine import assess as assess_no_show_risk
 from app.services.no_show_risk_engine import resolve_thresholds
 from app.services.webhook_dispatch_service import dispatch_event
+
+settings = get_settings()
 
 
 class AppointmentService:
@@ -25,6 +32,7 @@ class AppointmentService:
         professional_repo: ProfessionalRepository,
         local_repo: LocalRepository,
         tenant_repo: TenantRepository,
+        satisfaction_token_repo: AppointmentSatisfactionTokenRepository,
         webhook_repo: WebhookSubscriptionRepository | None = None,
     ):
         self.appointment_repo = appointment_repo
@@ -32,6 +40,7 @@ class AppointmentService:
         self.professional_repo = professional_repo
         self.local_repo = local_repo
         self.tenant_repo = tenant_repo
+        self.satisfaction_token_repo = satisfaction_token_repo
         # Opcional (default None) — mesmo critério de BillingService.webhook_repo:
         # recurso opt-in do tenant, não obrigatório como audit_repo em
         # outros services. Só usado aqui via POST /appointments (criação
@@ -85,6 +94,8 @@ class AppointmentService:
             status="scheduled",
             procedure_code=data.procedure_code,
             cid_code=data.cid_code,
+            visit_intent_tag=data.visit_intent_tag,
+            is_squeeze_in=data.is_squeeze_in,
             created_by=uuid.UUID(created_by),
         )
 
@@ -96,7 +107,21 @@ class AppointmentService:
         history = await self.appointment_repo.list_past_by_patient(data.patient_id, before=data.scheduled_at)
         tenant = await self.tenant_repo.get_by_id(uuid.UUID(tenant_id))
         low_threshold, medium_threshold = resolve_thresholds(tenant)
-        risk = assess_no_show_risk(history, data.scheduled_at, low_threshold=low_threshold, medium_threshold=medium_threshold)
+        # Raio-X da Receita, frente "Prevendo movimentos": antecedência
+        # da marcação como segundo sinal de risco de falta (ver DECISÃO
+        # completa em no_show_risk_engine.assess). Calculado AQUI (não
+        # dentro do motor, que continua puro/sem ler o relógio) — max(...,
+        # 0) porque `scheduled_at` sempre deveria ser futuro nesta rota,
+        # mas nunca reporta antecedência negativa por um possível
+        # arredondamento de milissegundos entre a validação e este ponto.
+        candidate_lead_time_days = max((data.scheduled_at - datetime.now(timezone.utc)).days, 0)
+        risk = assess_no_show_risk(
+            history,
+            data.scheduled_at,
+            low_threshold=low_threshold,
+            medium_threshold=medium_threshold,
+            candidate_lead_time_days=candidate_lead_time_days,
+        )
         appointment.no_show_risk_level = risk.risk_level
         appointment.no_show_risk_score = risk.score
 
@@ -151,6 +176,7 @@ class AppointmentService:
                 visit_type=appointment.visit_type,
                 booking_channel=appointment.booking_channel,
                 cancellation_reason=appointment.cancellation_reason,
+                visit_intent_tag=appointment.visit_intent_tag,
             )
             for appointment, patient_name in rows
         ]
@@ -183,6 +209,53 @@ class AppointmentService:
             appointment.local_id = data.local_id
         if data.tipo_paciente is not None:
             appointment.tipo_paciente = data.tipo_paciente
+        if data.visit_intent_tag is not None:
+            appointment.visit_intent_tag = data.visit_intent_tag
+        if data.addon_offered_procedure is not None:
+            appointment.addon_offered_procedure = data.addon_offered_procedure
+        if data.addon_declined is not None:
+            # "Mapa de Dados Insighta" — nunca grava um resultado de oferta
+            # sem o que foi oferecido (nem nesta chamada, nem em uma
+            # anterior) — ver DECISÃO em 050_appointment_addon_upsell.sql.
+            if appointment.addon_offered_procedure is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="addon_declined requer addon_offered_procedure preenchido.",
+                )
+            appointment.addon_declined = data.addon_declined
+        if data.is_squeeze_in is not None:
+            appointment.is_squeeze_in = data.is_squeeze_in
 
         await self.appointment_repo.save(appointment)
         return AppointmentResponse.model_validate(appointment)
+
+    async def generate_satisfaction_link(self, appointment_id: uuid.UUID) -> SatisfactionLinkResponse:
+        """"Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2),
+        pilar Satisfação/NPS: gera um link público de uso único (ver
+        DECISÃO completa em 052_appointment_satisfaction.sql sobre por
+        que não é uma mensagem automática de WhatsApp) — a recepção
+        copia `url` e envia manualmente ao paciente pelo canal que já
+        usa. Só faz sentido para um atendimento já REALIZADO: pedir
+        satisfação de uma consulta que ainda vai acontecer (ou que o
+        paciente faltou) não tem o que avaliar."""
+        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        if appointment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento não encontrado neste tenant.")
+        if appointment.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Só é possível gerar link de avaliação para um atendimento já realizado (status 'completed').",
+            )
+
+        raw_token, token_hash = generate_satisfaction_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.SATISFACTION_TOKEN_EXPIRE_DAYS)
+        await self.satisfaction_token_repo.add(
+            AppointmentSatisfactionToken(
+                id=uuid.uuid4(),
+                appointment_id=appointment.id,
+                tenant_id=appointment.tenant_id,
+                token_hash=token_hash,
+                expires_at=expires_at,
+            )
+        )
+        return SatisfactionLinkResponse(url=f"{settings.FRONTEND_BASE_URL}/satisfacao/{raw_token}", expires_at=expires_at)

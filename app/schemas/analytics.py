@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -56,6 +57,13 @@ class PaymentLagByPlanItem(BaseModel):
 
     insurance_plan_id: UUID
     insurance_plan_name: str
+    # Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+    # primeira classe") — "convenio" ou "particular" (ver
+    # DECISÃO em 054_insurance_plan_type.sql). PMR só tem o sentido de
+    # "prazo de operadora" pra convênio de verdade; particular aparece
+    # aqui por transparência, nunca escondido, mas o frontend pode optar
+    # por segregar a leitura.
+    plan_type: str
     avg_days_to_receive: float
     billings_settled_count: int
 
@@ -71,6 +79,32 @@ class PaymentLagByPlanResponse(BaseModel):
     avg_days_to_receive: float | None
     billings_settled_count: int
     items: list[PaymentLagByPlanItem]  # ordenado por avg_days_to_receive desc, pior primeiro
+
+
+class AgendaPlanPriorityItem(BaseModel):
+    """Uma linha da recomendação de priorização de agenda por convênio
+    (Onda 4 do Plano de Ação, item 14 — evolução do PMR existente). Ver
+    DECISÃO completa em AnalyticsService.get_agenda_plan_priority."""
+
+    insurance_plan_id: UUID
+    insurance_plan_name: str
+    avg_days_to_receive: float
+    total_loss: float
+    # 1 = prioridade MÁXIMA pra encaixar um paciente novo/de retorno
+    # quando há mais de um convênio candidato pra mesma vaga.
+    priority_rank: int
+
+
+class AgendaPlanPriorityResponse(BaseModel):
+    """GET /api/v1/analytics/agenda-plan-priority — Painel → Agenda.
+    Só entram convênios de verdade (`plan_type="convenio"`) com PMR
+    calculável no período (billing conciliado) — sem prazo de
+    recebimento não há o que ranquear. `items` já vem ordenado por
+    `priority_rank` crescente."""
+
+    period_start: date
+    period_end: date
+    items: list[AgendaPlanPriorityItem]
 
 
 class AgendaRevenueForecastResponse(BaseModel):
@@ -141,6 +175,31 @@ class WeekdayNoShowRateBucket(BaseModel):
     no_show_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
 
 
+class WeekdayCancellationRateBucket(BaseModel):
+    """Achado do Dossiê Insighta RCM — mesmo molde de
+    WeekdayNoShowRateBucket, mas para cancelamento: fração de
+    cancelamentos dentro dos atendimentos com desfecho TERMINAL
+    (completed+no_show+cancelled) daquele dia. Ver
+    AnalyticsRepository.weekday_cancellation_rate_breakdown."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    cancellation_count: int
+    total_appointments: int  # só desfecho terminal (completed+no_show+cancelled)
+    cancellation_rate: float | None  # None quando total_appointments == 0 — "sem amostra", nunca 0.0%
+
+
+class WeekdaySqueezeInBucket(BaseModel):
+    """Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    agenda mais recebe encaixe. Ver DECISÃO completa em
+    AnalyticsRepository.weekday_squeeze_in_breakdown sobre o
+    denominador (só quem tem is_squeeze_in informado)."""
+
+    weekday: int  # 0=domingo .. 6=sábado
+    squeeze_in_count: int
+    total_informed: int  # só agendamentos com is_squeeze_in preenchido (não NULL)
+    squeeze_in_rate: float | None  # None quando total_informed == 0 — "sem amostra", nunca 0.0%
+
+
 class PatientNoShowRankingItem(BaseModel):
     """Uma linha da "lista vermelha" — ver
     AnalyticsRepository.top_no_show_patients. Só pacientes com pelo menos
@@ -190,6 +249,13 @@ class AgendaMetricsResponse(BaseModel):
     # de falta X%", não só "quinta-feira tem N agendamentos". Alimenta o
     # insight textual em smart_insights_engine.py::_weekday_no_show_rate_insights.
     weekday_no_show_rates: list[WeekdayNoShowRateBucket]
+    # Achado do Dossiê Insighta RCM — mesmo espírito de
+    # weekday_no_show_rates acima, agora para cancelamento: "quinta tem
+    # taxa de cancelamento X%".
+    weekday_cancellation_rates: list[WeekdayCancellationRateBucket]
+    # Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+    # agenda mais recebe encaixe (Appointment.is_squeeze_in).
+    weekday_squeeze_in_rates: list[WeekdaySqueezeInBucket]
     no_show_risk_breakdown: list[NoShowRiskBucket]
     # Estimativa: contagem de agendamentos futuros com risco ALTO de
     # falta × valor médio cobrado no período — ver DECISÃO em
@@ -241,6 +307,11 @@ class PlanLossItem(BaseModel):
     mais em cada convênio."""
 
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima. "convenio" quando o nome não
+    # bate com nenhum InsurancePlan cadastrado (nunca deveria acontecer,
+    # mas nunca None).
+    plan_type: str
     financial_hole: float  # cobrado abaixo do contratado
     payment_gap: float  # pago pela operadora abaixo do contratado (só billings conciliados)
     denial_risk_value: float  # valor faturado com risco de glosa médio/alto
@@ -263,6 +334,9 @@ class ContractUtilizationItem(BaseModel):
 
     contract_id: UUID
     plan_name: str
+    # Achado da Onda 3 do Plano de Ação — ver DECISÃO em
+    # PaymentLagByPlanItem.plan_type acima.
+    plan_type: str
     valid_from: date
     valid_until: date | None
     total_items: int  # procedimentos negociados no contrato
@@ -282,11 +356,20 @@ class ContractUtilizationResponse(BaseModel):
 class DenialRiskDistributionItem(BaseModel):
     level: str  # "low" | "medium" | "high"
     count: int
+    # Achado do Parecer Técnico "Boletim Insighta" (revisão 2): antes
+    # existiam DUAS telas pro mesmo corte de dado — esta (contagem) e o
+    # card "% do faturado em risco de glosa" do feed de insights (valor,
+    # mas só agregado medium+high, sem abrir por nível). Trazer o valor
+    # em R$ de CADA nível pra dentro desta mesma resposta elimina a
+    # necessidade de duas telas — o frontend alterna a visão (contagem
+    # vs. R$) sem precisar de um segundo endpoint.
+    value: float
 
 
 class DenialRiskDistributionResponse(BaseModel):
     """GET /api/v1/analytics/denial-risk-distribution — Painel → Faturamento
-    (donut "Distribuição de risco de glosa" do canvas de design)."""
+    (donut "Distribuição de risco de glosa" do canvas de design), com
+    alternância entre contagem e valor faturado por nível de risco."""
 
     period_start: date
     period_end: date
@@ -295,6 +378,7 @@ class DenialRiskDistributionResponse(BaseModel):
     # AnalyticsRepository.denial_risk_count_breakdown sobre por que
     # "revisado" é sinônimo de "faturado no período" neste produto.
     total_reviewed: int
+    total_value_reviewed: float
 
 
 class DenialReasonConfirmationItem(BaseModel):
@@ -333,6 +417,113 @@ class DenialReasonConfirmationResponse(BaseModel):
     min_sample: int
 
 
+class ProductRoiResponse(BaseModel):
+    """GET /api/v1/analytics/product-roi — Épico F4.4 do Plano Diretor
+    ("Prova de ROI do próprio produto"). Três componentes independentes,
+    TODOS cumulativos desde que a clínica começou a usar o produto
+    (nunca uma janela de período — ver DECISÃO nos repositórios):
+
+    - `protected_from_denial_value`: valor que o motor anti-glosa
+      corrigiu ANTES de enviar ao convênio (Billing.value_saved_by_correction).
+    - `recovered_appeals_value`: valor recuperado em recursos de glosa
+      GANHOS (status='deferido') — dinheiro que seria perdido sem o
+      recurso protocolado a tempo do prazo que o produto avisa.
+    - `realized_insight_outcomes_value`: ganho REAL medido (não
+      prometido) em qualquer insight que um gestor marcou como
+      resolvido e o produto reavaliou depois (F1.2) — inclui, mas não
+      se limita a, ganhos de renegociação de contrato.
+
+    `tracking_since` é a data do faturamento mais antigo — None quando a
+    clínica ainda não tem nenhum faturamento (nunca uma data inventada)."""
+
+    protected_from_denial_value: float
+    recovered_appeals_value: float
+    recovered_appeals_count: int
+    realized_insight_outcomes_value: float
+    realized_insight_outcomes_count: int
+    total_roi_value: float
+    tracking_since: date | None
+
+
+class CapitalDecisionBaseDataResponse(BaseModel):
+    """GET /api/v1/analytics/capital-decision-base-data — Épico F3.4 do
+    Plano Diretor ("Decisões de capital: contratar/expandir — simulação
+    de payback de contratação"). Nunca devolve a decisão pronta nem
+    projeta receita futura sozinho — só ancora a simulação (feita no
+    frontend, mesmo espírito de SimuladorPanel.tsx) em receita/margem
+    por hora REALMENTE observada nesta clínica nos últimos `window_days`
+    dias, e no que as OUTRAS unidades do mesmo grupo (quando existe) já
+    faturam — nunca um benchmark de mercado inventado (mesma rejeição já
+    documentada em threshold_calibration.py: não existe uma tabela real
+    de "quanto um profissional de tal especialidade deveria faturar").
+
+    Contratar: `avg_revenue_per_hour`/`avg_margin_per_hour` são a base
+    de receita/margem por hora ocupada de agenda esperada de uma nova
+    contratação — média dos profissionais ATIVOS com receita/hora
+    observável no período, filtrados por `specialty` quando informado E
+    com amostra >= `min_sample`; caem para a média de TODA a clínica
+    quando a especialidade não tem amostra suficiente
+    (`used_fallback_clinic_wide=True`) em vez de devolver None
+    silenciosamente quando existe uma média mais ampla pra usar.
+    `avg_margin_per_hour` fica None quando o tenant ainda não lançou
+    nenhum CostEntry (`has_cost_data=False`, ver F3.1).
+
+    Expandir: `avg_monthly_revenue_per_unit` é a média de faturamento
+    dos últimos `window_days` dias das OUTRAS unidades do mesmo grupo
+    multi-unidade (exclui a própria unidade solicitante) — None quando
+    o tenant não pertence a um grupo (`belongs_to_organization=False`,
+    o estado normal da maioria das clínicas) ou o grupo ainda não tem
+    nenhuma outra unidade."""
+
+    window_days: int
+    period_start: date
+    period_end: date
+
+    available_specialties: list[str]
+    specialty_requested: str | None
+    used_fallback_clinic_wide: bool
+    sample_size: int
+    min_sample: int
+    avg_revenue_per_hour: float | None
+    has_cost_data: bool
+    avg_margin_per_hour: float | None
+
+    belongs_to_organization: bool
+    sibling_units_count: int
+    avg_monthly_revenue_per_unit: float | None
+
+
+class DataQualityByUserItem(BaseModel):
+    """Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
+    ver DECISÃO completa em AnalyticsRepository.data_completeness_by_user.
+    `completion_rate` é a fração (0.0-1.0) de atendimentos lançados por
+    este usuário no período que já nasceram com CID + procedimento
+    preenchidos."""
+
+    user_id: str
+    full_name: str
+    complete_count: int
+    total_count: int
+    completion_rate: float
+
+
+class DataQualityResponse(BaseModel):
+    """GET /api/v1/analytics/data-quality — painel de qualidade de
+    cadastro: quanto de cada atendente já lança um atendimento completo
+    (CID + procedimento), a fonte mais comum de risco de glosa por dado
+    ausente (ver denial_risk_engine.py). `items` ordenado do PIOR pro
+    melhor (quem mais precisa de atenção primeiro) — só atendentes com
+    amostra >= `min_sample` aparecem, mesmo critério do resto do
+    produto. `overall_completion_rate` é None quando nenhum atendente
+    atingiu a amostra mínima no período (base zero, nunca "100%" por
+    ausência de dado)."""
+
+    items: list[DataQualityByUserItem]
+    overall_completion_rate: float | None
+    total_considered: int
+    min_sample: int
+
+
 class SmartInsightResponse(BaseModel):
     severity: str  # "critical" | "warning" | "positive" | "comparativo"
     # "faturamento" | "agenda" — ver DECISÃO em smart_insights_engine.Insight.
@@ -363,6 +554,36 @@ class SmartInsightsResponse(BaseModel):
     insights: list[SmartInsightResponse]
 
 
+class PriorityQueueItem(SmartInsightResponse):
+    """Épico F1.1 (Plano Diretor) — item da fila única. É um
+    SmartInsightResponse com um campo a mais: `source` diz se o item
+    veio do feed de insights (que já cobre boa parte do produto) ou foi
+    extraído na hora de um PAINEL do Raio-X da Receita que não gera
+    card de feed sozinho (ranking de perda por convênio, utilização de
+    contrato, rentabilidade por profissional) — ver DECISÃO completa em
+    AnalyticsService.get_priority_queue. O frontend usa `source` pra
+    badge "de onde veio" (nunca esconde a proveniência, mesmo critério
+    já usado em `category`)."""
+
+    source: str  # "insight" | "raiox"
+
+
+class PriorityQueueResponse(BaseModel):
+    """GET /api/v1/analytics/priority-queue — tela "Hoje", página
+    inicial da Sala de Comando. Reaproveita 100% do cálculo já feito em
+    get_smart_insights + os 3 painéis do Raio-X que mais concentram
+    perda não coberta por um card de feed (ver DECISÃO no service) —
+    camada de agregação e ranqueamento, nenhum motor novo."""
+
+    period_start: date
+    period_end: date
+    items: list[PriorityQueueItem]
+    # Quantos itens existiam ANTES do corte por `limit` — permite o
+    # frontend mostrar "3 de 14 ações abertas" em vez de fingir que a
+    # fila é só o que coube na tela.
+    total_considered: int
+
+
 class HealthScoreComponentResponse(BaseModel):
     key: str  # "denial" | "no_show" | "appeal"
     label: str
@@ -385,6 +606,10 @@ class NetworkBenchmarkMetric(BaseModel):
     your_sample: int
     network_median: float | None
     cohort_size: int
+    # "Mapa de Dados Insighta" — pilar Comparativo & rede: True quando o
+    # cohort foi filtrado pela MESMA especialidade da clínica (ver
+    # DECISÃO completa em 048_network_benchmark_specialty_segment.sql).
+    cohort_is_segmented_by_specialty: bool
 
 
 class NetworkBenchmarkResponse(BaseModel):
@@ -393,6 +618,39 @@ class NetworkBenchmarkResponse(BaseModel):
     critério da Nota de Saúde Financeira (ver HealthScoreResponse)."""
 
     metrics: list[NetworkBenchmarkMetric]
+
+
+class OrganizationUnitSummary(BaseModel):
+    """Uma unidade (Tenant) do MESMO grupo multi-unidade do solicitante
+    — ver DECISÃO completa em app/sql/042_organizations.sql. AO
+    CONTRÁRIO do Comparativo entre Clínicas, isto NÃO é anonimizado: as
+    unidades pertencem ao mesmo dono, o valor é comparar lado a lado.
+    `denial_risk_pct`/`no_show_rate` são None sem amostra no período
+    (base zero, nunca 0% inventado — mesmo princípio de _denial_risk_pct)."""
+
+    tenant_id: str
+    trade_name: str
+    is_requesting_tenant: bool
+    total_billed: float
+    denial_risk_pct: float | None
+    appointment_count: int
+    no_show_rate: float | None
+
+
+class OrganizationSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/organization-summary — Épico F3.2 do Plano
+    Diretor ("Consolidação multi-unidade"). `belongs_to_organization`
+    False é o estado NORMAL de uma clínica avulsa (a maioria), nunca um
+    erro nem uma lacuna de configuração — `units` fica vazio e os
+    consolidados ficam neutros nesse caso."""
+
+    belongs_to_organization: bool
+    organization_name: str | None
+    window_days: int
+    units: list[OrganizationUnitSummary]
+    consolidated_total_billed: float
+    consolidated_denial_risk_pct: float | None
+    consolidated_no_show_rate: float | None
     window_days: int
 
 
@@ -416,6 +674,16 @@ class OportunidadeItem(BaseModel):
     gap_value: float  # network_median_price - your_price, sempre > 0
     gap_pct: float  # gap_value / your_price
     estimated_monthly_opportunity: float  # gap_value * monthly_volume
+    # "Junta Técnica Insighta" — junta o ranking de oportunidade com o
+    # alerta de renovação de contrato (ver DECISÃO completa em
+    # OportunidadesService.get_oportunidades): quando o CONVÊNIO desta
+    # linha tem um contrato vencendo nos próximos
+    # CONTRACT_RENEWAL_PREP_HORIZON_DAYS sem renovação já cadastrada,
+    # ambos vêm preenchidos — é o momento de levar o gap de preço PARA a
+    # negociação de renovação, não duas conversas separadas. None = sem
+    # contrato vencendo nesse horizonte (ou já tem renovação cadastrada).
+    days_until_contract_renewal: int | None = None
+    contract_valid_until: date | None = None
 
 
 class OportunidadesResponse(BaseModel):
@@ -455,6 +723,21 @@ class HealthScoreResponse(BaseModel):
     trend: HealthScoreTrendResponse | None = None
 
 
+class SatisfactionSummaryResponse(BaseModel):
+    """GET /api/v1/analytics/satisfaction-summary — "Equilíbrio Insighta"
+    (Balanced Scorecard, perna Cliente, mecanismo 2). Janela sempre fixa
+    (mesmo padrão de HealthScoreResponse) — não segue o seletor de
+    período da tela, de propósito: é um indicador de tendência, não um
+    retrato de um dia só."""
+
+    average_score: PeriodKPI | None  # None = nenhuma avaliação recebida ainda no período
+    response_count: int
+    # {1: n, 2: n, 3: n, 4: n, 5: n} — sempre as 5 chaves, mesmo com
+    # contagem 0, pra frontend nunca precisar preencher buraco.
+    distribution: dict[int, int]
+    window_days: int
+
+
 class InactivePatientItem(BaseModel):
     """Uma linha da "Carteira de pacientes inativos" — ver DECISÃO em
     AnalyticsRepository.list_inactive_patients. Só pacientes com pelo
@@ -465,6 +748,11 @@ class InactivePatientItem(BaseModel):
     full_name: str
     last_appointment_at: datetime
     days_since_last_appointment: int
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — fecha o
+    # ciclo desta lista: `None` = ninguém tentou reativar este paciente
+    # ainda (ver PatientOutreachLogRepository.latest_by_patient_ids).
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
 
 
 class InactivePatientsResponse(BaseModel):
@@ -491,6 +779,89 @@ class CrmSummaryResponse(BaseModel):
     avg_days_since_last_visit: float | None
     return_rate: float | None  # fração 0.0-1.0
     return_rate_sample_size: int
+# Gaps Dossiê Insighta RCM, item 4 — RFM completo (Recência, Frequência,
+# Valor). Recência e Frequência já existiam espalhadas em outras
+# features (InactivePatientsResponse, patient_value_engine); Valor era a
+# dimensão que faltava pra virar RFM DE VERDADE. Ver DECISÃO completa em
+# app/services/rfm_engine.py sobre os limiares/quantis usados.
+RfmSegment = Literal["campeoes", "fieis", "nao_pode_perder", "em_risco", "novos", "hibernando", "precisa_atencao"]
+
+
+class RfmSegmentCount(BaseModel):
+    segment: RfmSegment
+    patient_count: int
+
+
+class RfmPatientItem(BaseModel):
+    """Uma linha da lista de pacientes que mais precisam de ação —
+    segmento "não pode perder" (alto valor histórico, sumiu) ou "em
+    risco" (vinha com frequência, sumiu), maior receita histórica
+    primeiro. Ver DECISÃO em AnalyticsService.get_patient_rfm."""
+
+    patient_id: UUID
+    full_name: str
+    days_since_last_appointment: int
+    visit_count: int
+    total_revenue: float
+    recency_score: int
+    frequency_score: int
+    monetary_score: int
+    segment: RfmSegment
+    # Onda 4 do Plano de Ação, item 12 ("CRM de verdade") — mesma
+    # anotação de InactivePatientItem.last_outreach_at.
+    last_outreach_at: datetime | None = None
+    last_outreach_outcome: str | None = None
+
+
+class RfmResponse(BaseModel):
+    """GET /api/v1/analytics/patient-rfm — a base de pacientes inteira
+    (todo mundo com pelo menos 1 atendimento não cancelado) classificada
+    em Recência × Frequência × Valor, sempre "a partir de hoje" (sem
+    date_from/date_to — mesmo espírito de InactivePatientsResponse: RFM
+    avalia o relacionamento inteiro, não uma janela de período).
+
+    `segment_counts` sempre traz os 7 segmentos (mesmo os com 0
+    pacientes — é uma taxonomia fixa, diferente de uma quebra por dado
+    variável como dia da semana): a distribuição completa da carteira.
+    `action_items` é só quem precisa de ação AGORA (segmentos
+    "nao_pode_perder"/"em_risco"), maior receita histórica primeiro —
+    mesmo espírito de "lista vermelha" de PatientNoShowRankingItem, não
+    um dump da base inteira."""
+
+    as_of: date
+    total_patients: int
+    segment_counts: list[RfmSegmentCount]
+    action_items: list[RfmPatientItem]
+
+
+class EarlyChurnRiskItem(BaseModel):
+    """Uma linha de "risco de abandono antecipado" — Raio-X da Receita,
+    frente "Prevendo movimentos" (ver DECISÃO completa em
+    AnalyticsRepository.list_early_churn_risk_patients). Diferente de
+    InactivePatientItem (piso fixo de 1 ano igual pra todo mundo), aqui o
+    limiar é o PRÓPRIO ritmo do paciente: `avg_interval_days` é o
+    intervalo médio histórico entre as consultas dele, `days_since_last`
+    já ultrapassa esse intervalo em pelo menos `gap_multiplier`x (ver
+    EarlyChurnRiskResponse)."""
+
+    patient_id: UUID
+    full_name: str
+    last_appointment_at: datetime
+    avg_interval_days: float
+    days_since_last: float
+
+
+class EarlyChurnRiskResponse(BaseModel):
+    """GET /api/v1/analytics/early-churn-risk — alerta ANTECIPADO de
+    abandono, antes do paciente completar o piso fixo de
+    `inactive_after_days` (1 ano) que já vira "inativo" de verdade (ver
+    InactivePatientsResponse). `gap_multiplier` é quantas vezes o
+    intervalo médio PRÓPRIO do paciente ele já está sem voltar."""
+
+    items: list[EarlyChurnRiskItem]
+    total_count: int
+    gap_multiplier: float
+    inactive_after_days: int
 
 
 class RecallCandidateItem(BaseModel):
@@ -599,3 +970,288 @@ class ExecutiveNarrativeResponse(BaseModel):
     generated_at: datetime | None
     top_priorities: list[SmartInsightResponse] = []
     recently_resolved: list[str] = []
+class ProfessionalProfitabilityItem(BaseModel):
+    """Uma linha de rentabilidade por profissional — Raio-X da Receita,
+    frente "Gestão eficiente" (ver DECISÃO completa em
+    AnalyticsService.get_profitability). Dois profissionais podem ter a
+    MESMA ocupação de agenda e gerar receitas bem diferentes por hora —
+    `revenue_per_hour` é o número que revela essa diferença, que nem
+    `avg_capacity_utilization` (ocupação) nem `revenue` sozinhos (sem
+    dividir pelo tempo ocupado) mostram."""
+
+    professional_id: UUID
+    full_name: str
+    revenue: float
+    booked_minutes: int
+    revenue_per_hour: float | None  # None quando booked_minutes == 0 (sem agenda ocupada no período, não faz sentido dividir)
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # todos None quando o tenant ainda não lançou NENHUM custo no
+    # período (ver ProfitabilityResponse.has_cost_data) — nunca 0,
+    # que pareceria "margem de 100%" em vez de "sem dado de custo".
+    allocated_cost: float | None = None
+    net_margin: float | None = None
+    margin_per_hour: float | None = None
+
+
+class ProcedureProfitabilityItem(BaseModel):
+    """Uma linha do ranking de mix de receita por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure. `share_pct` é a fatia do
+    faturado TOTAL do período que este procedimento representa."""
+
+    procedure_code: str
+    procedure_name: str | None
+    revenue: float
+    billing_count: int
+    share_pct: float
+
+
+class ProfitabilityResponse(BaseModel):
+    """GET /api/v1/analytics/profitability — Raio-X da Receita, frente
+    "Gestão eficiente": responde "quem/o que realmente traz receita",
+    além de faturamento total e taxa de glosa. `by_professional` vem
+    ordenado por receita/hora (maior primeiro); `by_procedure` por
+    receita total (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    by_professional: list[ProfessionalProfitabilityItem]
+    by_procedure: list[ProcedureProfitabilityItem]
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # ver DECISÃO em AnalyticsService.get_profitability e
+    # app/sql/039_cost_entries.sql. has_cost_data=False é o estado
+    # honesto de "ninguém lançou custo ainda" — total_costs/net_margin
+    # ficam None nesse caso, nunca 0 (que pareceria "sem custo nenhum"
+    # em vez de "sem dado").
+    has_cost_data: bool = False
+    total_costs: float | None = None
+    # "Junta Técnica Insighta" — 2 referências externas de mercado que a
+    # tela não mostrava antes: margem líquida saudável fica entre 15% e
+    # 30%; custo fixo saudável fica até 60% da receita (ver DECISÃO
+    # completa em AnalyticsService.get_profitability). Um terceiro
+    # benchmark do relatório ("convênio paga 30-50% a menos que
+    # particular pelo mesmo procedimento") ficou de fora de propósito:
+    # `Billing.insurance_plan_id` é NOT NULL neste schema — o produto
+    # não modela uma cobrança genuinamente particular (sem convênio) hoje,
+    # só coparticipação (uma fração de uma cobrança QUE TEM convênio).
+    # Sem essa distinção real no banco, calcular esse benchmark
+    # inventaria um "particular" que não existe — decisão consistente
+    # com o resto do motor: nunca inventar um dado que a evidência não
+    # sustenta. Fica registrado aqui como gap de produto a resolver numa
+    # rodada futura, não como algo silenciosamente ignorado. Ambos None
+    # quando não há dado/amostra suficiente para calcular — nunca 0, que
+    # pareceria "margem zero" em vez de "sem dado".
+    net_margin_pct: float | None = None
+    fixed_cost_pct: float | None = None
+    net_margin: float | None = None
+
+
+class MarketingChannelItem(BaseModel):
+    """Uma linha de desempenho de campanha — Raio-X da Receita, frente
+    "Gestão eficiente" (ver DECISÃO completa em
+    ReportingRepository.marketing_performance_by_campaign). `cac` usa o
+    período do dashboard; `avg_revenue_per_patient` (proxy de LTV) usa o
+    histórico TOTAL dos pacientes atribuídos a esta campanha, não só o
+    período — os dois denominadores são propositalmente diferentes."""
+
+    source: str
+    campaign_id: str
+    campaign_name: str | None
+    spend: float
+    patients_acquired: int  # pacientes NOVOS no período
+    cac: float | None  # spend / patients_acquired; None quando patients_acquired == 0
+    lifetime_patients: int  # total histórico de pacientes já atribuídos a esta campanha
+    lifetime_revenue: float  # receita histórica TOTAL desses pacientes
+    avg_revenue_per_patient: float | None  # proxy de LTV; None quando lifetime_patients == 0
+
+
+class MarketingChannelsResponse(BaseModel):
+    """GET /api/v1/analytics/marketing-channels — Raio-X da Receita,
+    frente "Gestão eficiente": ROI de marketing existia só AGREGADO até
+    esta rodada (ver ReportDataService); esta resposta abre por
+    campanha/canal, ordenado por gasto (maior primeiro)."""
+
+    period_start: date
+    period_end: date
+    total_spend: float
+    items: list[MarketingChannelItem]
+
+
+class UpsellFunnelItem(BaseModel):
+    """Uma linha do funil de upsell — "Equilíbrio Insighta" (Balanced
+    Scorecard, perna Cliente, mecanismo 3): por procedimento adicional
+    OFERECIDO, quantas vezes foi aceito. `acceptance_rate` é None só
+    quando `offered_count` é 0, o que não deveria acontecer (a linha só
+    existe porque houve oferta), mas o campo é opcional pela mesma
+    cautela de divisão-por-zero do resto do produto."""
+
+    procedure_name: str
+    offered_count: int
+    accepted_count: int
+    acceptance_rate: float | None
+
+
+class UpsellFunnelResponse(BaseModel):
+    """GET /api/v1/analytics/upsell-funnel — "Equilíbrio Insighta"
+    (Balanced Scorecard, perna Cliente, mecanismo 3). Complementa
+    MarketingChannelsResponse (CAC/LTV, olhando AQUISIÇÃO): este
+    endpoint olha EXPANSÃO de receita em paciente já conquistado —
+    ordenado por offered_count (maior primeiro), mesmo critério de
+    "onde vale mais a pena prestar atenção primeiro" do resto da Sala de
+    Comando."""
+
+    period_start: date
+    period_end: date
+    total_offered: int
+    total_accepted: int
+    overall_acceptance_rate: float | None  # None quando total_offered == 0
+    items: list[UpsellFunnelItem]
+
+
+class DataFreshnessItem(BaseModel):
+    """Um data_type ("faturamento"/"agenda"/"glosa") e a última vez que
+    um arquivo desse tipo foi importado com sucesso."""
+
+    data_type: str
+    last_ingested_at: datetime
+
+
+class DataFreshnessResponse(BaseModel):
+    """GET /api/v1/analytics/data-freshness — achado do Dossiê Insighta
+    RCM ("Como o dado entra no sistema"): nenhuma tela fora do histórico
+    de upload mostrava "desde quando" os números da Sala de Comando
+    refletem a realidade. `items` só lista data_type que já tiveram pelo
+    menos uma ingestão com sucesso (nunca uma data inventada para um
+    tipo nunca importado). `stalest_at` é o PIOR caso entre os tipos já
+    importados (o mais antigo dos "mais recentes") — a manchete honesta
+    de frescor: se algum tipo está desatualizado, o indicador não deve
+    esconder isso atrás da média ou do tipo mais fresco. None quando
+    `items` está vazio (nenhuma ingestão bem-sucedida ainda)."""
+
+    items: list[DataFreshnessItem]
+    stalest_at: datetime | None
+
+
+class ReturnRateResponse(BaseModel):
+    """GET /api/v1/analytics/return-rate — achado do Dossiê Insighta
+    RCM: `Appointment.visit_type` (primeira_consulta/retorno) é
+    capturado desde sempre, mas nenhum indicador media taxa de retorno
+    de paciente (fidelização) a partir dele. Tendência contra o período
+    anterior de mesma duração (mesmo formato PeriodKPI do resto da Sala
+    de Comando)."""
+
+    period_start: date
+    period_end: date
+    return_rate: PeriodKPI | None  # None quando não há nenhum atendimento com visit_type informado no período atual
+    return_count: int
+    first_visit_count: int
+    untagged_count: int  # completed sem visit_type informado — nunca soma no denominador da taxa
+
+
+class AverageTicketChannelItem(BaseModel):
+    """Uma linha do ticket médio por canal de agendamento — ver
+    AnalyticsRepository.revenue_by_booking_channel."""
+
+    channel: str
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketProcedureItem(BaseModel):
+    """Uma linha do ticket médio por procedimento — ver
+    AnalyticsRepository.revenue_by_procedure."""
+
+    procedure_code: str
+    procedure_name: str | None
+    billing_count: int
+    average_ticket: float
+
+
+class AverageTicketResponse(BaseModel):
+    """GET /api/v1/analytics/average-ticket — achado do Dossiê Insighta
+    RCM: nenhuma agregação de ticket médio existia, apesar do dado
+    (`Billing.charged_value`) estar pronto desde sempre. `overall` segue
+    o mesmo formato PeriodKPI (tendência contra o período anterior de
+    mesma duração) do resto da Sala de Comando; None quando
+    `billing_count == 0`, nunca uma média inventada sobre zero
+    lançamentos."""
+
+    period_start: date
+    period_end: date
+    overall: PeriodKPI | None
+    billing_count: int
+    by_channel: list[AverageTicketChannelItem]
+    by_procedure: list[AverageTicketProcedureItem]
+
+
+class PatientRevenueItem(BaseModel):
+    """Uma linha do Pareto de receita por paciente — ver
+    AnalyticsRepository.revenue_by_patient. `cumulative_share_pct` é a
+    soma acumulada de `share_pct` até esta linha (na ordem em que a
+    lista já vem, maior receita primeiro) — a leitura direta de "os N
+    primeiros pacientes desta lista somam X% do faturado"."""
+
+    patient_id: UUID
+    full_name: str
+    revenue: float
+    share_pct: float
+    cumulative_share_pct: float
+
+
+class PatientRevenueParetoResponse(BaseModel):
+    """GET /api/v1/analytics/patient-revenue-pareto — achado do Dossiê
+    Insighta RCM: dimensão de concentração de receita DIFERENTE da que
+    já existe por convênio (`_revenue_concentration_insight`) — aqui o
+    risco é depender de poucos PACIENTES, não de poucos convênios.
+    `top_n_share_pct` é `None` só quando `total_billed <= 0` (nenhum
+    faturamento no período — nunca uma % inventada sobre zero)."""
+
+    period_start: date
+    period_end: date
+    total_billed: float
+    items: list[PatientRevenueItem]  # top N por receita, maior primeiro
+    top_n_share_pct: float | None
+
+
+class AgeBucketItem(BaseModel):
+    """Uma faixa etária e quantos pacientes distintos com atendimento
+    concluído no período caem nela — ver
+    AnalyticsRepository.active_patient_birth_dates."""
+
+    label: str  # "0-17" | "18-30" | "31-45" | "46-60" | "60+"
+    patient_count: int
+
+
+class PatientDemographicsResponse(BaseModel):
+    """GET /api/v1/analytics/patient-demographics — achado do Dossiê
+    Insighta RCM: faixa etária calculada a partir de `Patient.birth_date`
+    (idade NA DATA DE HOJE, não na data do atendimento), nunca lida
+    antes. Conta pacientes DISTINTOS com pelo menos 1 atendimento
+    concluído no período. `unknown_age_count` são pacientes sem
+    `birth_date` cadastrado — nunca jogados numa faixa por padrão."""
+
+    period_start: date
+    period_end: date
+    buckets: list[AgeBucketItem]  # sempre as 5 faixas, mesmo com contagem 0
+    unknown_age_count: int
+
+
+class DailySummaryResponse(BaseModel):
+    """GET /api/v1/analytics/daily-summary — Onda 6 do Plano de Ação,
+    item 18 ("resumo diário narrado"). NÃO é uma fonte de dado nova:
+    compõe em texto corrido métricas que já existem espalhadas em telas
+    diferentes (executive-summary, agenda-metrics, inactive-patients,
+    agenda-plan-priority), sempre para HOJE — mesmo espírito "sempre a
+    partir de hoje" de InactivePatientsResponse/HealthScoreResponse,
+    nunca uma janela de período configurável (é um resumo do DIA, não
+    do período escolhido em outra tela).
+
+    `sentences` nunca inventa uma frase sobre um dado ausente — cada
+    frase só entra na lista quando o número por trás dela é
+    genuinamente informativo (ex: só menciona risco alto de falta
+    quando `high_risk_count > 0`, nunca "0 atendimentos em risco" como
+    se fosse notícia)."""
+
+    date: date
+    headline: str
+    sentences: list[str]

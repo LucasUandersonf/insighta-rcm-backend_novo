@@ -16,14 +16,24 @@ src/pages/AppointmentsPage.tsx) — o call site do frontend precisa ser
 atualizado para ler `.items` em vez do array direto.
 """
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.pagination import PaginatedResponse
 from app.schemas.patient import PatientCreateRequest, PatientFichaResponse, PatientResponse, PatientSearchItem
+from app.schemas.patient import (
+    PatientBirthdaysResponse,
+    PatientCreateRequest,
+    PatientResponse,
+    PatientUpdateRequest,
+)
+from app.schemas.patient_outreach_log import PatientOutreachLogCreateRequest, PatientOutreachLogResponse
+from app.services.patient_outreach_log_service import PatientOutreachLogService
 from app.services.patient_service import PatientService
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -39,6 +49,10 @@ _CAN_ANONYMIZE = ("admin", "owner")
 
 def _build_service(db: DbSession) -> PatientService:
     return PatientService(PatientRepository(db), AuditLogRepository(db))
+
+
+def _build_outreach_log_service(db: DbSession) -> PatientOutreachLogService:
+    return PatientOutreachLogService(PatientOutreachLogRepository(db), PatientRepository(db))
 
 
 @router.post("", response_model=PatientResponse, status_code=201)
@@ -90,6 +104,38 @@ async def get_patient_ficha(
     DECISÃO completa em PatientService.get_ficha.
     """
     return await _build_service(db).get_ficha(patient_id)
+@router.get("/birthdays", response_model=PatientBirthdaysResponse)
+async def list_patient_birthdays(
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+    month: int = Query(default=None, ge=1, le=12),
+) -> PatientBirthdaysResponse:
+    """
+    Achado do Dossiê Insighta RCM — aniversariantes do mês, a partir de
+    `Patient.birth_date` (capturado desde sempre, nunca agregado antes).
+    Mesmo RBAC de GET /patients (leitura pura de cadastro). `month`
+    default é o mês ATUAL (não faz sentido pedir "aniversariantes" sem
+    dizer de qual mês, e "hoje" é a pergunta óbvia da recepção).
+    """
+    resolved_month = month or date.today().month
+    return await _build_service(db).list_birthdays_in_month(resolved_month)
+
+
+@router.patch("/{patient_id}", response_model=PatientResponse)
+async def update_patient(
+    patient_id: uuid.UUID,
+    payload: PatientUpdateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> PatientResponse:
+    """
+    "Mapa de Dados Insighta" — Domínio Paciente (Onda 1): completa
+    depois os campos relacionais que raramente são conhecidos no
+    primeiro cadastro (quem indicou, consentimento de contato,
+    preferência de horário, CEP). Mesmo RBAC de criar paciente
+    (recepção lida com isso no dia a dia).
+    """
+    return await _build_service(db).update_patient(patient_id, payload)
 
 
 @router.post("/{patient_id}/anonymize", response_model=PatientResponse)
@@ -108,3 +154,32 @@ async def anonymize_patient(
     "desanonimizar".
     """
     return await _build_service(db).anonymize_patient(current_user.tenant_id, uuid.UUID(current_user.id), patient_id)
+
+
+@router.post("/{patient_id}/outreach-log", response_model=PatientOutreachLogResponse, status_code=201)
+async def create_patient_outreach_log(
+    patient_id: uuid.UUID,
+    payload: PatientOutreachLogCreateRequest,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE)),
+) -> PatientOutreachLogResponse:
+    """
+    Onda 4 do Plano de Ação, item 12 ("CRM de verdade: ação, não só
+    leitura") — registra que a clínica de fato tentou reativar este
+    paciente (ligou, mandou WhatsApp...) e o resultado. Mesmo RBAC de
+    criar paciente: é rotina de recepção, não decisão gerencial.
+    """
+    return await _build_outreach_log_service(db).create_outreach_log(
+        current_user.tenant_id, uuid.UUID(current_user.id), patient_id, payload
+    )
+
+
+@router.get("/{patient_id}/outreach-log", response_model=list[PatientOutreachLogResponse])
+async def list_patient_outreach_log(
+    patient_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+) -> list[PatientOutreachLogResponse]:
+    """Histórico de tentativas de contato com este paciente, mais
+    recente primeiro — mesmo RBAC de leitura de GET /patients."""
+    return await _build_outreach_log_service(db).list_outreach_log(patient_id)

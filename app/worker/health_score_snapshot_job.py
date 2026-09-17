@@ -33,10 +33,15 @@ from app.db.session import get_db_with_tenant
 from app.models.tenant import Tenant
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.capacity_repository import CapacityRepository
+from app.repositories.contract_repository import ContractRepository
+from app.repositories.cost_entry_repository import CostEntryRepository
 from app.repositories.denial_appeal_repository import DenialAppealRepository
 from app.repositories.executive_narrative_repository import ExecutiveNarrativeRepository
 from app.repositories.health_score_snapshot_repository import HealthScoreSnapshotRepository
+from app.repositories.ingestion_repository import IngestionRepository
+from app.repositories.insight_outcome_repository import InsightOutcomeRepository
 from app.repositories.lote_repository import LoteRepository
+from app.repositories.patient_outreach_log_repository import PatientOutreachLogRepository
 from app.repositories.professional_availability_repository import ProfessionalAvailabilityRepository
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
@@ -76,8 +81,13 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             LoteRepository(session),
             ExecutiveNarrativeRepository(session),
             TrackedAlertRepository(session),
+            ContractRepository(session),
+            CostEntryRepository(session),
+            InsightOutcomeRepository(session),
+            IngestionRepository(session),
+            PatientOutreachLogRepository(session),
         )
-        health_score = await service.get_health_score()
+        health_score = await service.get_health_score(str(tenant.id))
         await HealthScoreSnapshotRepository(session).upsert_snapshot(
             tenant.id, snapshot_month=snapshot_month, score=health_score.score
         )

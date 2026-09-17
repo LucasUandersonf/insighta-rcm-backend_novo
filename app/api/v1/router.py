@@ -16,23 +16,28 @@ from app.api.v1.endpoints import (
     billing,
     capacity,
     contracts,
+    cost_entries,
     denial_appeals,
     faturas,
     glosas,
     guias,
     ingestion,
+    insight_outcomes,
     insurance_companies,
     integrations,
     locais,
     lotes,
+    marketing_spend,
     patients,
     platform,
     professionals,
+    public_satisfaction,
     report_recipients,
     reports,
     support_requests,
     tenant,
     users,
+    waitlist,
     webhooks,
 )
 
@@ -45,15 +50,20 @@ api_router.include_router(analytics.router)
 api_router.include_router(billing.router)
 api_router.include_router(patients.router)
 api_router.include_router(appointments.router)
+api_router.include_router(waitlist.router)
 api_router.include_router(contracts.router)
 api_router.include_router(insurance_companies.router)
 api_router.include_router(denial_appeals.router)
 api_router.include_router(guias.router)
 api_router.include_router(lotes.router)
+api_router.include_router(insight_outcomes.router)
+api_router.include_router(cost_entries.router)
+api_router.include_router(marketing_spend.router)
 api_router.include_router(faturas.router)
 api_router.include_router(glosas.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(professionals.router)
+api_router.include_router(public_satisfaction.router)
 api_router.include_router(locais.router)
 api_router.include_router(capacity.router)
 api_router.include_router(ingestion.router)

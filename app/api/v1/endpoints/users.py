@@ -26,6 +26,12 @@ _CAN_MANAGE = ("owner", "admin")
 # Qualquer papel autenticado pode ver o PRÓPRIO perfil — mesmo critério de
 # /users/me/change-password (self-service não é "gestão de usuários").
 _CAN_VIEW_SELF = ("owner", "admin", "financeiro", "atendimento", "auditor")
+# Épico F1.3 do Plano Diretor ("Atribuição e workflow"): financeiro já
+# gerencia insight_outcomes (mesmo _MANAGER_ROLES de
+# insight_outcome_service.py) e precisa ver NOME de colega pra atribuir
+# um insight — leitura da lista, nunca gestão (criar/editar usuário
+# continua só owner/admin, _CAN_MANAGE acima intacto).
+_CAN_LIST_FOR_ASSIGNMENT = ("owner", "admin", "financeiro")
 
 
 def _build_service(db: DbSession) -> UserService:
@@ -48,7 +54,7 @@ async def get_own_profile(
 @router.get("", response_model=list[UserResponse])
 async def list_users(
     db: DbSession,
-    current_user: CurrentUser = Depends(require_role(*_CAN_MANAGE)),
+    current_user: CurrentUser = Depends(require_role(*_CAN_LIST_FOR_ASSIGNMENT)),
 ) -> list[UserResponse]:
     return await _build_service(db).list_users()
 

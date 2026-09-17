@@ -267,6 +267,96 @@ _POST_UPGRADE_SQL_FILES = [
     # próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa do
     # marcador (ver _POST_UPGRADE_MARKER_TABLE).
     "039_tracked_alerts.sql",
+    # Plano Diretor Insighta, épicos F1.2 (ciclo fechado de insight) +
+    # F1.3 (atribuição/workflow), mesma tabela — ver DECISÃO completa no
+    # próprio .sql. TABLE sem IF NOT EXISTS — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE).
+    "038_insight_outcomes.sql",
+    # Épico F3.1 do Plano Diretor ("Módulo de custos e margem real") —
+    # ver DECISÃO completa no próprio .sql. TABLE sem IF NOT EXISTS —
+    # precisa do marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "039_cost_entries.sql",
+    # Épico F2.1 do Plano Diretor ("Calibração por especialidade/porte") —
+    # ver DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "040_tenant_calibration_fields.sql",
+    # Épico F3.3 do Plano Diretor ("Metas e cenários orientados a
+    # dados") — função agregadora cross-tenant, MESMA role
+    # network_benchmark_owner de 032 (ver DECISÃO no próprio .sql).
+    # DROP + CREATE — auto-idempotente, roda em todo deploy, sem entrar
+    # em _POST_UPGRADE_MARKER_TABLE.
+    "041_network_revenue_growth_benchmark.sql",
+    # Épico F3.2 do Plano Diretor ("Consolidação multi-unidade") — ver
+    # DECISÃO completa no próprio .sql. CREATE TABLE IF NOT EXISTS +
+    # ADD COLUMN IF NOT EXISTS + DROP/CREATE FUNCTION — auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "042_organizations.sql",
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — ver
+    # DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "043_coparticipation_confirmation.sql",
+    # Épico F2.3 do Plano Diretor ("Auditoria documental leve") — ver
+    # DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "044_opme_documentation_confirmation.sql",
+    # "Mapa de Dados Insighta" — Domínio Paciente (Onda 1). Ver DECISÃO
+    # completa no próprio .sql. ADD COLUMN IF NOT EXISTS + CHECK guardado
+    # por DO $$ — auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "045_patient_relationship_fields.sql",
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1). Ver
+    # DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS + CHECK
+    # guardado por DO $$ — auto-idempotente, roda em todo deploy, sem
+    # entrar em _POST_UPGRADE_MARKER_TABLE.
+    "046_appointment_visit_intent.sql",
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 1). CREATE
+    # TABLE sem CREATE POLICY idempotente — precisa do marcador (ver
+    # _POST_UPGRADE_MARKER_TABLE), não roda incondicionalmente em todo
+    # deploy. Ver DECISÃO completa no próprio .sql.
+    "047_professional_planned_absences.sql",
+    # "Mapa de Dados Insighta" — pilar Comparativo & rede. DROP + CREATE
+    # FUNCTION — idempotente por construção (sempre substitui a mesma
+    # função), roda em todo deploy sem marcador. Ver DECISÃO completa no
+    # próprio .sql.
+    "048_network_benchmark_specialty_segment.sql",
+    # "Mapa de Dados Insighta" — Domínio Financeiro particular (Onda 1).
+    # Ver DECISÃO completa no próprio .sql. ADD COLUMN IF NOT EXISTS +
+    # CHECK guardado por DO $$ — auto-idempotente, roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "049_billing_payment_method.sql",
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell. Ver DECISÃO completa no próprio .sql.
+    # ADD COLUMN IF NOT EXISTS — auto-idempotente, roda em todo deploy,
+    # sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "050_appointment_addon_upsell.sql",
+    # "Mapa de Dados Insighta" — Domínio Profissional (Onda 2), pilar
+    # Rentabilidade por profissional. Ver DECISÃO completa no próprio
+    # .sql. ADD COLUMN IF NOT EXISTS + CHECK guardado por DO $$ —
+    # auto-idempotente, roda em todo deploy, sem entrar em
+    # _POST_UPGRADE_MARKER_TABLE.
+    "051_professional_contract_commission.sql",
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Satisfação/NPS. Ver DECISÃO completa no próprio .sql. ADD COLUMN
+    # IF NOT EXISTS + CHECK guardado por DO $$ + CREATE TABLE IF NOT
+    # EXISTS (sem CREATE POLICY, tabela sem RLS) — tudo auto-idempotente,
+    # roda em todo deploy, sem entrar em _POST_UPGRADE_MARKER_TABLE.
+    "052_appointment_satisfaction.sql",
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    # 4) — DROP + CREATE FUNCTION nova (mesma role network_benchmark_owner
+    # de 032, sem GRANT novo de tabela: já tem SELECT em core.tenants/
+    # core.appointments). Idempotente por construção, roda em todo
+    # deploy sem marcador. Ver DECISÃO completa no próprio .sql.
+    "053_network_churn_benchmark.sql",
+    # Plano de Ação Insighta — Onda 3 ("particular como cidadão de
+    # primeira classe"). ADD COLUMN IF NOT EXISTS + CHECK guardado por
+    # DO $$ — auto-idempotente, roda em todo deploy, sem marcador.
+    "054_insurance_plan_type.sql",
+    "055_patient_outreach_log.sql",
+    "056_appointment_squeeze_in.sql",
+    "057_waitlist_entries.sql",
 ]
 
 _ROLES_SQL = """
@@ -318,6 +408,27 @@ GRANT SELECT ON core.tenants, core.billing, core.appointments TO network_benchma
 ALTER FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) OWNER TO network_benchmark_owner;
 REVOKE ALL ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.network_glosa_no_show_benchmark(UUID, INT, INT) TO app_runtime;
+ALTER FUNCTION core.network_churn_benchmark(UUID, INT) OWNER TO network_benchmark_owner;
+REVOKE ALL ON FUNCTION core.network_churn_benchmark(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_churn_benchmark(UUID, INT) TO app_runtime;
+
+-- Meta anual sugerida (ver 041_network_revenue_growth_benchmark.sql) —
+-- MESMA role network_benchmark_owner acima (mesma categoria de dado:
+-- billing/tenants agregado cross-tenant), só GRANT EXECUTE na função nova.
+ALTER FUNCTION core.network_revenue_growth_benchmark(UUID, INT) OWNER TO network_benchmark_owner;
+REVOKE ALL ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.network_revenue_growth_benchmark(UUID, INT) TO app_runtime;
+
+-- Dashboard consolidado multi-unidade (ver 042_organizations.sql) —
+-- role PRÓPRIA (organization_reporting_owner), categoria de dado
+-- diferente de network_benchmark_owner: NÃO anonimizada (unidades do
+-- MESMO dono, comparadas linha a linha), escopada por organization_id
+-- em vez de "toda a rede".
+GRANT USAGE ON SCHEMA core TO organization_reporting_owner;
+GRANT SELECT ON core.tenants, core.organizations, core.billing, core.appointments TO organization_reporting_owner;
+ALTER FUNCTION core.organization_units_summary(UUID, INT) OWNER TO organization_reporting_owner;
+REVOKE ALL ON FUNCTION core.organization_units_summary(UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.organization_units_summary(UUID, INT) TO app_runtime;
 
 -- Oportunidades (ver 033_network_contract_price_benchmark.sql) — role
 -- PRÓPRIA, categoria de dado diferente de network_benchmark_owner
@@ -440,6 +551,9 @@ _POST_UPGRADE_MARKER_TABLE = {
     "034_health_score_snapshots.sql": "health_score_snapshots",
     "038_executive_narratives.sql": "executive_narratives",
     "039_tracked_alerts.sql": "tracked_alerts",
+    "038_insight_outcomes.sql": "insight_outcomes",
+    "039_cost_entries.sql": "cost_entries",
+    "047_professional_planned_absences.sql": "professional_planned_absences",
 }
 
 
@@ -510,9 +624,16 @@ async def _ensure_roles(admin_dsn: str, *, app_runtime_password: str) -> None:
             logger.info("Criando role contract_price_benchmark_owner...")
             await conn.execute("CREATE ROLE contract_price_benchmark_owner NOLOGIN NOSUPERUSER BYPASSRLS")
 
+        organization_reporting_owner_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_reporting_owner')"
+        )
+        if not organization_reporting_owner_exists:
+            logger.info("Criando role organization_reporting_owner...")
+            await conn.execute("CREATE ROLE organization_reporting_owner NOLOGIN NOSUPERUSER BYPASSRLS")
+
         logger.info(
             "Aplicando GRANTs (app_runtime, auth_resolver_owner, platform_reporting_owner, "
-            "network_benchmark_owner, contract_price_benchmark_owner)..."
+            "network_benchmark_owner, contract_price_benchmark_owner, organization_reporting_owner)..."
         )
         await conn.execute(_ROLES_SQL)
     finally:

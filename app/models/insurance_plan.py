@@ -7,6 +7,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
+# Plano de Ação Insighta — Onda 3 ("particular como cidadão de primeira
+# classe"). Ver DECISÃO completa em 054_insurance_plan_type.sql.
+PLAN_TYPE_VALUES = ("convenio", "particular")
+
 
 class InsurancePlan(Base):
     __tablename__ = "insurance_plans"
@@ -31,4 +35,8 @@ class InsurancePlan(Base):
     # normalized_key/alias independente disto — um arquivo do ERP que
     # ainda cita o plano antigo continua reconciliando, mesmo desativado).
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # "convenio" (padrão, retrocompatível) ou "particular" (paciente sem
+    # operadora) — ver PLAN_TYPE_VALUES acima e DECISÃO completa em
+    # 054_insurance_plan_type.sql.
+    plan_type: Mapped[str] = mapped_column(String(20), nullable=False, default="convenio")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

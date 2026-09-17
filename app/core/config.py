@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # enumeração de e-mail por força bruta de tentativas.
     REGISTER_RATE_LIMIT: str = "5/minute"
     PASSWORD_RESET_RATE_LIMIT: str = "5/minute"
+    # Mesma proteção nos 2 endpoints públicos do link de avaliação de
+    # satisfação (ver 052_appointment_satisfaction.sql) — limite mais
+    # generoso que o de reset de senha porque aqui não há e-mail para
+    # enumerar (o token já nasce com alta entropia), só o abuso comum de
+    # qualquer formulário público.
+    SATISFACTION_RATE_LIMIT: str = "20/minute"
     # None = contagem em memória do processo (só funciona com 1 instância
     # da aplicação). Setar para "redis://host:6379" quando houver mais de
     # uma instância atrás de um load balancer — ver DECISÃO em
@@ -160,6 +166,15 @@ class Settings(BaseSettings):
     # exigidos pela operadora para o recurso, não o PDF do contrato nem
     # os lotes de faturamento importados).
     AWS_S3_APPEALS_BUCKET: str | None = None
+    # Achado do Parecer Técnico "Boletim Insighta" (revisão 2) — mesma
+    # credencial ANTHROPIC_API_KEY acima (da plataforma, nunca do
+    # tenant), modelo em variável PRÓPRIA (não reaproveita
+    # CONTRACT_EXTRACTION_MODEL) porque são dois usos com trade-off
+    # diferente: extração de tabela é dado estruturado determinístico,
+    # rascunho de justificativa é texto argumentativo — podem evoluir
+    # pra modelos diferentes sem acoplar as duas features. Ver
+    # app/services/denial_appeal_draft_service.py.
+    DENIAL_APPEAL_DRAFT_MODEL: str = "claude-sonnet-4-5"
 
     # Endpoint S3 customizado — ausente/None em produção real (boto3
     # resolve a AWS sozinho). Existe só para apontar os três buckets
@@ -209,6 +224,12 @@ class Settings(BaseSettings):
     # quanto mais tempo válido, maior a janela de uso indevido se o
     # e-mail for interceptado).
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
+    # Validade do link público de avaliação de satisfação pós-atendimento
+    # (ver 052_appointment_satisfaction.sql) — bem mais longa que o token
+    # de reset de senha de propósito: a recepção pode enviar o link horas
+    # ou dias depois da consulta (não é um fluxo de segurança sensível a
+    # segundos), e o paciente pode simplesmente não responder na hora.
+    SATISFACTION_TOKEN_EXPIRE_DAYS: int = 14
 
     # --- Login com Google ("Sign in with Google") — OPCIONAL ---
     # Client ID do OAuth 2.0 criado no Google Cloud Console (APIs &

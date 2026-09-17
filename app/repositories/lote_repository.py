@@ -25,10 +25,17 @@ class LoteRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def list_paginated(self, *, limit: int, offset: int) -> tuple[list[Lote], int]:
+    async def list_paginated(self, *, limit: int, offset: int, status: str | None = None) -> tuple[list[Lote], int]:
+        """`status` filtra server-side (mesmo padrão de DenialAppealRepository
+        para o filtro de status de recurso) — filtrar no cliente DEPOIS da
+        paginação quebraria o `total`/offset da própria paginação."""
         items_stmt = select(Lote).order_by(Lote.created_at.desc()).limit(limit).offset(offset)
+        count_stmt = select(func.count()).select_from(Lote)
+        if status is not None:
+            items_stmt = items_stmt.where(Lote.status == status)
+            count_stmt = count_stmt.where(Lote.status == status)
         items = list((await self.session.execute(items_stmt)).scalars().all())
-        total = (await self.session.execute(select(func.count()).select_from(Lote))).scalar_one()
+        total = (await self.session.execute(count_stmt)).scalar_one()
         return items, total
 
     async def stale_open_lotes_summary(self, as_of: datetime, stale_after_days: int) -> tuple[int, int | None]:

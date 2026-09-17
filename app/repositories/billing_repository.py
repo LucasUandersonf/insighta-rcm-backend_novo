@@ -183,6 +183,31 @@ class BillingRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def has_duplicate(self, appointment_id: uuid.UUID, charged_value: float, item_type: str | None) -> bool:
+        """
+        Raio-X da Receita, frente "Evitando perdas" — sinal para
+        `denial_risk_engine.assess(has_duplicate_billing=...)` (ver
+        DECISÃO completa em `_rule_duplicate_billing`). Casa MESMO
+        atendimento + MESMO valor cobrado + MESMO tipo de item: o
+        critério mais estreito que ainda captura "clicou Salvar duas
+        vezes" sem confundir com itens legítimos diferentes na mesma
+        consulta (ex: procedimento + material OPME, que naturalmente têm
+        `item_type` e/ou valor diferentes um do outro).
+        `item_type=None` só casa com outra linha TAMBÉM sem item_type —
+        dado incompleto não deveria por si só provar "são a mesma coisa".
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Billing)
+            .where(
+                Billing.appointment_id == appointment_id,
+                Billing.charged_value == charged_value,
+                Billing.item_type == item_type,
+            )
+        )
+        count = (await self.session.execute(stmt)).scalar_one()
+        return count > 0
+
     async def add(self, billing: Billing) -> Billing:
         self.session.add(billing)
         await self.session.flush()  # garante que billing.id exista antes do commit implícito

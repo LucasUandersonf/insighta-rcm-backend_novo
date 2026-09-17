@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.appointment import TIPO_PACIENTE_VALUES
+from app.models.appointment import TIPO_PACIENTE_VALUES, VISIT_INTENT_TAG_VALUES
 
 # Vocabulário FECHADO — os únicos 4 valores que no_show_risk_engine.py,
 # capacity_repository.py e analytics_repository.py já sabem interpretar
@@ -32,12 +32,24 @@ class AppointmentCreateRequest(BaseModel):
     duration_minutes: int | None = Field(default=None, gt=0)
     procedure_code: str | None = None
     cid_code: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1).
+    visit_intent_tag: str | None = None
+    # Onda 5 do Plano de Ação, item 15 — já conhecido na hora de marcar
+    # quando é um encaixe explícito fora da grade normal.
+    is_squeeze_in: bool | None = None
 
     @field_validator("tipo_paciente")
     @classmethod
     def validate_tipo_paciente(cls, v: str | None) -> str | None:
         if v is not None and v not in TIPO_PACIENTE_VALUES:
             raise ValueError(f"tipo_paciente deve ser um de: {', '.join(TIPO_PACIENTE_VALUES)}")
+        return v
+
+    @field_validator("visit_intent_tag")
+    @classmethod
+    def validate_visit_intent_tag(cls, v: str | None) -> str | None:
+        if v is not None and v not in VISIT_INTENT_TAG_VALUES:
+            raise ValueError(f"visit_intent_tag deve ser um de: {', '.join(VISIT_INTENT_TAG_VALUES)}")
         return v
 
 
@@ -82,6 +94,20 @@ class AppointmentUpdateRequest(BaseModel):
     duration_minutes: int | None = Field(default=None, gt=0)
     local_id: UUID | None = None
     tipo_paciente: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1): nem
+    # sempre o motivo já é conhecido na hora de marcar (ex.: reagendamento
+    # em massa) — editável depois, mesmo raciocínio de procedure_code/
+    # cid_code acima.
+    visit_intent_tag: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2), pilar
+    # Crescimento ativo/upsell — capturado no mesmo momento de checkout
+    # (junto com status="completed"), ver DECISÃO em
+    # 050_appointment_addon_upsell.sql.
+    addon_offered_procedure: str | None = None
+    addon_declined: bool | None = None
+    # Onda 5 do Plano de Ação, item 15 — editável depois (ex: a recepção
+    # só percebe que virou encaixe no dia, não na hora de marcar).
+    is_squeeze_in: bool | None = None
 
     @field_validator("status")
     @classmethod
@@ -95,6 +121,13 @@ class AppointmentUpdateRequest(BaseModel):
     def validate_tipo_paciente(cls, v: str | None) -> str | None:
         if v is not None and v not in TIPO_PACIENTE_VALUES:
             raise ValueError(f"tipo_paciente deve ser um de: {', '.join(TIPO_PACIENTE_VALUES)}")
+        return v
+
+    @field_validator("visit_intent_tag")
+    @classmethod
+    def validate_visit_intent_tag(cls, v: str | None) -> str | None:
+        if v is not None and v not in VISIT_INTENT_TAG_VALUES:
+            raise ValueError(f"visit_intent_tag deve ser um de: {', '.join(VISIT_INTENT_TAG_VALUES)}")
         return v
 
 
@@ -123,6 +156,14 @@ class AppointmentResponse(BaseModel):
     visit_type: str | None
     cancellation_reason: str | None
     booking_channel: str | None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 1).
+    visit_intent_tag: str | None = None
+    # "Mapa de Dados Insighta" — Domínio Pós-atendimento (Onda 2).
+    addon_offered_procedure: str | None = None
+    addon_declined: bool | None = None
+    visit_satisfaction_score: int | None = None
+    # Onda 5 do Plano de Ação, item 15.
+    is_squeeze_in: bool | None = None
 
     model_config = {"from_attributes": True}
 
@@ -150,3 +191,4 @@ class AppointmentListItem(BaseModel):
     visit_type: str | None
     booking_channel: str | None
     cancellation_reason: str | None
+    visit_intent_tag: str | None

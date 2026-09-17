@@ -49,9 +49,10 @@ normalization_service.py) busca o valor configurado do tenant e passa
 aqui; sem configuração, caem nos defaults acima. A função continua pura
 (sem tocar banco), só ganhou dois parâmetros com default.
 """
-import statistics
 from dataclasses import dataclass
 from datetime import datetime
+
+from app.services.threshold_calibration import compute_percentile_pair
 
 MIN_SPECIFIC_SAMPLES = 3
 DEFAULT_LOW_THRESHOLD = 0.10
@@ -115,16 +116,19 @@ def suggest_thresholds(patient_no_show_rates: list[float]) -> ThresholdSuggestio
     ruído estatístico, não um padrão real. Quem chama decide como
     comunicar isso (ex: "ainda não há histórico suficiente").
     """
-    if len(patient_no_show_rates) < MIN_PATIENTS_FOR_SUGGESTION:
+    # Núcleo estatístico (mediana + P85) extraído para
+    # threshold_calibration.compute_percentile_pair — Épico F2.1 do Plano
+    # Diretor ("Calibração por especialidade/porte"), reaproveitado
+    # também por smart_insights_engine (limiar de risco de glosa) e
+    # health_score_engine (teto de nota). Comportamento numérico
+    # idêntico ao cálculo anterior (P85 via quantiles(n=20)[16] e
+    # via quantiles(n=100)[84] são o MESMO ponto, só granularidade
+    # diferente de interpolação).
+    pair = compute_percentile_pair(patient_no_show_rates, min_sample=MIN_PATIENTS_FOR_SUGGESTION, high_percentile=85)
+    if pair is None:
         return None
 
-    sorted_rates = sorted(patient_no_show_rates)
-    low = statistics.median(sorted_rates)
-    # statistics.quantiles(data, n=20) devolve 19 pontos de corte dividindo
-    # os dados em 20 grupos iguais — o ponto na posição i (1-indexado)
-    # corresponde ao percentil 5*i. Percentil 85 -> i=17 -> índice 16
-    # (0-indexado) na lista devolvida.
-    medium = statistics.quantiles(sorted_rates, n=20)[16]
+    low, medium = pair.median, pair.high
     # Defesa: com uma distribuição muito concentrada, P85 pode empatar ou
     # ficar abaixo da mediana (ex: quase todo mundo com a MESMA taxa) —
     # o motor exige low < medium (mesma regra de TenantService.update_own_tenant),
@@ -132,7 +136,7 @@ def suggest_thresholds(patient_no_show_rates: list[float]) -> ThresholdSuggestio
     if medium <= low:
         medium = min(low + 0.01, 0.99)
 
-    return ThresholdSuggestion(low_threshold=round(low, 4), medium_threshold=round(medium, 4), sample_size=len(sorted_rates))
+    return ThresholdSuggestion(low_threshold=round(low, 4), medium_threshold=round(medium, 4), sample_size=pair.sample_size)
 
 
 @dataclass
@@ -141,6 +145,15 @@ class NoShowAssessment:
     score: float | None  # taxa usada para classificar; None quando indeterminado
     sample_size: int
     used_specific_pattern: bool
+    # Raio-X da Receita, frente "Prevendo movimentos" — QUAL segmentação
+    # de fato decidiu o risco: "dia_e_periodo" (mesmo dia da semana +
+    # período, o sinal mais específico), "antecedencia" (faixa de
+    # antecedência da marcação, novo nesta rodada — ver
+    # _lead_time_bucket), ou "geral" (taxa histórica bruta, sem
+    # segmentação). "indeterminado" quando `risk_level` também é. Mantém
+    # `used_specific_pattern` (bool) para não quebrar quem já lê só ele —
+    # este campo é a versão detalhada da mesma decisão.
+    risk_signal: str = "geral"
 
 
 def _period_of_day(dt: datetime) -> str:
@@ -154,6 +167,24 @@ def _period_of_day(dt: datetime) -> str:
 def _weekday_pt(dt: datetime) -> int:
     # Mesma convenção usada em capacity_service.py: 0=domingo..6=sábado
     return (dt.weekday() + 1) % 7
+
+
+# Raio-X da Receita, frente "Prevendo movimentos" — faixa de antecedência
+# da marcação (achado da literatura de agendamento em saúde: uma consulta
+# marcada com muita antecedência dá mais tempo pro plano do paciente
+# mudar até lá, tipicamente mais falta do que uma marcação de última
+# hora). 6/21 dias são o mesmo "chute razoável" documentado no resto do
+# arquivo — nunca calibrado contra distribuição real de produção ainda.
+_LEAD_TIME_SHORT_MAX_DAYS = 6  # 0-6 dias = "curto prazo"
+_LEAD_TIME_LONG_MIN_DAYS = 21  # 21+ dias = "longo prazo" (o meio, 7-20, é "médio prazo")
+
+
+def _lead_time_bucket(days: int) -> str:
+    if days <= _LEAD_TIME_SHORT_MAX_DAYS:
+        return "curto"
+    if days >= _LEAD_TIME_LONG_MIN_DAYS:
+        return "longo"
+    return "medio"
 
 
 def _classify(rate: float, low_threshold: float, medium_threshold: float) -> str:
@@ -170,6 +201,7 @@ def assess(
     *,
     low_threshold: float = DEFAULT_LOW_THRESHOLD,
     medium_threshold: float = DEFAULT_MEDIUM_THRESHOLD,
+    candidate_lead_time_days: int | None = None,
 ) -> NoShowAssessment:
     """
     `past_appointments` deve conter apenas atendimentos JÁ OCORRIDOS do
@@ -184,12 +216,27 @@ def assess(
     por tenant" no topo do módulo. Quem chama busca o valor configurado
     em Tenant (None = usar o default do módulo) antes de invocar esta
     função; ela mesma nunca toca banco.
+
+    `candidate_lead_time_days` (Raio-X da Receita, frente "Prevendo
+    movimentos"): dias entre AGORA e `candidate_scheduled_at`, já
+    calculado por quem chama (mesmo padrão de `has_duplicate_billing` em
+    denial_risk_engine.py — a função continua pura, sem ler o relógio).
+    None (default) desliga este sinal inteiro, preservando o
+    comportamento de sempre para todo chamador/teste que ainda não passa
+    esse dado. Quando presente, é a SEGUNDA prioridade de segmentação —
+    depois de dia-da-semana+período (o sinal mais específico já
+    existente), antes da taxa geral: uma clínica pode ter um padrão de
+    falta forte por antecedência (ex: marcação de última hora falta
+    menos) mesmo sem amostra suficiente na combinação exata de
+    dia+período.
     """
     relevant = [a for a in past_appointments if a.status in _COMPLETED_OR_NO_SHOW]
     total = len(relevant)
 
     if total == 0:
-        return NoShowAssessment(risk_level="indeterminado", score=None, sample_size=0, used_specific_pattern=False)
+        return NoShowAssessment(
+            risk_level="indeterminado", score=None, sample_size=0, used_specific_pattern=False, risk_signal="indeterminado"
+        )
 
     target_weekday = _weekday_pt(candidate_scheduled_at)
     target_period = _period_of_day(candidate_scheduled_at)
@@ -207,7 +254,22 @@ def assess(
             score=rate,
             sample_size=len(specific),
             used_specific_pattern=True,
+            risk_signal="dia_e_periodo",
         )
+
+    if candidate_lead_time_days is not None:
+        target_bucket = _lead_time_bucket(candidate_lead_time_days)
+        by_lead_time = [a for a in relevant if _lead_time_bucket((a.scheduled_at - a.created_at).days) == target_bucket]
+        if len(by_lead_time) >= MIN_SPECIFIC_SAMPLES:
+            no_show_count = sum(1 for a in by_lead_time if a.status == "no_show")
+            rate = no_show_count / len(by_lead_time)
+            return NoShowAssessment(
+                risk_level=_classify(rate, low_threshold, medium_threshold),
+                score=rate,
+                sample_size=len(by_lead_time),
+                used_specific_pattern=True,
+                risk_signal="antecedencia",
+            )
 
     no_show_count = sum(1 for a in relevant if a.status == "no_show")
     rate = no_show_count / total
@@ -216,4 +278,5 @@ def assess(
         score=rate,
         sample_size=total,
         used_specific_pattern=False,
+        risk_signal="geral",
     )

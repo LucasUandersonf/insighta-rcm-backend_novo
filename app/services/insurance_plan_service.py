@@ -27,9 +27,14 @@ class InsurancePlanService:
         self.company_repo = company_repo
 
     async def create_plan(self, tenant_id: str, data: InsurancePlanCreateRequest) -> InsurancePlanResponse:
-        company = await self.company_repo.get_by_id(data.insurance_company_id)
-        if company is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operadora não encontrada neste tenant.")
+        # Onda 3 do Plano de Ação ("particular como cidadão de primeira
+        # classe") — data.insurance_company_id só vem preenchido quando
+        # plan_type == "convenio" (o schema já valida essa combinação),
+        # então a busca de operadora só faz sentido nesse caso.
+        if data.insurance_company_id is not None:
+            company = await self.company_repo.get_by_id(data.insurance_company_id)
+            if company is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operadora não encontrada neste tenant.")
 
         plan = InsurancePlan(
             id=uuid.uuid4(),
@@ -38,6 +43,7 @@ class InsurancePlanService:
             display_name=data.display_name,
             normalized_key=slugify(data.display_name),
             ans_registry=data.ans_registry,
+            plan_type=data.plan_type,
         )
         saved = await self.repo.add(plan)
         return InsurancePlanResponse.model_validate(saved)
@@ -55,5 +61,7 @@ class InsurancePlanService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plano não encontrado neste tenant.")
         if data.is_active is not None:
             plan.is_active = data.is_active
+        if data.plan_type is not None:
+            plan.plan_type = data.plan_type
         await self.repo.save(plan)
         return InsurancePlanResponse.model_validate(plan)

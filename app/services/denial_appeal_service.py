@@ -28,6 +28,7 @@ from app.schemas.denial_appeal import (
 from app.repositories.webhook_subscription_repository import WebhookSubscriptionRepository
 from app.services.appeal_deadline_calculator import compute_deadline
 from app.services.appeal_storage_client import AppealStorageClient, AppealStorageError, build_attachment_key
+from app.services.denial_appeal_draft_service import AnthropicDenialAppealDrafter, DenialAppealDraftError
 from app.services.denial_appeal_pdf_builder import DenialAppealDocumentContext, build_denial_appeal_pdf
 from app.services.webhook_dispatch_service import dispatch_event
 
@@ -254,7 +255,9 @@ class DenialAppealService:
         attachments = await self.attachment_repo.list_by_appeal(appeal_id)
         return [DenialAppealAttachmentResponse.model_validate(a) for a in attachments]
 
-    async def build_appeal_document(self, tenant_id: str, appeal_id: uuid.UUID, justification: str | None) -> bytes:
+    async def build_appeal_document(
+        self, tenant_id: str, appeal_id: uuid.UUID, justification: str | None, *, actor_user_id: uuid.UUID
+    ) -> bytes:
         """
         Gera o RASCUNHO em PDF do documento de recurso — ver DECISÃO
         completa em denial_appeal_pdf_builder.py (dados factuais
@@ -263,6 +266,14 @@ class DenialAppealService:
         nunca revelar via 404-vs-outro-erro se um appeal_id de outro
         tenant existe (RLS já impede o SELECT de enxergar, mas o
         contrato de erro fica consistente com o resto do produto).
+
+        Épico F4.1 do Plano Diretor ("LGPD e segurança"): registra no
+        audit log QUEM baixou o documento e DE QUAL paciente — o PDF
+        carrega CPF e CID (dado sensível de saúde, Art. 5º II da LGPD).
+        Mesmo princípio de audit_log_repository.record: o log prova
+        QUE aconteceu, nunca guarda o CPF/CID em si (isso duplicaria a
+        exposição do próprio dado sensível que a trilha existe pra
+        rastrear).
         """
         await self._get_or_404(appeal_id)
         context_row = await self.repo.get_document_context(appeal_id)
@@ -292,7 +303,63 @@ class DenialAppealService:
             guia_senha=context_row["guia_senha"],
             justification=justification,
         )
-        return build_denial_appeal_pdf(context)
+        pdf_bytes = build_denial_appeal_pdf(context)
+        await self.audit_repo.record(
+            tenant_id=uuid.UUID(tenant_id),
+            actor_user_id=actor_user_id,
+            action="document_downloaded",
+            entity_type="denial_appeal",
+            entity_id=appeal_id,
+        )
+        return pdf_bytes
+
+    async def draft_justification(self, tenant_id: str, appeal_id: uuid.UUID, *, actor_user_id: uuid.UUID) -> str:
+        """
+        Rascunho de justificativa via IA — achado do Parecer Técnico
+        "Boletim Insighta" (revisão 2). MESMO dado factual de
+        build_appeal_document (get_document_context), nunca inventa
+        mérito clínico (ver DECISÃO completa em
+        denial_appeal_draft_service.py). `_get_or_404` primeiro pelo
+        mesmo motivo de sempre: contrato de erro consistente
+        independente de RLS já esconder o appeal de outro tenant.
+
+        Épico F4.1 do Plano Diretor ("LGPD e segurança"): este é o
+        ÚNICO ponto do produto (junto de build_appeal_document acima)
+        em que dado de saúde do paciente (CID) sai da infraestrutura da
+        Insighta para um PROCESSADOR TERCEIRO (API da Anthropic) — ver
+        DECISÃO completa em app/services/denial_appeal_draft_service.py
+        sobre o que exatamente é enviado. Registrar isso no audit log
+        não é opcional numa auditoria de LGPD: é exatamente o tipo de
+        fluxo de dado que "quem acessou/exportou dado de qual paciente,
+        quando" precisa cobrir.
+
+        Épico F2.4 do Plano Diretor ("Recurso de glosa assistido"):
+        além do dado factual do caso, o rascunho recebe o histórico de
+        sucesso desta clínica em recursos do MESMO appeal_type (ver
+        DenialAppealRepository.count_resolved_by_appeal_type) — só como
+        reforço, nunca como substituto do argumento de fato (ver regra
+        3b do system prompt).
+        """
+        appeal = await self._get_or_404(appeal_id)
+        context_row = await self.repo.get_document_context(appeal_id)
+        assert context_row is not None  # _get_or_404 já confirmou que o appeal existe
+        appeal_history = await self.repo.count_resolved_by_appeal_type(
+            appeal_type=appeal.appeal_type, exclude_appeal_id=appeal_id
+        )
+
+        try:
+            drafter = AnthropicDenialAppealDrafter()
+            draft = await drafter.draft(context_row, appeal_history)
+            await self.audit_repo.record(
+                tenant_id=uuid.UUID(tenant_id),
+                actor_user_id=actor_user_id,
+                action="ai_draft_generated",
+                entity_type="denial_appeal",
+                entity_id=appeal_id,
+            )
+            return draft
+        except DenialAppealDraftError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     async def _get_or_404(self, appeal_id: uuid.UUID) -> DenialAppeal:
         appeal = await self.repo.get_by_id(appeal_id)

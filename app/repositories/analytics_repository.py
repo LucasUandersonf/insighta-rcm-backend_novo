@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.appointment import Appointment
 from app.models.billing import Billing
+from app.models.contract_item import ContractItem
 from app.models.insurance_plan import InsurancePlan
 
 
@@ -122,6 +123,47 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return float(result.scalar_one())
 
+    async def payment_gap_without_appeal_summary(self) -> tuple[int, float]:
+        """
+        Raio-X da Receita, frente "Evitando perdas": billing já
+        CONCILIADO com Divergência de Recebimento (operadora pagou menos
+        do que o contratado — mesmo LATERAL JOIN de `payment_gap_total`
+        acima) que ainda não tem NENHUM recurso de glosa aberto
+        (`core.denial_appeals`) — dinheiro que a clínica tem direito de
+        contestar, mas ainda ninguém reclamou.
+
+        Backlog ATUAL, não escopado por período (mesmo raciocínio de
+        `high_risk_pending_count`/`appeals_due_soon_count`): um billing
+        conciliado há 3 semanas com gap ainda sem recurso continua sendo
+        "agora" um problema, não deixa de contar só porque saiu da janela
+        de 7 dias do dashboard.
+        """
+        stmt = text(
+            """
+            SELECT COUNT(*), COALESCE(SUM(GREATEST(ci.agreed_price - b.received_value, 0)), 0)
+            FROM core.billing b
+            JOIN core.appointments a ON a.id = b.appointment_id
+            LEFT JOIN LATERAL (
+                SELECT it.agreed_price
+                FROM core.contract_items it
+                JOIN core.contracts c ON c.id = it.contract_id
+                WHERE c.insurance_plan_id = b.insurance_plan_id
+                  AND it.tuss_code = a.procedure_code
+                  AND c.status = 'homologado'
+                  AND c.valid_from <= b.created_at::date
+                  AND (c.valid_until IS NULL OR c.valid_until >= b.created_at::date)
+                ORDER BY c.valid_from DESC
+                LIMIT 1
+            ) ci ON true
+            WHERE b.received_value IS NOT NULL
+              AND ci.agreed_price IS NOT NULL
+              AND ci.agreed_price > b.received_value
+              AND NOT EXISTS (SELECT 1 FROM core.denial_appeals da WHERE da.billing_id = b.id)
+            """
+        )
+        count, total_gap = (await self.session.execute(stmt)).one()
+        return int(count), float(total_gap)
+
     async def payment_lag_total(self, date_from: date, date_to: date) -> tuple[float | None, int]:
         """
         Prazo Médio de Recebimento (PMR) — achado da auditoria "Veredito
@@ -162,14 +204,14 @@ class AnalyticsRepository:
         start, end = _bounds(date_from, date_to)
         stmt = text(
             """
-            SELECT ip.id, ip.display_name,
+            SELECT ip.id, ip.display_name, ip.plan_type,
                    AVG(EXTRACT(EPOCH FROM (b.settled_at - b.created_at)) / 86400.0) AS avg_days,
                    COUNT(*) AS settled_count
             FROM core.billing b
             JOIN core.insurance_plans ip ON ip.id = b.insurance_plan_id
             WHERE b.created_at >= :start AND b.created_at <= :end
               AND b.settled_at IS NOT NULL
-            GROUP BY ip.id, ip.display_name
+            GROUP BY ip.id, ip.display_name, ip.plan_type
             ORDER BY avg_days DESC
             """
         )
@@ -178,8 +220,9 @@ class AnalyticsRepository:
             {
                 "insurance_plan_id": str(row[0]),
                 "insurance_plan_name": row[1],
-                "avg_days_to_receive": float(row[2]),
-                "billings_settled_count": int(row[3]),
+                "plan_type": row[2],
+                "avg_days_to_receive": float(row[3]),
+                "billings_settled_count": int(row[4]),
             }
             for row in result.all()
         ]
@@ -328,6 +371,231 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt, {"start": start, "end": end})
         return {name: float(total) for name, total in result.all() if total}
 
+    async def revenue_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por convênio —
+        mesma base de `billing_summary().total_billed`
+        (ReportingRepository), sem filtro de status nem LATERAL join
+        (não compara contra contrato, só soma o que foi cobrado). Base
+        do insight de concentração de receita (Raio-X da Receita, frente
+        "Gestão eficiente" — ver smart_insights_engine.py::
+        _revenue_concentration_insight). Mesmo critério de
+        `financial_hole_by_plan`: convênio sem nenhum billing no período
+        simplesmente não aparece no dict.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(InsurancePlan.display_name, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(InsurancePlan, InsurancePlan.id == Billing.insurance_plan_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(InsurancePlan.display_name)
+        )
+        result = await self.session.execute(stmt)
+        return {name: float(total) for name, total in result.all() if total}
+
+    async def revenue_by_professional(self, date_from: date, date_to: date) -> dict[str, float]:
+        """
+        Faturado (`charged_value`) do período agrupado por profissional —
+        Raio-X da Receita, frente "Gestão eficiente" (ver
+        AnalyticsService.get_profitability): cruzado com minutos
+        OCUPADOS de agenda (CapacityService, já usado em
+        `professional_utilization_rates` no motor de insights) para
+        calcular receita por hora de agenda ocupada. Billing sem
+        profissional vinculado (`Appointment.professional_id` NULL —
+        comum em dado vindo de ingestão em massa sem essa coluna
+        preenchida) não aparece: não há como atribuir a receita a
+        ninguém em específico.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Appointment.professional_id, func.coalesce(func.sum(Billing.charged_value), 0))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.professional_id.is_not(None))
+            .group_by(Appointment.professional_id)
+        )
+        result = await self.session.execute(stmt)
+        return {str(professional_id): float(total) for professional_id, total in result.all() if total}
+
+    async def revenue_by_procedure(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Faturado do período agrupado por procedimento (código TUSS) —
+        Raio-X da Receita, frente "Gestão eficiente": ranking de mix de
+        receita, maior primeiro. `procedure_name` é "melhor esforço": o
+        nome mais recente cadastrado em QUALQUER contrato com esse
+        código TUSS, de QUALQUER convênio — diferente do preço (que É
+        contrato-específico e varia por convênio), o nome de um
+        procedimento TUSS é padronizado pela ANS, então não precisa vir
+        do MESMO convênio da cobrança para ser um nome válido. None
+        quando nenhum contrato ainda cadastrou esse código (procedimento
+        cobrado sem tabela de preço correspondente).
+        """
+        start, end = _bounds(date_from, date_to)
+        name_subq = (
+            select(ContractItem.procedure_name)
+            .where(ContractItem.tuss_code == Appointment.procedure_code)
+            .order_by(ContractItem.created_at.desc())
+            .limit(1)
+            .correlate(Appointment)
+            .scalar_subquery()
+        )
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.procedure_code, name_subq.label("procedure_name"), func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.procedure_code.is_not(None))
+            .group_by(Appointment.procedure_code)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"procedure_code": code, "procedure_name": name, "billing_count": int(count), "revenue": float(revenue)}
+            for code, name, count, revenue in result.all()
+        ]
+
+    async def billing_ticket_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Achado do Dossiê Insighta RCM — (total faturado, contagem de
+        lançamentos) no período, insumo do ticket médio GERAL. Sem
+        filtro de canal/procedimento: todo Billing conta, mesmo o que
+        não tem `booking_channel`/`procedure_code` preenchido (diferente
+        das quebras por canal/procedimento abaixo, que excluem o que
+        não tem essa coluna — aqui a pergunta é "quanto, em média, cada
+        lançamento vale", não "por canal/procedimento").
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0), func.count()).where(
+            Billing.created_at >= start, Billing.created_at <= end
+        )
+        total, count = (await self.session.execute(stmt)).one()
+        return float(total), int(count)
+
+    async def revenue_by_booking_channel(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `revenue_by_procedure` acima, mas agrupado por
+        `Appointment.booking_channel` (telefone/whatsapp/site/presencial)
+        — insumo do ticket médio por canal. Billing cujo agendamento não
+        tem canal preenchido fica de fora, mesmo motivo de
+        `revenue_by_procedure`.
+        """
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Appointment.booking_channel, func.count().label("billing_count"), revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end, Appointment.booking_channel.is_not(None))
+            .group_by(Appointment.booking_channel)
+            .order_by(revenue_expr.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"channel": channel, "billing_count": int(count), "revenue": float(revenue)}
+            for channel, count, revenue in result.all()
+        ]
+
+    async def revenue_by_patient(self, date_from: date, date_to: date, *, limit: int = 15) -> list[dict]:
+        """
+        Achado do Dossiê Insighta RCM — Pareto de receita por PACIENTE:
+        dimensão diferente da concentração por CONVÊNIO que já existe
+        (`revenue_by_plan`/`_revenue_concentration_insight`) — aqui o
+        risco é "poucos pacientes sustentam a maior parte do
+        faturamento", não "poucos convênios". Maior faturamento primeiro
+        (mesmo critério de `revenue_by_procedure`).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, revenue_expr.label("revenue"))
+            .select_from(Billing)
+            .join(Appointment, Appointment.id == Billing.appointment_id)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Billing.created_at >= start, Billing.created_at <= end)
+            .group_by(Patient.id, Patient.full_name)
+            .order_by(revenue_expr.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {"patient_id": str(patient_id), "full_name": full_name, "revenue": float(revenue)}
+            for patient_id, full_name, revenue in result.all()
+        ]
+
+    async def patient_rfm_metrics(self) -> list[dict]:
+        """
+        Insumo cru do RFM completo (Gaps Dossiê Insighta RCM, item 4) —
+        Recência (`last_appointment_at`), Frequência (`visit_count`) e
+        Valor (`total_revenue`) por paciente, os três SEMPRE histórico
+        completo (sem date_from/date_to), nunca uma janela de período:
+        RFM avalia o RELACIONAMENTO inteiro com o paciente, mesmo
+        raciocínio de `list_inactive_patients`/`vip_signals_for` (ambos
+        também "a partir de hoje", nunca um recorte).
+
+        Só entra paciente com pelo menos 1 atendimento NÃO cancelado
+        (mesmo critério de `vip_signals_for` em patient_repository.py) —
+        cadastro sem histórico não tem Recência/Frequência/Valor pra
+        calcular. `total_revenue` soma todo billing ligado a esses
+        atendimentos (LEFT JOIN — um atendimento sem billing ainda
+        emitido conta 0, nunca é excluído da Frequência por isso).
+        """
+        from app.models.patient import Patient
+
+        last_appointment_expr = func.max(Appointment.scheduled_at)
+        visit_count_expr = func.count(func.distinct(Appointment.id))
+        revenue_expr = func.coalesce(func.sum(Billing.charged_value), 0)
+        stmt = (
+            select(Patient.id, Patient.full_name, last_appointment_expr, visit_count_expr, revenue_expr)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .outerjoin(Billing, Billing.appointment_id == Appointment.id)
+            .where(Appointment.status != "cancelled")
+            .group_by(Patient.id, Patient.full_name)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {
+                "patient_id": str(patient_id),
+                "full_name": full_name,
+                "last_appointment_at": last_appointment_at,
+                "visit_count": int(visit_count),
+                "total_revenue": float(total_revenue),
+            }
+            for patient_id, full_name, last_appointment_at, visit_count, total_revenue in result.all()
+        ]
+
+    async def active_patient_birth_dates(self, date_from: date, date_to: date) -> tuple[list[date], int]:
+        """
+        Achado do Dossiê Insighta RCM — insumo de faixa etária/
+        demografia: `Patient.birth_date` de cada paciente DISTINTO com
+        pelo menos 1 atendimento concluído no período. Retorna (lista de
+        datas de nascimento conhecidas, contagem de pacientes SEM
+        birth_date cadastrado) — bucketing por faixa etária fica pro
+        service (mesma divisão de responsabilidade do resto do produto:
+        repositório devolve dado bruto, quem decide o corte é a camada
+        de cima).
+        """
+        from app.models.patient import Patient
+
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Patient.id, Patient.birth_date)
+            .select_from(Appointment)
+            .join(Patient, Patient.id == Appointment.patient_id)
+            .where(Appointment.scheduled_at >= start, Appointment.scheduled_at <= end, Appointment.status == "completed")
+            .distinct()
+        )
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        birth_dates = [birth_date for _patient_id, birth_date in rows if birth_date is not None]
+        unknown_age_count = sum(1 for _patient_id, birth_date in rows if birth_date is None)
+        return birth_dates, unknown_age_count
+
     async def denial_risk_value_by_plan(self, date_from: date, date_to: date) -> dict[str, float]:
         """Mesma regra de `denial_risk_value_breakdown` (valor faturado
         com denial_risk_level medium/high), agrupada por convênio em vez
@@ -348,6 +616,19 @@ class AnalyticsRepository:
         )
         result = await self.session.execute(stmt)
         return {name: float(total) for name, total in result.all() if total}
+
+    async def plan_types_by_name(self) -> dict[str, str]:
+        """
+        Achado da Onda 3 do Plano de Ação ("particular como cidadão de
+        primeira classe") — lookup `display_name -> plan_type`, usado
+        pra anotar o ranking de perda por convênio (já agrupado por
+        NOME de plano em `financial_hole_by_plan`/`payment_gap_by_plan`/
+        `denial_risk_value_by_plan`) sem precisar reescrever essas 3
+        queries existentes. Mesma fragilidade de chave por NOME (não por
+        id) já presente nelas — não introduzida aqui.
+        """
+        result = await self.session.execute(select(InsurancePlan.display_name, InsurancePlan.plan_type))
+        return dict(result.all())
 
     async def contract_utilization(self, date_from: date, date_to: date) -> list[dict]:
         """
@@ -381,6 +662,7 @@ class AnalyticsRepository:
             SELECT
                 c.id,
                 ip.display_name,
+                ip.plan_type,
                 c.valid_from,
                 c.valid_until,
                 COUNT(ci.id) AS total_items,
@@ -399,7 +681,7 @@ class AnalyticsRepository:
                 LIMIT 1
             ) billed ON true
             WHERE c.status = 'homologado'
-            GROUP BY c.id, ip.display_name, c.valid_from, c.valid_until
+            GROUP BY c.id, ip.display_name, ip.plan_type, c.valid_from, c.valid_until
             ORDER BY (COUNT(DISTINCT CASE WHEN billed.tuss_code IS NOT NULL THEN ci.tuss_code END)::float / NULLIF(COUNT(ci.id), 0)) ASC
             """
         )
@@ -408,11 +690,12 @@ class AnalyticsRepository:
             {
                 "contract_id": row[0],
                 "plan_name": row[1],
-                "valid_from": row[2],
-                "valid_until": row[3],
-                "total_items": row[4],
-                "items_billed": row[5],
-                "idle_catalog_value": float(row[6]),
+                "plan_type": row[2],
+                "valid_from": row[3],
+                "valid_until": row[4],
+                "total_items": row[5],
+                "items_billed": row[6],
+                "idle_catalog_value": float(row[7]),
             }
             for row in result.all()
         ]
@@ -810,6 +1093,66 @@ class AnalyticsRepository:
         result = await self.session.execute(stmt)
         return {int(weekday): (int(no_show), int(total)) for weekday, no_show, total in result.all()}
 
+    async def weekday_cancellation_rate_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Achado do Dossiê Insighta RCM — mesmo molde de
+        `weekday_no_show_rate_breakdown` acima, mas para CANCELAMENTO em
+        vez de falta. Denominador = atendimentos com desfecho TERMINAL
+        no dia (`completed`/`no_show`/`cancelled`) — um agendamento
+        ainda `scheduled` não tem desfecho conhecido (mesmo raciocínio
+        do motor de no-show); diferente do breakdown de falta, aqui
+        `cancelled` entra tanto no numerador quanto no denominador (é
+        exatamente o desfecho que a taxa está medindo).
+
+        Retorna {weekday: (cancellation_count, total_terminal)} — mesma
+        divisão de responsabilidade de sempre: o service decide "sem
+        amostra" vs. taxa real.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        cancellation_expr = func.sum(case((Appointment.status == "cancelled", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, cancellation_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show", "cancelled")),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(cancelled), int(total)) for weekday, cancelled, total in result.all()}
+
+    async def weekday_squeeze_in_breakdown(self, date_from: date, date_to: date) -> dict[int, tuple[int, int]]:
+        """
+        Onda 5 do Plano de Ação, item 15 — em quais dias da semana a
+        agenda mais recebe encaixe (Appointment.is_squeeze_in). Diferente
+        de weekday_cancellation_rate_breakdown: o denominador aqui é só
+        quem tem is_squeeze_in INFORMADO (IS NOT NULL) — um agendamento
+        sem essa informação (a imensa maioria hoje, e todo dado vindo de
+        ingestão que não distingue isso) não pode contar nem a favor nem
+        contra a taxa, senão ela "afunda" artificialmente por falta de
+        dado, não por falta de encaixe de verdade.
+
+        Retorna {weekday: (squeeze_in_count, total_informed)}.
+        """
+        start, end = _bounds(date_from, date_to)
+        weekday_expr = func.extract("dow", Appointment.scheduled_at)
+        squeeze_in_expr = func.sum(case((Appointment.is_squeeze_in.is_(True), 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(weekday_expr, squeeze_in_expr, total_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.is_squeeze_in.is_not(None),
+            )
+            .group_by(weekday_expr)
+        )
+        result = await self.session.execute(stmt)
+        return {int(weekday): (int(squeeze_in), int(total)) for weekday, squeeze_in, total in result.all()}
+
     async def booking_channel_no_show_rate_breakdown(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
         """
         Equivalente a `weekday_no_show_rate_breakdown`, mas por CANAL de
@@ -888,6 +1231,51 @@ class AnalyticsRepository:
         breakdown = {reason: int(count) for reason, count in result.all()}
         return breakdown, int(total)
 
+    async def visit_type_breakdown(self, date_from: date, date_to: date) -> tuple[dict[str, int], int]:
+        """
+        Achado do Dossiê Insighta RCM — `Appointment.visit_type`
+        ("primeira_consulta"/"retorno", ver VISIT_TYPE_VALUES) é
+        capturado pela normalização (Template de Agenda) desde sempre,
+        mas nenhum endpoint agregava isso: taxa de retorno de paciente
+        é um indicador padrão de qualquer clínica (mede fidelização),
+        hoje impossível de calcular no produto.
+
+        Só `status='completed'` conta (mesmo filtro do resto do produto
+        — ver `weekday_no_show_rate_breakdown` acima): um agendamento
+        que não aconteceu não tem "tipo de visita" realizado.
+
+        Devolve (breakdown, untagged_count) SEPARADOS pelo mesmo motivo
+        de `cancellation_reason_breakdown`: nem todo ERP de origem
+        distingue primeira consulta de retorno (campo NULLABLE), então
+        `sum(breakdown.values())` pode ser MENOR que o total de
+        atendimentos concluídos — o service usa a soma real do
+        breakdown como denominador da taxa (nunca conta um "untagged"
+        como primeira_consulta por padrão, o que sub-informaria a taxa
+        de retorno real).
+        """
+        start, end = _bounds(date_from, date_to)
+        untagged_stmt = select(func.count()).where(
+            Appointment.scheduled_at >= start,
+            Appointment.scheduled_at <= end,
+            Appointment.status == "completed",
+            Appointment.visit_type.is_(None),
+        )
+        untagged_count = (await self.session.execute(untagged_stmt)).scalar_one()
+
+        breakdown_stmt = (
+            select(Appointment.visit_type, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status == "completed",
+                Appointment.visit_type.is_not(None),
+            )
+            .group_by(Appointment.visit_type)
+        )
+        result = await self.session.execute(breakdown_stmt)
+        breakdown = {visit_type: int(count) for visit_type, count in result.all()}
+        return breakdown, int(untagged_count)
+
     async def item_type_charged_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """
         Soma de charged_value por `item_type` (procedimento/material_opme/
@@ -934,6 +1322,89 @@ class AnalyticsRepository:
         ).where(Billing.created_at >= start, Billing.created_at <= end, Billing.coparticipation_value.is_not(None))
         copart_total, copart_count = (await self.session.execute(copart_stmt)).one()
         return float(copart_total), int(copart_count), int(total_billing_count)
+
+    async def coparticipation_unconfirmed_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — de
+        toda coparticipação COBRADA no período (coparticipation_value
+        preenchido), quanto ainda NÃO foi confirmada como recebida
+        (coparticipation_received NULL — nunca confirmado) OU foi
+        confirmada que NÃO foi recebida (FALSE — vazamento provado).
+        Ver DECISÃO completa em 043_coparticipation_confirmation.sql.
+
+        Retorna (valor_nao_confirmado, contagem) — alimenta
+        smart_insights_engine.py::_coparticipation_unconfirmed_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.coparticipation_value), 0), func.count()).where(
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.coparticipation_value.is_not(None),
+            Billing.coparticipation_value > 0,
+            Billing.coparticipation_received.is_not(True),
+        )
+        unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
+        return float(unconfirmed_total), int(unconfirmed_count)
+
+    async def coparticipation_payment_method_summary(self, date_from: date, date_to: date) -> tuple[float, int, float]:
+        """
+        "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente,
+        mecanismo 5) — de toda coparticipação já CONFIRMADA COMO
+        RECEBIDA no período com `Billing.payment_method` preenchido
+        (BillingService.confirm_coparticipation só grava payment_method
+        quando received=True — nunca existe payment_method sem
+        confirmação prévia), quanto foi via forma de pagamento "a prazo"
+        (boleto/cartão de crédito — ver
+        smart_insights_engine._COPARTICIPATION_DELAYED_PAYMENT_METHODS)
+        contra o total com forma de pagamento conhecida. Billing sem
+        payment_method informado fica de fora dos dois lados — "não sei
+        como foi pago" não é "pago de forma arriscada".
+
+        Retorna (valor_a_prazo, contagem_a_prazo, valor_total_com_forma_conhecida)
+        — alimenta smart_insights_engine.py::_coparticipation_delayed_payment_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        base_filter = (
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.coparticipation_value.is_not(None),
+            Billing.coparticipation_value > 0,
+            Billing.payment_method.is_not(None),
+        )
+        delayed_expr = func.coalesce(
+            func.sum(case((Billing.payment_method.in_(("boleto", "cartao_credito")), Billing.coparticipation_value), else_=0)),
+            0,
+        )
+        delayed_count_expr = func.count(case((Billing.payment_method.in_(("boleto", "cartao_credito")), 1)))
+        known_total_expr = func.coalesce(func.sum(Billing.coparticipation_value), 0)
+        stmt = select(delayed_expr, delayed_count_expr, known_total_expr).where(*base_filter)
+        delayed_value, delayed_count, known_total = (await self.session.execute(stmt)).one()
+        return float(delayed_value), int(delayed_count), float(known_total)
+
+    async def opme_documentation_unconfirmed_summary(self, date_from: date, date_to: date) -> tuple[float, int]:
+        """
+        Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+        prontuário × conta") — de todo item OPME cobrado no período
+        (item_type='material_opme'), quanto ainda NÃO foi conferido como
+        tendo prescrição/evolução no prontuário
+        (clinical_documentation_confirmed NULL — nunca conferido) OU foi
+        conferido que NÃO tem (FALSE — risco de glosa documental
+        provado). Mesmo formato de coparticipation_unconfirmed_summary
+        acima — ver DECISÃO completa em
+        044_opme_documentation_confirmation.sql.
+
+        Retorna (valor_nao_conferido, contagem) — alimenta
+        smart_insights_engine.py::_opme_documentation_unconfirmed_insight.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = select(func.coalesce(func.sum(Billing.charged_value), 0), func.count()).where(
+            Billing.created_at >= start,
+            Billing.created_at <= end,
+            Billing.item_type == "material_opme",
+            Billing.clinical_documentation_confirmed.is_not(True),
+        )
+        unconfirmed_total, unconfirmed_count = (await self.session.execute(stmt)).one()
+        return float(unconfirmed_total), int(unconfirmed_count)
 
     async def denial_risk_value_breakdown(self, date_from: date, date_to: date) -> dict[str, float]:
         """Soma de charged_value por denial_risk_level ('low'/'medium'/
@@ -1208,6 +1679,108 @@ class AnalyticsRepository:
             "return_rate_sample_size": classified_count,
         }
 
+    # Raio-X da Receita, frente "Prevendo movimentos": `inactive_patients_count`
+    # acima só avisa quem sumiu há mais de 1 ano — um alerta TARDIO, depois
+    # que o paciente já foi embora de verdade. Este bloco calcula, por
+    # paciente, o intervalo MÉDIO entre as próprias consultas (histórico de
+    # pelo menos `min_visits` atendimentos não cancelados) via LAG() e
+    # sinaliza quem já está `gap_multiplier`x esse intervalo sem voltar —
+    # MAS ainda não completou `inactive_after_days` (senão já é "inativo",
+    # outra categoria, sem sobreposição). Mesmo raciocínio de risco de
+    # falta (no_show_risk_engine.py): compara contra o PRÓPRIO padrão do
+    # paciente, nunca um corte genérico igual pra todo mundo — um paciente
+    # que sempre volta a cada 30 dias e já está há 70 sem aparecer é um
+    # sinal muito mais cedo do que esperar 1 ano inteiro de silêncio.
+    _EARLY_CHURN_CTE = """
+        WITH visits AS (
+            SELECT patient_id, scheduled_at,
+                   LAG(scheduled_at) OVER (PARTITION BY patient_id ORDER BY scheduled_at) AS prev_at
+            FROM core.appointments
+            WHERE status != 'cancelled'
+        ),
+        patient_stats AS (
+            SELECT
+                patient_id,
+                MAX(scheduled_at) AS last_appointment_at,
+                COUNT(*) AS visit_count,
+                AVG(EXTRACT(EPOCH FROM (scheduled_at - prev_at)) / 86400.0)
+                    FILTER (WHERE prev_at IS NOT NULL) AS avg_interval_days
+            FROM visits
+            GROUP BY patient_id
+        ),
+        at_risk AS (
+            SELECT patient_id, last_appointment_at, avg_interval_days,
+                   EXTRACT(EPOCH FROM (:as_of_ts - last_appointment_at)) / 86400.0 AS days_since_last
+            FROM patient_stats
+            WHERE visit_count >= :min_visits
+              AND avg_interval_days IS NOT NULL
+              AND avg_interval_days > 0
+              AND last_appointment_at >= :cutoff_inactive
+              AND last_appointment_at <= :as_of_ts - (avg_interval_days * :gap_multiplier) * INTERVAL '1 day'
+        )
+    """
+
+    def _early_churn_params(
+        self, as_of: date, *, min_visits: int, gap_multiplier: float, inactive_after_days: int
+    ) -> dict:
+        return {
+            "as_of_ts": datetime.combine(as_of, time.max, tzinfo=timezone.utc),
+            "min_visits": min_visits,
+            "gap_multiplier": gap_multiplier,
+            "cutoff_inactive": datetime.combine(as_of - timedelta(days=inactive_after_days), time.min, tzinfo=timezone.utc),
+        }
+
+    async def count_early_churn_risk_patients(
+        self, as_of: date, *, min_visits: int = 3, gap_multiplier: float = 2.0, inactive_after_days: int = 365
+    ) -> int:
+        stmt = text(self._EARLY_CHURN_CTE + "SELECT COUNT(*) FROM at_risk")
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        return int((await self.session.execute(stmt, params)).scalar_one())
+
+    async def list_early_churn_risk_patients(
+        self,
+        as_of: date,
+        *,
+        min_visits: int = 3,
+        gap_multiplier: float = 2.0,
+        inactive_after_days: int = 365,
+        limit: int = 15,
+    ) -> list[dict]:
+        """Mesmo critério de `count_early_churn_risk_patients`, devolvendo
+        QUEM são — ordenado por quantas vezes o intervalo próprio do
+        paciente já foi ultrapassado (days_since_last / avg_interval_days),
+        maior primeiro: quem já está mais fora do próprio padrão vem no
+        topo, não necessariamente quem está há mais dias em termos
+        absolutos (um paciente que sempre volta a cada 10 dias e já está
+        há 40 sem aparecer — 4x o próprio ritmo — é mais urgente do que
+        um que volta a cada 90 e está há 100, só 1.1x)."""
+        stmt = text(
+            self._EARLY_CHURN_CTE
+            + """
+            SELECT p.id, p.full_name, ar.last_appointment_at, ar.avg_interval_days, ar.days_since_last
+            FROM at_risk ar
+            JOIN core.patients p ON p.id = ar.patient_id
+            ORDER BY (ar.days_since_last / ar.avg_interval_days) DESC
+            LIMIT :limit
+            """
+        )
+        params = self._early_churn_params(
+            as_of, min_visits=min_visits, gap_multiplier=gap_multiplier, inactive_after_days=inactive_after_days
+        )
+        rows = (await self.session.execute(stmt, {**params, "limit": limit})).all()
+        return [
+            {
+                "patient_id": str(row.id),
+                "patient_name": row.full_name,
+                "last_appointment_at": row.last_appointment_at,
+                "avg_interval_days": float(row.avg_interval_days),
+                "days_since_last": float(row.days_since_last),
+            }
+            for row in rows
+        ]
+
     def _recall_candidates_last_appointment(self, as_of: datetime, weekday: int | None, professional_id: uuid.UUID | None):
         """
         Base compartilhada de list_recall_candidates/count_recall_candidates
@@ -1296,6 +1869,62 @@ class AnalyticsRepository:
             for patient_id, full_name, last_appointment_at, professional_name in result.all()
         ]
 
+    async def satisfaction_score_breakdown(self, date_from: date, date_to: date) -> dict[int, int]:
+        """
+        Distribuição de `Appointment.visit_satisfaction_score` (1-5) no
+        período — "Equilíbrio Insighta" (Balanced Scorecard, perna
+        Cliente, mecanismo 2). Só atendimentos JÁ avaliados entram (score
+        preenchido); quem nunca respondeu não conta como "nota baixa",
+        simplesmente não aparece — mesmo princípio de "amostra ausente
+        != valor ruim" do resto do produto. Alimenta
+        AnalyticsService.get_satisfaction_summary.
+        """
+        start, end = _bounds(date_from, date_to)
+        stmt = (
+            select(Appointment.visit_satisfaction_score, func.count())
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.visit_satisfaction_score.is_not(None),
+            )
+            .group_by(Appointment.visit_satisfaction_score)
+        )
+        result = await self.session.execute(stmt)
+        return {int(score): count for score, count in result.all()}
+
+    async def addon_upsell_breakdown(self, date_from: date, date_to: date) -> list[tuple[str, int, int]]:
+        """
+        Funil de upsell (oferecido × aceito) — "Equilíbrio Insighta"
+        (Balanced Scorecard, perna Cliente, mecanismo 3). Agrupa por
+        `Appointment.addon_offered_procedure` (texto livre — mesmo
+        critério de "canal_agendamento"/"motivo_cancelamento": sem
+        vocabulário fechado ainda, ver DECISÃO em
+        _regroup_text_no_show_counts, analytics_service.py). Só
+        atendimentos onde uma oferta de fato aconteceu (addon_offered_procedure
+        preenchido) entram — quem nunca recebeu oferta não é "recusa
+        silenciosa", é ausência de amostra.
+
+        Retorna [(procedimento, ofertas, aceitas)] — `aceitas` conta só
+        `addon_declined = false` explicitamente; uma oferta com desfecho
+        ainda não registrado (`addon_declined IS NULL`) entra em
+        `ofertas` mas não em `aceitas`, nunca é contada como recusa por
+        omissão.
+        """
+        start, end = _bounds(date_from, date_to)
+        offered_expr = func.count()
+        accepted_expr = func.sum(case((Appointment.addon_declined.is_(False), 1), else_=0))
+        stmt = (
+            select(Appointment.addon_offered_procedure, offered_expr, accepted_expr)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.addon_offered_procedure.is_not(None),
+            )
+            .group_by(Appointment.addon_offered_procedure)
+        )
+        result = await self.session.execute(stmt)
+        return [(procedure, offered, int(accepted or 0)) for procedure, offered, accepted in result.all()]
+
     async def overall_no_show_rate(self, date_from: date, date_to: date) -> tuple[int, int]:
         """
         Taxa de falta agregada do período inteiro (não por dia da semana
@@ -1319,6 +1948,81 @@ class AnalyticsRepository:
         )
         no_show, total = (await self.session.execute(stmt)).one()
         return int(no_show or 0), int(total or 0)
+
+    async def no_show_rate_by_specialty(self, date_from: date, date_to: date) -> dict[str, tuple[int, int]]:
+        """
+        Mesmo cálculo de `overall_no_show_rate` acima, mas quebrado por
+        `Professional.specialty` — "Junta Técnica Insighta" (calibração de
+        risco de falta por especialidade DENTRO da mesma clínica
+        multiespecialidade, não uma tabela de benchmark externa por
+        especialidade médica — ver DECISÃO em threshold_calibration.py
+        sobre por que a Insighta nunca inventaria essa autoridade).
+        Alimenta health_score_engine.resolve_no_show_ceiling_for_period.
+
+        Só entram atendimentos com profissional identificado E com
+        `specialty` preenchido — um agendamento sem profissional vinculado
+        ou um profissional sem especialidade cadastrada não tem como
+        contribuir pra nenhum grupo (continua contando na taxa AGREGADA de
+        `overall_no_show_rate`, só fica de fora desta quebra).
+        """
+        from app.models.professional import Professional
+
+        start, end = _bounds(date_from, date_to)
+        no_show_expr = func.sum(case((Appointment.status == "no_show", 1), else_=0))
+        total_expr = func.count()
+        stmt = (
+            select(Professional.specialty, no_show_expr, total_expr)
+            .select_from(Appointment)
+            .join(Professional, Professional.id == Appointment.professional_id)
+            .where(
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at <= end,
+                Appointment.status.in_(("completed", "no_show")),
+                Professional.specialty.is_not(None),
+            )
+            .group_by(Professional.specialty)
+        )
+        result = await self.session.execute(stmt)
+        return {specialty: (int(no_show or 0), int(total or 0)) for specialty, no_show, total in result.all()}
+
+    async def data_completeness_by_user(
+        self, date_from: date, date_to: date, *, min_sample: int = 5
+    ) -> list[tuple[str, str, int, int]]:
+        """
+        Épico F2.2 do Plano Diretor ("Qualidade de dado na origem"): de
+        todo atendimento LANÇADO (created_at, não scheduled_at — o que
+        importa aqui é o momento do cadastro, não da consulta) no
+        período por um atendente (Appointment.created_by), quantos já
+        nasceram com os dois campos que mais alimentam risco de glosa
+        por dado ausente já preenchidos (cid_code + procedure_code — ver
+        denial_risk_engine._rule_missing_cid/_rule_missing_procedure_code).
+
+        Só entra atendente com amostra >= min_sample — mesmo raciocínio
+        de professional_denial_rates logo abaixo: 1 lançamento não é um
+        "padrão do atendente", é ruído. Atendimento sem created_by
+        (ingestão em massa, job automatizado) não tem "quem lançou" —
+        fica de fora do agrupamento, nunca vira um atendente fantasma
+        "sem nome" (JOIN, não LEFT JOIN, filtra isso automaticamente).
+
+        Retorna [(user_id, nome, completos, total)].
+        """
+        from app.models.user import User
+
+        start, end = _bounds(date_from, date_to)
+        complete_expr = func.sum(
+            case((Appointment.cid_code.is_not(None) & Appointment.procedure_code.is_not(None), 1), else_=0)
+        )
+        total_expr = func.count()
+        stmt = (
+            select(User.id, User.full_name, complete_expr, total_expr)
+            .select_from(Appointment)
+            .join(User, User.id == Appointment.created_by)
+            .where(Appointment.created_at >= start, Appointment.created_at <= end)
+            .group_by(User.id, User.full_name)
+            .having(func.count() >= min_sample)
+        )
+        result = await self.session.execute(stmt)
+        return [(str(user_id), full_name, int(complete), int(total)) for user_id, full_name, complete, total in result.all()]
 
     async def professional_denial_rates(self, date_from: date, date_to: date, *, min_sample: int = 5) -> list[tuple[str, str, float, int]]:
         """

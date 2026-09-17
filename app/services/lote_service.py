@@ -34,18 +34,42 @@ class LoteService:
         saved = await self.lote_repo.add(lote)
         return LoteResponse.model_validate(saved)
 
-    async def list_lotes_paginated(self, *, limit: int, offset: int) -> PaginatedResponse[LoteResponse]:
-        items, total = await self.lote_repo.list_paginated(limit=limit, offset=offset)
-        return PaginatedResponse(items=[LoteResponse.model_validate(i) for i in items], total=total, limit=limit, offset=offset)
+    async def list_lotes_paginated(self, *, limit: int, offset: int, status: str | None = None) -> PaginatedResponse[LoteResponse]:
+        items, total = await self.lote_repo.list_paginated(limit=limit, offset=offset, status=status)
+        counts = await self.guia_repo.count_by_lote_ids([i.id for i in items])
+        responses = [self._to_response(i, counts.get(i.id, 0)) for i in items]
+        return PaginatedResponse(items=responses, total=total, limit=limit, offset=offset)
 
     async def get_lote(self, lote_id: uuid.UUID) -> LoteResponse:
         lote = await self._get_or_404(lote_id)
-        return LoteResponse.model_validate(lote)
+        counts = await self.guia_repo.count_by_lote_ids([lote.id])
+        return self._to_response(lote, counts.get(lote.id, 0))
 
     async def list_guias_in_lote(self, lote_id: uuid.UUID) -> list[GuiaResponse]:
         await self._get_or_404(lote_id)
         guias = await self.guia_repo.list_by_lote(lote_id)
         return [GuiaResponse.model_validate(g) for g in guias]
+
+    async def list_guia_candidates(self, lote_id: uuid.UUID) -> list[GuiaResponse]:
+        """Guias que PODEM entrar neste lote agora: mesmo convênio + tipo
+        do lote e ainda sem lote nenhum — alimenta o seletor da tela de
+        gestão, mesma regra que add_guia já valida na escrita."""
+        lote = await self._get_or_404(lote_id)
+        candidates = await self.guia_repo.list_unassigned_candidates(insurance_plan_id=lote.insurance_plan_id, tipo=lote.tipo)
+        return [GuiaResponse.model_validate(g) for g in candidates]
+
+    @staticmethod
+    def _to_response(lote: Lote, guias_count: int) -> LoteResponse:
+        return LoteResponse(
+            id=lote.id,
+            insurance_plan_id=lote.insurance_plan_id,
+            tipo=lote.tipo,
+            status=lote.status,
+            fatura_id=lote.fatura_id,
+            closed_at=lote.closed_at,
+            created_at=lote.created_at,
+            guias_count=guias_count,
+        )
 
     async def add_guia(self, lote_id: uuid.UUID, guia_id: uuid.UUID) -> GuiaResponse:
         """Equivale a "Atribuir ao Lote"/seleção de pacientes de um ERP

@@ -21,6 +21,38 @@ async def test_owner_can_create_and_list_users(client, admin_engine, tenant_a, a
     assert "nova.recepcao@clinica-a.com" in emails
 
 
+async def test_financeiro_can_list_users_but_not_create(client, admin_engine, tenant_a, auth_headers_a):
+    """Épico F1.3 do Plano Diretor ("Atribuição e workflow"): financeiro
+    precisa ver nome de colega pra atribuir um insight_outcome — leitura
+    só, nunca gestão de usuário (criar continua owner/admin)."""
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="financeiro@clinica-a.com", role="financeiro")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    list_resp = await client.get("/api/v1/users", headers=headers)
+    assert list_resp.status_code == 200
+
+    create_resp = await client.post(
+        "/api/v1/users",
+        json={"email": "outro2@clinica-a.com", "full_name": "Outro 2", "role": "atendimento"},
+        headers=headers,
+    )
+    assert create_resp.status_code == 403
+
+
+async def test_atendimento_cannot_list_users(client, admin_engine, tenant_a):
+    from tests.conftest import _insert_user, _login
+
+    user = await _insert_user(admin_engine, tenant_id=tenant_a, email="so-leitura@clinica-a.com", role="atendimento")
+    token = await _login(client, user["email"], user["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = await client.get("/api/v1/users", headers=headers)
+    assert resp.status_code == 403
+
+
 async def test_atendimento_cannot_manage_users(client, admin_engine, tenant_a):
     from tests.conftest import _insert_user, _login
 

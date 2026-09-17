@@ -91,3 +91,36 @@ def test_clean_billing_is_low_risk():
     assert result.level == "low"
     assert result.reasons == []
     assert result.should_hold_for_review is False
+
+def test_duplicate_billing_is_high_risk_and_blocks_submission():
+    appointment = _make_appointment()
+    contract_item = _make_contract_item(agreed_price=150.00)
+
+    result = assess(appointment, contract_item, charged_value=150.00, has_duplicate_billing=True)
+
+    assert result.level == "high"
+    assert "duplicate_billing" in result.reasons
+    assert result.should_hold_for_review is True
+
+
+def test_duplicate_billing_flag_absent_by_default():
+    """Mesmo raciocínio de `quantity` — chamador antigo/teste que não
+    passa `has_duplicate_billing` continua se comportando exatamente
+    como antes desta regra existir."""
+    appointment = _make_appointment()
+    contract_item = _make_contract_item(agreed_price=150.00)
+
+    result = assess(appointment, contract_item, charged_value=150.00)
+
+    assert result.level == "low"
+    assert "duplicate_billing" not in result.reasons
+
+
+def test_duplicate_billing_stacks_with_other_findings():
+    appointment = _make_appointment(cid_code=None)
+    contract_item = _make_contract_item(agreed_price=150.00)
+
+    result = assess(appointment, contract_item, charged_value=150.00, has_duplicate_billing=True)
+
+    assert result.level == "high"
+    assert set(result.reasons) == {"missing_cid", "duplicate_billing"}

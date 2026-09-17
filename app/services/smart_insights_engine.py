@@ -41,6 +41,9 @@ frequente vira a manchete, os demais entram como "e mais N motivo(s)".
 """
 from dataclasses import dataclass, field
 
+from app.services.report_calculations import compute_roi_pct
+from app.services.threshold_calibration import compute_percentile_pair
+
 # Tradução em português simples de cada motivo técnico do motor de glosa
 # (denial_risk_engine.py) — usada SÓ na composição de frases deste
 # arquivo (não é a fonte de verdade do reason_code em si, que continua
@@ -51,6 +54,7 @@ _REASON_PLAIN = {
     "no_contract_reference": "esse convênio ainda não tem uma tabela de preços cadastrada no sistema",
     "value_above_contract": "o valor cobrado ficou mais alto do que o combinado no contrato",
     "value_below_contract_revenue_leak": "o valor cobrado ficou mais baixo do que o combinado no contrato",
+    "duplicate_billing": "esse atendimento já tinha sido cobrado antes, com o mesmo valor (duplicidade)",
 }
 
 # Amostra mínima antes de declarar uma variação percentual "spike" —
@@ -75,6 +79,73 @@ _WEEKDAY_DROP_WARNING_PCT = 15.0
 _DENIAL_RISK_PCT_CRITICAL = 40.0
 _DENIAL_RISK_PCT_WARNING = 15.0
 
+# Amostra mínima de MESES de histórico antes de sugerir um limiar de
+# risco de glosa calibrado pela própria clínica (ver DECISÃO completa em
+# threshold_calibration.py — Épico F2.1 do Plano Diretor). Mais baixa que
+# MIN_PATIENTS_FOR_SUGGESTION do no-show (10) porque a unidade aqui é
+# "mês", não "paciente" — pedir 10 meses de histórico antes de qualquer
+# sugestão adiaria demais um recurso que já é opcional (o tenant só vê
+# essa sugestão se pedir).
+MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION = 6
+
+
+@dataclass
+class DenialRiskThresholdSuggestion:
+    warning_threshold: float
+    critical_threshold: float
+    sample_size: int  # quantos meses de histórico entraram no cálculo
+
+
+def resolve_denial_risk_thresholds(tenant) -> tuple[float, float]:
+    """Duck-typed de propósito (mesmo padrão de
+    no_show_risk_engine.resolve_thresholds): aceita qualquer objeto com
+    `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    (Decimal/float/None) ou `None` — centraliza a conversão "None -> default
+    do módulo" para não divergir entre quem chama."""
+    if tenant is None:
+        return _DENIAL_RISK_PCT_WARNING, _DENIAL_RISK_PCT_CRITICAL
+    warning = (
+        float(tenant.denial_risk_warning_threshold)
+        if tenant.denial_risk_warning_threshold is not None
+        else _DENIAL_RISK_PCT_WARNING
+    )
+    critical = (
+        float(tenant.denial_risk_critical_threshold)
+        if tenant.denial_risk_critical_threshold is not None
+        else _DENIAL_RISK_PCT_CRITICAL
+    )
+    return warning, critical
+
+
+def suggest_denial_risk_thresholds(monthly_denial_risk_pcts: list[float]) -> DenialRiskThresholdSuggestion | None:
+    """
+    Sugere `denial_risk_warning_threshold`/`denial_risk_critical_threshold`
+    a partir da distribuição REAL de risco de glosa mês a mês desta
+    clínica (escala 0-100, mesma de `InsightsPeriodInput.denial_risk_pct`)
+    — não um corte genérico igual pra qualquer clínica. Mesmo raciocínio
+    de no_show_risk_engine.suggest_thresholds: mediana vira o aviso
+    ("comportamento típico já merece atenção"), P85 vira o crítico (só os
+    15% piores meses da própria clínica).
+
+    Retorna None com menos de MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION meses
+    qualificados — mesma cautela de nunca inventar confiança que a
+    evidência não dá.
+    """
+    pair = compute_percentile_pair(
+        monthly_denial_risk_pcts, min_sample=MIN_MONTHS_FOR_DENIAL_RISK_SUGGESTION, high_percentile=85
+    )
+    if pair is None:
+        return None
+    warning, critical = pair.median, pair.high
+    # Defesa: distribuição concentrada pode fazer P85 empatar/ficar abaixo
+    # da mediana — o motor exige warning < critical (mesma regra de
+    # TenantService.update_own_tenant), nunca sugerimos um par inválido.
+    if critical <= warning:
+        critical = min(warning + 1.0, 99.0)
+    return DenialRiskThresholdSuggestion(
+        warning_threshold=round(warning, 1), critical_threshold=round(critical, 1), sample_size=pair.sample_size
+    )
+
 # Achado do usuário sobre lacunas do módulo de Agenda: volume por dia da
 # semana (weekday_appointment_counts acima) não responde "quinta tem taxa
 # de falta alta" — só "quinta tem menos gente marcado". Comparação é
@@ -84,6 +155,16 @@ _DENIAL_RISK_PCT_WARNING = 15.0
 # dia está X pontos acima da sua própria média" é sempre acionável.
 _WEEKDAY_NO_SHOW_RATE_CRITICAL_PP = 20.0  # pontos percentuais acima da média do período
 _WEEKDAY_NO_SHOW_RATE_WARNING_PP = 10.0
+
+# Onda 6 do Plano de Ação, item 19 — mesmo raciocínio comparativo
+# (intra-período, contra a própria média) de _WEEKDAY_NO_SHOW_RATE_*
+# acima, agora pra encaixe. Diferente de falta (sempre ruim), encaixe
+# concentrado não é em si um problema — é um sinal de sobrecarga
+# operacional NUM dia específico, então o piso é mais alto (só vira
+# alerta quando o desvio é grande o bastante pra sugerir que aquele dia
+# está sistematicamente espremido, não uma exceção pontual).
+_WEEKDAY_SQUEEZE_IN_CRITICAL_PP = 25.0
+_WEEKDAY_SQUEEZE_IN_WARNING_PP = 15.0
 
 # Terceiro exemplo do briefing de redesenho: meta anual vs. ritmo real.
 # "Atrás do ritmo" é medido contra o esperado NA DATA DE HOJE (meta *
@@ -142,6 +223,34 @@ _OPME_CONCENTRATION_INCREASE_PP = 5.0  # só alerta se SUBIU pelo menos isso vs.
 # não provam que o cliente já preenche essa coluna de forma consistente).
 _MIN_COPARTICIPATION_SAMPLE = 5
 
+# Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário ×
+# conta") — amostra mínima de linhas OPME não conferidas antes de virar
+# card, mesmo raciocínio de _MIN_COPARTICIPATION_SAMPLE: 1-2 linhas
+# esquecidas é ruído operacional do dia a dia, não um padrão. Menor que
+# o de coparticipação de propósito: OPME já é, por natureza, uma fatia
+# pequena e de ALTO valor do faturamento — exigir 5 quase nunca
+# disparava em clínicas menores.
+_MIN_OPME_DOCUMENTATION_SAMPLE = 2
+
+# Raio-X da Receita — achado do Parecer Técnico "Boletim Insighta"
+# (revisão 2, 14/09): _coparticipation_visibility_insight só dispara UMA
+# vez (a "estreia" do dado); nada acompanhava a fatia de coparticipação
+# depois disso. 5pp é o mesmo piso já usado em
+# _OPME_CONCENTRATION_INCREASE_PP — mesmo "chute razoável" documentado
+# no resto do arquivo.
+_COPARTICIPATION_GROWTH_INCREASE_PP = 5.0
+
+# "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo 5)
+# — Billing.payment_method/installments ("Mapa de Dados Insighta" Onda
+# 1) foram capturados de propósito para um "futuro insight de
+# inadimplência de particular" (ver COMMENT ON COLUMN em
+# 049_billing_payment_method.sql) — este é esse insight. Boleto e cartão
+# de crédito são as duas formas onde o dinheiro NÃO entra no caixa na
+# hora do atendimento (diferente de dinheiro/pix/débito, liquidação
+# imediata) — mesma régua de risco que qualquer corretor financeiro
+# usaria, não uma calibração inventada.
+_COPARTICIPATION_DELAYED_PAYMENT_METHODS = frozenset({"boleto", "cartao_credito"})
+
 # "O que resta em aberto" da Auditoria de Templates e Insights: peça
 # natural do mesmo padrão que Guia/coparticipação já fecharam —
 # core.lotes.status/closed_at (Fase 2) já modelados, sem nenhum insight
@@ -165,15 +274,61 @@ _MIN_COPARTICIPATION_SAMPLE = 5
 #
 # _PAYMENT_LAG_MARKET_BENCHMARK_DAYS é só contexto NARRATIVO (citado na
 # mensagem quando o prazo da própria clínica já passa dele) — nunca o
-# gatilho do alerta, que são os dois limiares abaixo. Segundo a ANAHP, o
-# PMR do setor de saúde suplementar no Brasil chegou a 77 dias em 2025;
-# 60/90 são um "chute razoável" ancorado nesse número (mesma limitação
-# de todo o resto dos limiares deste arquivo — Achado 7 da Auditoria de
-# Templates e Insights: não calibrado contra dado real de produção).
-_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 77.0
+# gatilho do alerta, que são os dois limiares abaixo.
+#
+# CORREÇÃO — Parecer Técnico "Boletim Insighta" (revisão 2, 14/09)
+# sugeriu subir este número para 120 dias, citando "ANAHP 2024, quase o
+# dobro de 2022". Verificado via busca antes de aplicar (indicadores do
+# Sistema de Indicadores Hospitalares da Anahp, cobertos por Medicina
+# S/A e Saúde Business): o PMR real do setor em 2024 foi de
+# aproximadamente 69 dias — CAINDO frente aos ~76 dias de 2023, não
+# subindo. A alegação de 120 dias não se sustenta contra a fonte
+# primária; mantido aqui o número real verificado, não o do parecer.
+# 60/90 (limiares de alerta abaixo) continuam um "chute razoável"
+# ancorado nesse benchmark (mesma limitação de todo o resto deste
+# arquivo — Achado 7 da Auditoria de Templates e Insights: não
+# calibrado contra dado real de produção).
+_PAYMENT_LAG_MARKET_BENCHMARK_DAYS = 69.0
 _PAYMENT_LAG_WARNING_DAYS = 60.0
 _PAYMENT_LAG_CRITICAL_DAYS = 90.0
 _MIN_PAYMENT_LAG_SAMPLE = 5  # mesmo raciocínio de amostra mínima do resto do arquivo
+
+# Raio-X da Receita, frente "Evitando perdas" — contrato vencendo sem
+# renovação. O horizonte de quantos dias à frente a QUERY já olha
+# (CONTRACT_EXPIRING_ALERT_HORIZON_DAYS) vive em analytics_service.py,
+# mesmo motivo de APPEAL_DEADLINE_ALERT_HORIZON_DAYS viver lá — mas a
+# ESCALADA de severidade dentro dessa janela (crítico vs. atenção) é só
+# deste motor, mesmo padrão do resto do arquivo. "Chute razoável" de v1,
+# não calibrado com dado real (mesma limitação de sempre).
+_CONTRACT_EXPIRING_CRITICAL_DAYS = 7
+
+# Raio-X da Receita, frente "Gestão eficiente" — concentração de receita
+# em poucos convênios. Exige pelo menos 2 convênios distintos faturados
+# no período (com 1 só, "100% de concentração" é a estrutura do negócio,
+# não uma anomalia). 60%/80% são o mesmo "chute razoável" documentado no
+# resto do arquivo.
+_MIN_PLANS_FOR_CONCENTRATION = 2
+_REVENUE_CONCENTRATION_WARNING_PCT = 60.0
+_REVENUE_CONCENTRATION_CRITICAL_PCT = 80.0
+
+# Raio-X da Receita, frente "Melhorias" — ROI de marketing trazido pro
+# feed (antes só existia isolado no relatório semanal, ver
+# ReportDataService/compute_roi_pct). Piso de gasto mínimo antes de
+# alertar: um teste de campanha de poucas dezenas de reais com ROI
+# negativo é ruído, não um padrão que mereça a atenção da diretoria.
+_MIN_MARKETING_SPEND_FOR_INSIGHT = 200.0
+_MARKETING_ROI_CRITICAL_RATIO = -0.50  # receita atribuída menor que metade do gasto
+
+# Raio-X da Receita, frente "Prevendo movimentos" — sazonalidade de
+# agenda (comparação ANO contra ano, não semana contra semana como
+# _weekday_drop_insight). Amostra mínima no ano passado: uma clínica com
+# menos de 1 ano de uso (ou um período do ano passado com poucochíssimo
+# volume) tornaria qualquer variação percentual ruído, não um padrão
+# sazonal real. 20%/35% são o mesmo "chute razoável" documentado no
+# resto do arquivo.
+_YOY_MIN_LAST_YEAR_SAMPLE = 10
+_YOY_DROP_WARNING_PCT = 20.0
+_YOY_DROP_CRITICAL_PCT = 35.0
 
 
 def _comparative_phrase(ratio: float) -> str:
@@ -307,6 +462,33 @@ class InsightsPeriodInput:
     coparticipation_total: float = 0.0
     coparticipation_billing_count: int = 0
     total_billing_count: int = 0
+    # Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — de
+    # toda coparticipação COBRADA (coparticipation_total acima), quanto
+    # ainda não foi confirmada como recebida do paciente (ver
+    # AnalyticsRepository.coparticipation_unconfirmed_summary). Estado
+    # "AGORA" (como no_show_risk_score etc.): só o período atual recebe
+    # o valor real, o anterior fica no default — não existe "pendência
+    # de confirmação do período anterior" com sentido de negócio.
+    coparticipation_unconfirmed_value: float = 0.0
+    coparticipation_unconfirmed_count: int = 0
+    # "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    # 5) — de toda coparticipação com payment_method PREENCHIDO, quanto
+    # foi via forma de pagamento "a prazo" (boleto/cartão de crédito, ver
+    # _COPARTICIPATION_DELAYED_PAYMENT_METHODS) contra o total com forma
+    # conhecida (denominador — nunca o total geral, que inclui billings
+    # sem payment_method informado ainda). Estado "AGORA", mesmo
+    # raciocínio de coparticipation_unconfirmed_* acima.
+    coparticipation_delayed_payment_value: float = 0.0
+    coparticipation_delayed_payment_count: int = 0
+    coparticipation_known_payment_method_value: float = 0.0
+    # Épico F2.3 do Plano Diretor ("Auditoria documental leve —
+    # prontuário × conta") — de todo item OPME cobrado, quanto ainda não
+    # foi conferido como tendo prescrição/evolução no prontuário (ver
+    # AnalyticsRepository.opme_documentation_unconfirmed_summary).
+    # Estado "AGORA", mesmo raciocínio de coparticipation_unconfirmed_*
+    # acima: só o período atual recebe o valor real.
+    opme_documentation_unconfirmed_value: float = 0.0
+    opme_documentation_unconfirmed_count: int = 0
     # Lotes de faturamento (core.lotes) com status='aberto' há mais de
     # _STALE_LOTE_AFTER_DAYS dias, e a idade em dias do mais antigo deles
     # — ver AnalyticsService._period_insights_input e
@@ -328,6 +510,74 @@ class InsightsPeriodInput:
     # conciliado no período).
     avg_days_to_receive: float | None = None
     payment_lag_settled_count: int = 0
+    # Contratos de repasse vencendo sem renovação já cadastrada (Raio-X
+    # da Receita, frente "Evitando perdas") — ver
+    # ContractRepository.expiring_without_renewal_summary e
+    # AnalyticsService.CONTRACT_EXPIRING_ALERT_HORIZON_DAYS. Estado
+    # "AGORA" (mesmo raciocínio de appeals_due_soon_count/
+    # stale_open_lotes_count): um contrato vencendo em 5 dias não fica
+    # "menos urgente" por não ter mudado desde ontem — só o período
+    # atual recebe o valor real.
+    expiring_contracts_count: int = 0
+    soonest_expiring_contract_plan_name: str | None = None
+    soonest_expiring_contract_days: int | None = None
+    # Concentração de receita em poucos convênios (Raio-X da Receita,
+    # frente "Gestão eficiente") — {plan_name: valor faturado no
+    # período}, já ordenado do maior para o menor pelo repositório (ver
+    # AnalyticsRepository.revenue_by_plan). O motor
+    # (_revenue_concentration_insight) decide sozinho o que conta como
+    # "concentrado" a partir da distribuição bruta, não recebe um
+    # percentual pré-calculado — mesma divisão de responsabilidade de
+    # professional_denial_rates/professional_utilization_rates acima.
+    revenue_by_plan: dict[str, float] = field(default_factory=dict)
+    # ROI de marketing (Raio-X da Receita, frente "Melhorias") — dado já
+    # existia isolado no relatório semanal (ReportDataService); esta
+    # rodada só o traz pro feed de insights. Estado do PERÍODO
+    # (gasto/receita atribuída da janela do dashboard), comparável
+    # contra o período anterior — mesmo raciocínio de financial_hole/
+    # payment_gap.
+    marketing_spend_total: float = 0.0
+    marketing_revenue_attributed: float = 0.0
+    # Raio-X da Receita, frente "Evitando perdas" — billing já conciliado
+    # com Divergência de Recebimento que ainda não tem recurso de glosa
+    # aberto (ver AnalyticsRepository.payment_gap_without_appeal_summary
+    # e _payment_gap_without_appeal_insight). Backlog "AGORA" (mesmo
+    # raciocínio de appeals_due_soon_count/stale_open_lotes_count): só o
+    # período atual recebe o valor real.
+    payment_gap_without_appeal_count: int = 0
+    payment_gap_without_appeal_value: float = 0.0
+    # Raio-X da Receita, frente "Prevendo movimentos" — total de
+    # agendamentos no MESMO período, um ano antes (ver
+    # AnalyticsService._year_ago_period e _yoy_seasonality_insight). Só
+    # existe em `current` (comparar "ano passado" do período ANTERIOR
+    # não faz sentido — o insight já compara current contra isso). None
+    # = não calculado (chamador antigo/teste que não passa esse dado).
+    yoy_last_year_appointment_count: int | None = None
+    # Raio-X da Receita, frente "Prevendo movimentos" — pacientes em
+    # risco de abandono ANTECIPADO (ver AnalyticsRepository.
+    # count_early_churn_risk_patients e _early_churn_insight). Estado
+    # "AGORA" (mesmo raciocínio de appeals_due_soon_count): só o período
+    # atual recebe o valor real.
+    early_churn_risk_count: int = 0
+    # Onda 6 do Plano de Ação, item 19 — em quais dias da semana a
+    # agenda mais recebe encaixe (Appointment.is_squeeze_in, ver
+    # AnalyticsRepository.weekday_squeeze_in_breakdown e
+    # _weekday_squeeze_in_insight). Mesmo formato de
+    # weekday_no_show_counts ({weekday: (squeeze_in_count,
+    # total_informado)}) — só faz sentido em `current` (comparação
+    # intra-período), default {} pelo motivo de sempre.
+    weekday_squeeze_in_counts: dict[int, tuple[int, int]] = field(default_factory=dict)
+    # Onda 6 do Plano de Ação, item 19 — pacientes no segmento RFM
+    # "não pode perder" (alto valor histórico, sumiu — ver
+    # rfm_engine.classify_segment e AnalyticsService.get_patient_rfm).
+    # Estado "AGORA" (mesmo raciocínio de early_churn_risk_count): só o
+    # período atual recebe o valor real. `top_name`/`top_revenue`
+    # identificam o caso de maior receita histórica entre eles, pro
+    # texto do insight nomear um exemplo concreto em vez de só um
+    # número solto.
+    rfm_cannot_lose_count: int = 0
+    rfm_cannot_lose_top_name: str | None = None
+    rfm_cannot_lose_top_revenue: float = 0.0
 
 
 @dataclass
@@ -418,8 +668,13 @@ def _high_risk_billing_href(plan_id: str) -> str:
     parâmetro que o Painel usa de verdade (ver
     BillingRepository.list_high_risk_paginated e DashboardPage.tsx,
     frontend) — o `action_label` já nomeia o convênio na própria frase
-    do botão, então o destino não precisa repetir o nome na URL."""
-    return f"/?insurance_plan_id={plan_id}"
+    do botão, então o destino não precisa repetir o nome na URL.
+
+    "Junta Técnica Insighta": o Painel foi movido de "/" para "/painel"
+    (deixou de ser a landing page, virou só destino de drill-down — ver
+    RootRedirect.tsx, frontend) — este é exatamente esse drill-down,
+    então o link precisa acompanhar a rota nova."""
+    return f"/painel?insurance_plan_id={plan_id}"
 
 
 def _denial_spike_insights(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> list[Insight]:
@@ -546,8 +801,11 @@ def _payment_gap_insight(current: InsightsPeriodInput, previous: InsightsPeriodI
 def _payment_lag_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
     """
     PMR (achado da auditoria "Veredito do Gestor Clínico" — Seção 4,
-    Achado 2): o segundo maior vilão financeiro do setor segundo a
-    ANAHP (77 dias em 2025), ao lado da glosa — e o dado pra calculá-lo
+    Achado 2): o segundo maior vilão financeiro do setor ao lado da
+    glosa — mesmo com o PMR médio real da ANAHP em queda (~69 dias em
+    2024, vindo de ~76 em 2023, ver _PAYMENT_LAG_MARKET_BENCHMARK_DAYS),
+    ainda é tempo de caixa preso que a clínica não recupera sozinha — e
+    o dado pra calculá-lo
     (billing.created_at/settled_at) sempre esteve no banco sem nenhum
     indicador consumindo. Estado do PERÍODO (billing criado na janela,
     já conciliado) — comparável contra o período anterior, mesmo
@@ -711,6 +969,157 @@ def _coparticipation_visibility_insight(current: InsightsPeriodInput, previous: 
     )
 
 
+def _coparticipation_growth_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): o insight
+    acima (_coparticipation_visibility_insight) é um "aviso de
+    boas-vindas" que dispara UMA ÚNICA vez, no momento em que o dado
+    passa a ser confiável — depois disso, nenhum insight acompanhava a
+    fatia de coparticipação no faturamento de forma contínua. Este
+    insight fecha essa lacuna com o MESMO padrão já usado em
+    _opme_concentration_insight: só alerta quando a fatia SOBE de forma
+    material vs. o período anterior. Exige amostra confiável NOS DOIS
+    períodos (o inverso do insight de cima, que exige o contrário) —
+    de propósito: um cobre a "estreia" do dado, este cobre a
+    "tendência" depois dela, nunca os dois no mesmo carregamento.
+
+    Sem inventar "inadimplência" de propósito: hoje o produto registra
+    quanto foi COBRADO de coparticipação (Billing.coparticipation_value),
+    nunca se o paciente de fato PAGOU — fabricar uma taxa de
+    inadimplência sem esse dado seria exatamente o tipo de confiança que
+    o motor inteiro se recusa a inventar. Este insight fica em "virou
+    fatia maior da receita", não em "não foi pago".
+    """
+    if (
+        current.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE
+        or previous.coparticipation_billing_count < _MIN_COPARTICIPATION_SAMPLE
+        or current.total_billed <= 0
+        or previous.total_billed <= 0
+    ):
+        return None
+    pct = (current.coparticipation_total / current.total_billed) * 100
+    previous_pct = (previous.coparticipation_total / previous.total_billed) * 100
+    if pct - previous_pct < _COPARTICIPATION_GROWTH_INCREASE_PP:
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="A fatia de coparticipação no seu faturamento está subindo",
+        message=(
+            f"R$ {current.coparticipation_total:,.2f} ({pct:.0f}% do faturado no período) foram registrados como "
+            f"coparticipação — a parte que o PACIENTE paga — {pct - previous_pct:.0f} pontos percentuais acima do "
+            f"período anterior ({previous_pct:.0f}%). Vale confirmar que a recepção está de fato cobrando e "
+            "recebendo esse valor do paciente na hora do atendimento, não só lançando no sistema."
+        ),
+        financial_impact=current.coparticipation_total,
+    )
+
+
+def _coparticipation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F4.2 do Plano Diretor ("Fechar lacunas operacionais") — fecha
+    a lacuna que os DOIS insights de coparticipação acima deixam
+    explicitamente em aberto (ver docstring de
+    _coparticipation_growth_insight: "nunca se o paciente de fato
+    PAGOU"). Agora que existe confirmação de recebimento
+    (Billing.coparticipation_received — ver
+    043_coparticipation_confirmation.sql), este insight soma o que foi
+    COBRADO mas ainda não confirmado como recebido (NULL) ou confirmado
+    que NÃO foi recebido (FALSE) — um vazamento de receita real, não
+    hipotético.
+
+    Amostra mínima na CONTAGEM de linhas não confirmadas (mesmo
+    raciocínio de _MIN_COPARTICIPATION_SAMPLE): 1-2 linhas esquecidas é
+    ruído operacional do dia a dia, não um padrão que merece alerta.
+    """
+    if current.coparticipation_unconfirmed_count < _MIN_COPARTICIPATION_SAMPLE or current.coparticipation_unconfirmed_value <= 0:
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem coparticipação cobrada que ainda não foi confirmada como recebida",
+        message=(
+            f"R$ {current.coparticipation_unconfirmed_value:,.2f} em coparticipação (a parte que o PACIENTE paga) "
+            f"foram cobrados em {current.coparticipation_unconfirmed_count} atendimento(s) neste período, mas "
+            "ninguém confirmou no sistema se esse valor de fato entrou no caixa. Vale conferir com a recepção e "
+            "confirmar cada um — cobrado no papel não é o mesmo que recebido de verdade."
+        ),
+        financial_impact=current.coparticipation_unconfirmed_value,
+    )
+
+
+def _coparticipation_delayed_payment_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    "Equilíbrio Insighta" (Balanced Scorecard, perna Cliente, mecanismo
+    5) — fecha uma lacuna DIFERENTE da que
+    _coparticipation_unconfirmed_insight já fecha.
+
+    IMPORTANTE — payment_method só existe em billing JÁ confirmado como
+    recebido: BillingService.confirm_coparticipation só grava
+    payment_method/installments quando `received=True` (não há "como foi
+    pago" pra registrar quando nada foi pago). Então este insight NÃO é
+    "recepção esqueceu de confirmar" (isso já é
+    _coparticipation_unconfirmed_insight) — é "mesmo o que já foi
+    marcado como recebido pode não ser dinheiro de verdade no caixa
+    ainda": boleto marcado como recebido na hora do atendimento ainda
+    pode não compensar; cartão de crédito parcelado ainda pode ser
+    cancelado/estornado antes de quitar todas as parcelas. Os dois
+    insights são complementares, não duplicados: um cobre "ninguém
+    confirmou ainda", o outro cobre "confirmou, mas de um jeito que
+    ainda carrega risco de não fechar".
+    """
+    if current.coparticipation_delayed_payment_count < _MIN_COPARTICIPATION_SAMPLE:
+        return None
+    if current.coparticipation_known_payment_method_value <= 0:
+        return None
+    pct = (current.coparticipation_delayed_payment_value / current.coparticipation_known_payment_method_value) * 100
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Coparticipação marcada como recebida, mas em forma de pagamento que ainda pode não fechar",
+        message=(
+            f"R$ {current.coparticipation_delayed_payment_value:,.2f} ({pct:.0f}% da coparticipação já confirmada "
+            f"como recebida, com forma de pagamento informada) foram marcados como recebidos em "
+            f"{current.coparticipation_delayed_payment_count} atendimento(s) via boleto ou cartão de crédito "
+            "parcelado — diferente de dinheiro, PIX ou débito, esse valor pode ainda não ter entrado de verdade "
+            "no caixa (boleto pode não compensar, parcela pode ser cancelada antes de quitar)."
+        ),
+        financial_impact=current.coparticipation_delayed_payment_value,
+    )
+
+
+def _opme_documentation_unconfirmed_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Épico F2.3 do Plano Diretor ("Auditoria documental leve — prontuário
+    × conta") — versão RESTRITA explicitamente pedida no roadmap: "checar
+    presença de registro de prescrição/evolução para procedimentos de
+    alto valor (OPME), sem NLP semântico". Este insight nunca lê nem
+    interpreta prontuário nenhum — só soma o que foi cobrado como OPME
+    (item_type='material_opme') mas ainda não foi CONFERIDO por um
+    humano como tendo prescrição/evolução no prontuário
+    (Billing.clinical_documentation_confirmed NULL) ou conferido que NÃO
+    tem (FALSE) — um risco de glosa documental real, mesma mecânica de
+    _coparticipation_unconfirmed_insight acima.
+    """
+    if (
+        current.opme_documentation_unconfirmed_count < _MIN_OPME_DOCUMENTATION_SAMPLE
+        or current.opme_documentation_unconfirmed_value <= 0
+    ):
+        return None
+    return Insight(
+        severity="warning",
+        category="faturamento",
+        title="Tem item de material especial (OPME) sem conferência documental",
+        message=(
+            f"R$ {current.opme_documentation_unconfirmed_value:,.2f} em {current.opme_documentation_unconfirmed_count} "
+            "item(ns) de OPME (órtese/prótese/material especial) neste período ainda não foram conferidos quanto à "
+            "presença de prescrição/evolução no prontuário. OPME é uma das maiores fontes de glosa de alto valor — "
+            "vale confirmar o registro clínico ANTES de enviar a guia ao convênio."
+        ),
+        financial_impact=current.opme_documentation_unconfirmed_value,
+    )
+
+
 def _capacity_drop_insight(
     current: InsightsPeriodInput, previous: InsightsPeriodInput, estimated_idle_capacity_revenue_lost: float
 ) -> Insight | None:
@@ -844,6 +1253,82 @@ def _weekday_drop_insight(current: InsightsPeriodInput, previous: InsightsPeriod
         # gráfico de volume na mesma seção.
         action_label=f"Ver quem costumava vir {label}",
         action_href=f"#weekday:{weekday}",
+    )
+
+
+def _yoy_seasonality_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos": `_weekday_drop_insight`
+    já compara contra a SEMANA anterior, mas uma queda sazonal normal
+    (ex: dezembro sempre esfria, ou uma especialidade sempre cai no
+    início do ano) dispararia esse insight TODO ano na mesma época,
+    mesmo sendo o padrão normal da própria clínica — ruído recorrente,
+    não um alerta de verdade. Comparar contra o MESMO período do ANO
+    passado responde uma pergunta diferente: "isso é pior do que era
+    nessa mesma época, historicamente?" — se sim, é sinal de queda real
+    (perda de pacientes, concorrência, problema pontual), não só o ciclo
+    natural do negócio.
+
+    Só alerta em QUEDA (mesmo raciocínio do resto do motor: crescimento
+    não é alarme, já aparece como número positivo em qualquer relatório).
+    """
+    if (
+        current.yoy_last_year_appointment_count is None
+        or current.yoy_last_year_appointment_count < _YOY_MIN_LAST_YEAR_SAMPLE
+    ):
+        return None
+    current_total = sum(current.weekday_appointment_counts.values())
+    drop_pct = (
+        (current.yoy_last_year_appointment_count - current_total) / current.yoy_last_year_appointment_count
+    ) * 100
+    if drop_pct < _YOY_DROP_WARNING_PCT:
+        return None
+    severity = "critical" if drop_pct >= _YOY_DROP_CRITICAL_PCT else "warning"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title="Sua agenda está bem mais fraca do que no mesmo período do ano passado",
+        message=(
+            f"Nesses mesmos dias, no ano passado, sua clínica teve {current.yoy_last_year_appointment_count} "
+            f"consulta(s) marcada(s) — agora são {current_total}, uma queda de {drop_pct:.0f}%. Isso já é "
+            "mais do que uma variação normal de semana a semana: vale entender se foi sazonalidade do seu "
+            "setor, perda de pacientes pra concorrência, ou algo pontual (férias de um profissional, por "
+            "exemplo)."
+        ),
+        action_label="Ver resumo de agenda",
+        action_href="#agenda-resumo",
+    )
+
+
+def _early_churn_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Prevendo movimentos": `_annual_goal_insight`
+    já recomenda "reativar quem não voltou" citando pacientes INATIVOS
+    (piso fixo de 1 ano) — um alerta tardio, depois que o paciente já foi
+    embora de verdade. Este insight é o alarme ANTECIPADO: pacientes que
+    já estão bem além do PRÓPRIO ritmo histórico de retorno, mas ainda
+    não completaram 1 ano de ausência (ver AnalyticsRepository.
+    count_early_churn_risk_patients) — quanto mais cedo a clínica liga,
+    maior a chance de reverter antes que vire uma perda definitiva.
+
+    Estado "AGORA" (mesmo raciocínio de appeals_due_soon_count): sempre
+    calculado a partir de hoje, não escopado pelo período do dashboard.
+    """
+    if current.early_churn_risk_count <= 0:
+        return None
+    plural = "s" if current.early_churn_risk_count != 1 else ""
+    return Insight(
+        severity="warning",
+        category="agenda",
+        title="Tem paciente sumindo do próprio padrão, mesmo sem completar 1 ano fora",
+        message=(
+            f"{current.early_churn_risk_count} paciente{plural} já está bem além do próprio ritmo de retorno — "
+            "comparado ao intervalo que cada um costuma esperar entre consultas, não a um prazo genérico — mas "
+            "ainda não chegou a 1 ano de ausência. Ligar agora, enquanto o vínculo ainda está fresco, costuma "
+            "funcionar melhor do que esperar completar 1 ano pra tentar recuperar."
+        ),
+        action_label="Ver quem está sumindo",
+        action_href="#carteira-inativa",
     )
 
 
@@ -1006,6 +1491,116 @@ def _booking_channel_no_show_insight(current: InsightsPeriodInput) -> Insight | 
     )
 
 
+def _worst_squeeze_in_weekday(current: InsightsPeriodInput) -> tuple[int, float, float] | None:
+    """Onda 6 do Plano de Ação, item 19 — mesmo cálculo de
+    `_worst_no_show_weekday` (amostra mínima por dia, maior desvio
+    acima da MÉDIA do próprio período), agora sobre
+    `weekday_squeeze_in_counts`. Retorna (weekday, taxa_do_dia,
+    taxa_média_do_período), ou None sem amostra suficiente ou sem
+    nenhum dia acima do piso de aviso."""
+    total_squeeze_in = sum(squeeze_in for squeeze_in, _ in current.weekday_squeeze_in_counts.values())
+    total_relevant = sum(total for _, total in current.weekday_squeeze_in_counts.values())
+    if total_relevant == 0:
+        return None
+    overall_rate = total_squeeze_in / total_relevant
+
+    candidates: list[tuple[int, float, float]] = []  # (weekday, rate, gap_pp)
+    for weekday in range(7):
+        squeeze_in_count, total = current.weekday_squeeze_in_counts.get(weekday, (0, 0))
+        if total < _MIN_WEEKDAY_SAMPLE:
+            continue
+        rate = squeeze_in_count / total
+        gap_pp = (rate - overall_rate) * 100
+        if gap_pp < _WEEKDAY_SQUEEZE_IN_WARNING_PP:
+            continue
+        candidates.append((weekday, rate, gap_pp))
+
+    if not candidates:
+        return None
+
+    weekday, rate, _gap_pp = max(candidates, key=lambda c: c[2])
+    return weekday, rate, overall_rate
+
+
+def _weekday_squeeze_in_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Onda 6 do Plano de Ação, item 19 — "em quais dias a agenda mais
+    recebe encaixe" (Appointment.is_squeeze_in, ver DECISÃO completa em
+    056_appointment_squeeze_in.sql e AnalyticsRepository.
+    weekday_squeeze_in_breakdown). Diferente de falta/cancelamento
+    (sempre ruim), encaixe concentrado não é em si um problema — é um
+    sinal de sobrecarga operacional NUM dia específico: a clínica pode
+    estar sistematicamente espremendo vagas na mesma agenda em vez de
+    abrir mais horário fixo naquele dia, o que aumenta risco de atraso
+    em cadeia e desgaste da equipe.
+
+    Mesmo raciocínio intra-período de _weekday_no_show_rate_insight
+    (compara contra a própria média do período, não um corte absoluto),
+    só que com piso mais alto (_WEEKDAY_SQUEEZE_IN_WARNING_PP) — um
+    pouco mais de encaixe num dia é normal, só vira alerta quando o
+    desvio é grande o bastante pra sugerir um padrão sistemático.
+    """
+    worst = _worst_squeeze_in_weekday(current)
+    if worst is None:
+        return None
+    weekday, rate, overall_rate = worst
+    gap_pp = (rate - overall_rate) * 100
+    severity = "critical" if gap_pp >= _WEEKDAY_SQUEEZE_IN_CRITICAL_PP else "warning"
+    label = _WEEKDAY_LABELS[weekday]
+    comparison = _comparative_phrase(rate / overall_rate) if overall_rate > 0 else "bem mais"
+    return Insight(
+        severity=severity,
+        category="agenda",
+        title=f"{label.capitalize()} é o dia que mais recebe encaixe",
+        message=(
+            f"Numa {label} comum, {rate * 100:.0f}% dos agendamentos com essa informação preenchida são "
+            f"encaixe — {comparison} da média dos outros dias ({overall_rate * 100:.0f}%). Vale avaliar se "
+            f"compensa abrir mais horário fixo pras {label}s em vez de depender de encaixe toda semana."
+        ),
+        action_label="Ver agenda por dia da semana",
+        action_href="#agenda-resumo",
+    )
+
+
+def _rfm_cannot_lose_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Onda 6 do Plano de Ação, item 19 — segmento RFM "não pode perder"
+    (ver rfm_engine.classify_segment): paciente de alto valor histórico
+    (Recência ruim + Valor alto, mesmo sem necessariamente ter sido
+    frequente) que sumiu. Diferente de `_early_churn_insight` (todo
+    mundo saindo do próprio ritmo, sem distinguir valor) e de
+    `_annual_goal_insight` (carteira inativa inteira, sem priorizar por
+    valor): este insight aponta especificamente QUEM já provou mais
+    valor pra clínica — reativar esses tende a valer mais a pena por
+    contato do que a carteira inativa genérica.
+
+    Estado "AGORA" (mesmo raciocínio de early_churn_risk_count): sempre
+    calculado a partir de hoje, não escopado pelo período do dashboard.
+    """
+    if current.rfm_cannot_lose_count <= 0:
+        return None
+    plural = "s" if current.rfm_cannot_lose_count != 1 else ""
+    top_note = (
+        f" O caso de maior receita histórica é {current.rfm_cannot_lose_top_name}, com "
+        f"R$ {current.rfm_cannot_lose_top_revenue:,.2f} faturados no total."
+        if current.rfm_cannot_lose_top_name
+        else ""
+    )
+    verb = "gerou" if current.rfm_cannot_lose_count == 1 else "geraram"
+    return Insight(
+        severity="warning",
+        category="agenda",
+        title=f"{current.rfm_cannot_lose_count} paciente{plural} de alto valor sumiu{'' if current.rfm_cannot_lose_count == 1 else 'ram'}",
+        message=(
+            f"{current.rfm_cannot_lose_count} paciente{plural} que já {verb} bastante receita histórica pra sua "
+            f"clínica não volta há muito tempo.{top_note} Reativar esses pacientes específicos costuma valer "
+            "mais a pena por contato do que atrair um paciente novo, que ainda não provou o próprio valor."
+        ),
+        action_label="Ver fila de reativação por valor",
+        action_href="#carteira-inativa",
+    )
+
+
 def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None:
     """
     Responde "por que as pessoas estão cancelando" em vez de só "quantas
@@ -1040,17 +1635,30 @@ def _cancellation_reason_insight(current: InsightsPeriodInput) -> Insight | None
     )
 
 
-def _denial_risk_pct_insight(current: InsightsPeriodInput) -> Insight | None:
+def _denial_risk_pct_insight(
+    current: InsightsPeriodInput,
+    *,
+    warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
+) -> Insight | None:
     """
     Traduz o backlog de risco de glosa em uma frase de urgência
     financeira em vez de uma contagem seca — segundo exemplo do briefing
     de redesenho ("risco de até 50% de glosas nas contas atuais").
     Baseado em VALOR (R$), não em contagem de linhas: para a diretoria,
     "quanto dinheiro está em risco" é a pergunta real por trás do número.
+
+    `warning_threshold`/`critical_threshold` (Épico F2.1 do Plano
+    Diretor — "Calibração por especialidade/porte"): opcionais, default
+    nos mesmos valores de sempre (_DENIAL_RISK_PCT_WARNING/_CRITICAL) —
+    quem chama (AnalyticsService.get_smart_insights) resolve o valor
+    configurado do tenant via resolve_denial_risk_thresholds e passa
+    aqui; sem configuração, caem nos defaults. Mesmo padrão não-quebrador
+    já usado em no_show_risk_engine.assess().
     """
-    if current.denial_risk_pct is None or current.denial_risk_pct < _DENIAL_RISK_PCT_WARNING:
+    if current.denial_risk_pct is None or current.denial_risk_pct < warning_threshold:
         return None
-    severity = "critical" if current.denial_risk_pct >= _DENIAL_RISK_PCT_CRITICAL else "warning"
+    severity = "critical" if current.denial_risk_pct >= critical_threshold else "warning"
     return Insight(
         severity=severity,
         category="faturamento",
@@ -1153,6 +1761,39 @@ def _appeals_due_soon_insight(current: InsightsPeriodInput) -> Insight | None:
     )
 
 
+def _payment_gap_without_appeal_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Evitando perdas": diferente de
+    `_payment_gap_insight` (que soma o gap do PERÍODO, um alerta sobre o
+    que aconteceu recentemente), este cobre o BACKLOG inteiro — billing
+    conciliado há muito tempo, com Divergência de Recebimento, pro qual
+    NINGUÉM ainda abriu recurso. Mesmo raciocínio de
+    `_appeals_due_soon_insight` (estado "AGORA", sempre crítico): dinheiro
+    que a clínica tem direito de reclamar e ainda não reclamou não fica
+    "menos urgente" por ter saído da janela de 7 dias do dashboard — ao
+    contrário de um prazo vencendo, aqui não há prazo legal correndo
+    (o relógio só começa quando o recurso é de fato protocolado), mas
+    cada dia sem abrir o recurso é um dia a mais até receber esse valor.
+    """
+    if current.payment_gap_without_appeal_count <= 0:
+        return None
+    plural = "s" if current.payment_gap_without_appeal_count != 1 else ""
+    return Insight(
+        severity="critical",
+        category="faturamento",
+        title="Tem dinheiro que o convênio pagou a menos e ninguém contestou ainda",
+        message=(
+            f"Tem {current.payment_gap_without_appeal_count} conta{plural} onde o convênio pagou menos do que "
+            f"o combinado em contrato — R$ {current.payment_gap_without_appeal_value:,.2f} no total — e "
+            "nenhuma delas tem um recurso de glosa aberto ainda. Diferente de uma recusa, aqui a operadora já "
+            "aceitou a conta e pagou errado: você tem o direito de contestar, só falta abrir o recurso."
+        ),
+        financial_impact=current.payment_gap_without_appeal_value,
+        action_label="Abrir um recurso",
+        action_href="/denial-appeals",
+    )
+
+
 def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
     """
     "O que resta em aberto" da Auditoria de Templates e Insights: peça
@@ -1168,10 +1809,11 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
     operacional (guias dentro do lote ficam paradas, sem virar fatura,
     atrasando o recebimento), não uma perda irreversível de direito.
 
-    Sem botão de ação, DE PROPÓSITO: ainda não existe nenhuma tela de
-    Lotes no frontend (só o endpoint /lotes, hoje consumido só por
-    FaturaService.create_from_lotes internamente) — "nunca inventa
-    destino" (ver DECISÃO na dataclass Insight acima).
+    Achado do Parecer Técnico "Boletim Insighta" (revisão 2): agora que
+    a tela de gestão de Lotes existe (LotesPage.tsx), o botão de ação
+    aponta pra ela — antes ficava sem ação DE PROPÓSITO ("nunca inventa
+    destino", ver DECISÃO na dataclass Insight acima) porque só existia
+    o endpoint, sem nenhuma tela consumindo.
     """
     if current.stale_open_lotes_count <= 0:
         return None
@@ -1190,6 +1832,137 @@ def _stale_open_lotes_insight(current: InsightsPeriodInput) -> Insight | None:
             f"fechar.{age_note} As guias dentro desses lotes ficam paradas — não avançam para fatura enquanto "
             "o lote não é fechado."
         ),
+        action_label="Ver lotes abertos",
+        action_href="/lotes",
+    )
+
+
+def _contract_expiring_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Evitando perdas": `Contract.valid_until`
+    sempre existiu no banco, mas nenhum insight avisava ANTES do
+    vencimento — só o painel de Utilização de Contrato mostrava a data,
+    exigindo que alguém abrisse a tela e notasse sozinho. Sem uma tabela
+    de preço em dia, toda cobrança feita depois do vencimento corre risco
+    maior de recusa (o motor de glosa já sinaliza "no_contract_reference"
+    quando não encontra NENHUM contrato — este insight é o alerta que
+    chega ANTES disso acontecer).
+
+    Estado "AGORA" (mesmo raciocínio de _appeals_due_soon_insight/
+    _stale_open_lotes_insight): um contrato vencendo em 5 dias não fica
+    "menos urgente" por não ter mudado desde ontem — não compara contra o
+    período anterior.
+    """
+    if current.expiring_contracts_count <= 0:
+        return None
+    plural = "s" if current.expiring_contracts_count != 1 else ""
+    is_critical = (
+        current.soonest_expiring_contract_days is not None
+        and current.soonest_expiring_contract_days <= _CONTRACT_EXPIRING_CRITICAL_DAYS
+    )
+    soonest_note = ""
+    if current.soonest_expiring_contract_plan_name and current.soonest_expiring_contract_days is not None:
+        days = current.soonest_expiring_contract_days
+        when = "hoje" if days <= 0 else f"em {days} dia{'s' if days != 1 else ''}"
+        soonest_note = f" O mais próximo é o da {current.soonest_expiring_contract_plan_name}, que vence {when}."
+    return Insight(
+        severity="critical" if is_critical else "warning",
+        category="faturamento",
+        title="Tem contrato de convênio vencendo sem renovação cadastrada",
+        message=(
+            f"Tem {current.expiring_contracts_count} contrato{plural} de repasse vencendo nos próximos dias, "
+            f"sem um contrato novo já cadastrado pra substituir.{soonest_note} Vale confirmar a renovação com "
+            "o convênio e atualizar a tabela de preços antes do vencimento, pra não correr risco de recusa por "
+            "tabela desatualizada."
+        ),
+        action_label="Ver contratos",
+        action_href="/contracts",
+    )
+
+
+def _revenue_concentration_insight(current: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Gestão eficiente": nenhum insight hoje
+    nomeia o risco estratégico de depender de 1-2 convênios pra maior
+    parte da receita — um reajuste, descredenciamento ou atraso de
+    pagamento de UM parceiro derruba o caixa inteiro da clínica. O
+    Ranking de Perda por Convênio e o Comparativo já olham para convênio
+    individualmente, mas nenhum dos dois soma "quanto % da receita total
+    isso representa".
+
+    Exige pelo menos `_MIN_PLANS_FOR_CONCENTRATION` convênios distintos
+    faturados no período — com 1 só convênio, a concentração é 100% por
+    definição (clínica fechada com uma única operadora, uma decisão de
+    negócio, não uma anomalia a alertar) e o card seria ruído permanente.
+    """
+    if current.total_billed <= 0 or len(current.revenue_by_plan) < _MIN_PLANS_FOR_CONCENTRATION:
+        return None
+    top_plan, top_value = max(current.revenue_by_plan.items(), key=lambda kv: kv[1])
+    pct = (top_value / current.total_billed) * 100
+    if pct < _REVENUE_CONCENTRATION_WARNING_PCT:
+        return None
+    severity = "critical" if pct >= _REVENUE_CONCENTRATION_CRITICAL_PCT else "warning"
+    return Insight(
+        severity=severity,
+        category="faturamento",
+        title=f"Boa parte da sua receita depende de um único convênio: {top_plan}",
+        message=(
+            f"Nos últimos dias, {pct:.0f}% de tudo que sua clínica faturou veio de um único convênio, "
+            f"{top_plan} (R$ {top_value:,.2f} de R$ {current.total_billed:,.2f} faturados). Se esse convênio "
+            "atrasar um pagamento, reajustar mal ou descredenciar a clínica, o caixa inteiro sente — vale "
+            "diversificar ativamente a carteira de convênios (e de pacientes particulares) pra reduzir essa "
+            "dependência."
+        ),
+        financial_impact=top_value,
+        action_label="Ver ranking por convênio",
+        action_href="#tab:comparativo",
+    )
+
+
+def _marketing_roi_insight(current: InsightsPeriodInput, previous: InsightsPeriodInput) -> Insight | None:
+    """
+    Raio-X da Receita, frente "Melhorias": o cálculo de ROI de marketing
+    (gasto de campanha × receita de paciente atribuído) já existia, mas
+    isolado no relatório semanal por WhatsApp (ver ReportDataService) —
+    fora do feed da Sala de Comando, só quem abrisse o PDF via essa
+    conta. Mesmo cálculo simplificado documentado em
+    ReportingRepository.revenue_from_campaign_patients (atribuição por
+    janela, não por coorte rigorosa) — este insight não inventa uma
+    métrica nova, só reexpõe a mesma com alerta quando o número fica
+    ruim.
+
+    Exige um piso mínimo de gasto (`_MIN_MARKETING_SPEND_FOR_INSIGHT`)
+    antes de alertar — um gasto de poucas dezenas de reais com ROI
+    negativo é ruído de teste de campanha, não um padrão que mereça
+    atenção da diretoria.
+    """
+    if current.marketing_spend_total < _MIN_MARKETING_SPEND_FOR_INSIGHT:
+        return None
+    # compute_roi_pct devolve uma RAZÃO (-0.5 = -50%), apesar do nome —
+    # mesma convenção já usada em ReportDataService/report_pdf_builder,
+    # que só multiplica por 100 na hora de formatar (_fmt_pct). Seguimos
+    # a mesma convenção aqui pra não inventar uma segunda unidade pro
+    # mesmo cálculo.
+    roi_ratio = compute_roi_pct(current.marketing_spend_total, current.marketing_revenue_attributed)
+    if roi_ratio is None or roi_ratio >= 0:
+        return None
+    severity = "critical" if roi_ratio <= _MARKETING_ROI_CRITICAL_RATIO else "warning"
+    trend_note = ""
+    if previous.marketing_spend_total >= _MIN_MARKETING_SPEND_FOR_INSIGHT:
+        previous_roi_ratio = compute_roi_pct(previous.marketing_spend_total, previous.marketing_revenue_attributed)
+        if previous_roi_ratio is not None and roi_ratio < previous_roi_ratio - 0.10:
+            trend_note = " E está piorando em relação ao período anterior."
+    return Insight(
+        severity=severity,
+        category="faturamento",
+        title="O marketing está gastando mais do que está trazendo de volta",
+        message=(
+            f"Nos últimos dias, sua clínica gastou R$ {current.marketing_spend_total:,.2f} em campanhas e a "
+            f"receita atribuída a pacientes vindos delas foi R$ {current.marketing_revenue_attributed:,.2f} "
+            f"— um ROI de {roi_ratio * 100:.0f}%.{trend_note} Vale revisar quais campanhas estão puxando esse "
+            "número pra baixo antes de continuar investindo do mesmo jeito."
+        ),
+        financial_impact=current.marketing_spend_total - current.marketing_revenue_attributed,
     )
 
 
@@ -1333,16 +2106,26 @@ def generate_insights(
     estimated_no_show_revenue_at_risk: float = 0.0,
     estimated_idle_capacity_revenue_lost: float = 0.0,
     extra_insights: list[Insight] | None = None,
+    denial_risk_warning_threshold: float = _DENIAL_RISK_PCT_WARNING,
+    denial_risk_critical_threshold: float = _DENIAL_RISK_PCT_CRITICAL,
 ) -> list[Insight]:
     insights: list[Insight] = []
     insights.extend(_denial_spike_insights(current, previous))
 
     for maybe_insight in (
         _weekday_drop_insight(current, previous),
+        _yoy_seasonality_insight(current),
+        _early_churn_insight(current),
+        _rfm_cannot_lose_insight(current),
         _weekday_no_show_rate_insight(current),
+        _weekday_squeeze_in_insight(current),
         _appeals_due_soon_insight(current),
+        _payment_gap_without_appeal_insight(current),
         _stale_open_lotes_insight(current),
-        _denial_risk_pct_insight(current),
+        _contract_expiring_insight(current),
+        _denial_risk_pct_insight(
+            current, warning_threshold=denial_risk_warning_threshold, critical_threshold=denial_risk_critical_threshold
+        ),
         _annual_goal_insight(current),
         _financial_hole_insight(current, previous),
         _payment_gap_insight(current, previous),
@@ -1355,6 +2138,12 @@ def generate_insights(
         _cancellation_reason_insight(current),
         _opme_concentration_insight(current, previous),
         _coparticipation_visibility_insight(current, previous),
+        _coparticipation_growth_insight(current, previous),
+        _coparticipation_unconfirmed_insight(current),
+        _coparticipation_delayed_payment_insight(current),
+        _opme_documentation_unconfirmed_insight(current),
+        _revenue_concentration_insight(current),
+        _marketing_roi_insight(current, previous),
     ):
         if maybe_insight is not None:
             insights.append(maybe_insight)
