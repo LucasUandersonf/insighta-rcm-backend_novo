@@ -169,6 +169,10 @@ class UpcomingRiskAppointmentItem(BaseModel):
     # (AnalyticsRepository.upcoming_risk_appointments_paginated), já que
     # o agendamento pode não ter profissional vinculado.
     professional_name: str | None = None
+    # Ficha do Paciente (Fase 4) — None no card resumido (mesmo motivo de
+    # professional_name acima); a tela dedicada usa isto pra linkar cada
+    # linha pra GET /patients/{id}/ficha, não só mostrar o nome.
+    patient_id: UUID | None = None
 
 
 class AgendaMetricsResponse(BaseModel):

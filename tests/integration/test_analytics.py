@@ -873,6 +873,9 @@ async def test_upcoming_risk_appointments_endpoint_paginates_the_full_list(clien
     assert body["total"] == 3
     assert len(body["items"]) == 2
     assert body["items"][0]["patient_full_name"] == "Paciente Risco 0"
+    # Ficha do Paciente (Fase 4) — cada linha precisa do patient_id, não
+    # só do nome, pra linkar pra GET /patients/{id}/ficha.
+    assert body["items"][0]["patient_id"] == patients[0]["id"]
 
     second_page = await client.get("/api/v1/analytics/upcoming-risk-appointments?limit=2&offset=2", headers=auth_headers_a)
     assert len(second_page.json()["items"]) == 1

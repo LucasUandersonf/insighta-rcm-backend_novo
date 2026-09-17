@@ -591,6 +591,7 @@ class AnalyticsService:
                     scheduled_at=row["scheduled_at"],
                     risk_level=row["risk_level"],
                     professional_name=row["professional_name"],
+                    patient_id=row["patient_id"],
                 )
                 for row in items
             ],

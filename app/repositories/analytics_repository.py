@@ -557,7 +557,10 @@ class AnalyticsRepository:
         mínimo, agora com offset + contagem total (mesmo padrão de
         BillingRepository.list_high_risk_paginated). Inclui o nome do
         profissional (LEFT JOIN — agendamento pode não ter profissional
-        vinculado) para a tela poder mostrar "quem" além de "quando".
+        vinculado) para a tela poder mostrar "quem" além de "quando", e o
+        `patient_id` (não devolvido pela versão resumida acima) — a
+        linha desta tela linka pra Ficha do Paciente (Fase 4), que
+        precisa do id, não só do nome.
         """
         base_from = """
             FROM core.appointments a
@@ -573,7 +576,7 @@ class AnalyticsRepository:
         ).scalar_one()
         stmt = text(
             f"""
-            SELECT a.id, p.full_name, a.scheduled_at, a.no_show_risk_level, prof.full_name
+            SELECT a.id, p.full_name, a.scheduled_at, a.no_show_risk_level, prof.full_name, a.patient_id
             {base_from}
             ORDER BY a.scheduled_at ASC
             LIMIT :limit OFFSET :offset
@@ -587,6 +590,7 @@ class AnalyticsRepository:
                 "scheduled_at": row[2],
                 "risk_level": row[3],
                 "professional_name": row[4],
+                "patient_id": row[5],
             }
             for row in result.all()
         ]
