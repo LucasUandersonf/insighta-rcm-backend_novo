@@ -16,7 +16,7 @@ async def _create_patient(client, auth_headers, *, full_name="Paciente LGPD", cp
 
 
 async def test_anonymize_patient_scrubs_pii_but_keeps_id(client, auth_headers_a):
-    patient_id = await _create_patient(client, auth_headers_a, full_name="Fulano de Tal", cpf="11122233344")
+    patient_id = await _create_patient(client, auth_headers_a, full_name="Fulano de Tal", cpf="11122234015")
 
     resp = await client.post(f"/api/v1/patients/{patient_id}/anonymize", headers=auth_headers_a)
     assert resp.status_code == 200

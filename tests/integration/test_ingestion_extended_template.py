@@ -75,7 +75,7 @@ async def test_upload_with_extended_columns_creates_local_tipo_paciente_and_guia
 ):
     await _create_insurance_plan(admin_engine, tenant_a)
     row = (
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;"
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;"
         "Unidade Centro;Ambulatorial;SP/SADT;GUIA-001;SENHA-001"
     )
     files = {"file": ("faturamento_estendido.csv", io.BytesIO(_csv_bytes(row)), "text/csv")}
@@ -114,11 +114,11 @@ async def test_multiple_rows_with_same_guia_numero_are_grouped_into_one_guia(
     app/sql/015_billing_guia.sql e _get_or_create_guia)."""
     await _create_insurance_plan(admin_engine, tenant_a)
     row_1 = (
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;"
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;"
         ";;SADT;GUIA-COMPARTILHADA;SENHA-XYZ"
     )
     row_2 = (
-        "12345678900;Paciente Teste;Unimed Nacional;20202020;J06;80,00;20/08/2026;"
+        "12345678909;Paciente Teste;Unimed Nacional;20202020;J06;80,00;20/08/2026;"
         ";;SADT;GUIA-COMPARTILHADA;SENHA-XYZ"
     )
     files = {"file": ("faturamento_guia_compartilhada.csv", io.BytesIO(_csv_bytes(row_1, row_2)), "text/csv")}
@@ -140,7 +140,7 @@ async def test_pronto_socorro_alias_is_normalized(client, auth_headers_a, admin_
     """'PS' é um alias comum de export de ERP para tipo_paciente
     pronto_socorro (ver _TIPO_PACIENTE_ALIASES)."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;PS;;;"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;PS;;;"
     files = {"file": ("faturamento_ps.csv", io.BytesIO(_csv_bytes(row)), "text/csv")}
 
     response = await client.post("/api/v1/ingestion/upload", files=files, headers=auth_headers_a)
@@ -157,7 +157,7 @@ async def test_guia_numero_without_guia_tipo_is_rejected(client, auth_headers_a,
     (ver check_guia_fields_consistency em app/worker/schemas.py), não
     ignorada em silêncio."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;;;GUIA-SEM-TIPO;"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;;;GUIA-SEM-TIPO;"
     files = {"file": ("faturamento_guia_invalida.csv", io.BytesIO(_csv_bytes(row)), "text/csv")}
 
     response = await client.post("/api/v1/ingestion/upload", files=files, headers=auth_headers_a)
@@ -172,7 +172,7 @@ async def test_guia_numero_without_guia_tipo_is_rejected(client, auth_headers_a,
 
 async def test_unrecognized_tipo_paciente_is_rejected(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;valor-nao-existe;;;"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026;;valor-nao-existe;;;"
     files = {"file": ("faturamento_tipo_invalido.csv", io.BytesIO(_csv_bytes(row)), "text/csv")}
 
     response = await client.post("/api/v1/ingestion/upload", files=files, headers=auth_headers_a)
@@ -187,7 +187,7 @@ async def test_upload_without_extended_columns_still_works_as_before(
     funcionando exatamente como antes — nada de Local/Guia é criado."""
     await _create_insurance_plan(admin_engine, tenant_a)
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
     files = {"file": ("faturamento_legado.csv", io.BytesIO((header + "\r\n" + row + "\r\n").encode("utf-8-sig")), "text/csv")}
 
     response = await client.post("/api/v1/ingestion/upload", files=files, headers=auth_headers_a)

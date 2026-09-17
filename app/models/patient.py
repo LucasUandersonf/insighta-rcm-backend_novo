@@ -33,6 +33,16 @@ class Patient(Base):
     communication_consent: Mapped[bool | None]
     preferred_time_window: Mapped[str | None] = mapped_column(String(10))
     zip_code: Mapped[str | None] = mapped_column(String(8))
+    # Escopo completo de pessoa física (pedido do usuário: "todo sistema
+    # tem dados de pessoa física com nome, telefone, data de nascimento,
+    # endereço, email, CPF, sexo") — ver DECISÃO completa em
+    # app/sql/058_patient_full_identity.sql.
+    phone: Mapped[str | None] = mapped_column(String(20))
+    email: Mapped[str | None] = mapped_column(String(255))
+    sex: Mapped[str | None] = mapped_column(String(1))
+    address_street: Mapped[str | None] = mapped_column(String(255))
+    address_city: Mapped[str | None] = mapped_column(String(100))
+    address_state: Mapped[str | None] = mapped_column(String(2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Direito de eliminação do titular (LGPD art. 18, VI) — ver DECISÃO
     # completa em app/sql/022_patient_lgpd_erasure.sql e

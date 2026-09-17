@@ -148,6 +148,7 @@ _SCHEMA_FILES = [
     "055_patient_outreach_log.sql",
     "056_appointment_squeeze_in.sql",
     "057_waitlist_entries.sql",
+    "058_patient_full_identity.sql",
 ]
 
 # DDL da migration 0004 (adicionada via Alembic normal, não um arquivo em

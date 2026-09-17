@@ -115,7 +115,7 @@ async def _upload_glosa_por_carteirinha_com_cpf(client, auth_headers, *rows: str
 
 async def test_glosa_partial_payment_settles_billing_and_creates_glosa(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-001;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-001;"
     fat = await _upload_faturamento(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
     assert fat.json()["error_row_count"] == 0
@@ -143,7 +143,7 @@ async def test_glosa_full_payment_settles_without_creating_glosa(client, auth_he
     """pago == cobrado -> nenhuma glosa de fato aconteceu, core.glosas
     continua vazia (nunca cria um registro de valor zero/negativo)."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-002;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-002;"
     await _upload_faturamento(client, auth_headers_a, fat_row)
 
     glosa_row = "Unimed Nacional;G-002;10101012;500,00;25/08/2026;;"
@@ -161,7 +161,7 @@ async def test_glosa_full_payment_settles_without_creating_glosa(client, auth_he
 
 async def test_glosa_full_denial_sets_denied_status_and_full_glosa_value(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-003;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-003;"
     await _upload_faturamento(client, auth_headers_a, fat_row)
 
     glosa_row = "Unimed Nacional;G-003;10101012;0,00;25/08/2026;CO-45;Procedimento nao autorizado"
@@ -196,8 +196,8 @@ async def test_glosa_ambiguous_guia_without_procedure_code_is_rejected(client, a
     está sendo liquidada. Rejeita em vez de adivinhar."""
     await _create_insurance_plan(admin_engine, tenant_a)
     rows = [
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-004;",
-        "12345678900;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;sadt;G-004;",
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-004;",
+        "12345678909;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;sadt;G-004;",
     ]
     fat = await _upload_faturamento(client, auth_headers_a, *rows)
     assert fat.status_code == 201, fat.text
@@ -219,8 +219,8 @@ async def test_glosa_disambiguates_by_procedure_code(client, auth_headers_a, adm
     — liquida SÓ a linha certa, a outra fica intocada."""
     await _create_insurance_plan(admin_engine, tenant_a)
     rows = [
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-005;",
-        "12345678900;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;sadt;G-005;",
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-005;",
+        "12345678909;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;sadt;G-005;",
     ]
     await _upload_faturamento(client, auth_headers_a, *rows)
 
@@ -251,7 +251,7 @@ async def test_glosa_row_with_unknown_insurance_plan_is_rejected(client, auth_he
 
 async def test_glosa_upload_via_xml(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-XML-1;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-XML-1;"
     await _upload_faturamento(client, auth_headers_a, fat_row)
 
     xml_bytes = (
@@ -274,7 +274,7 @@ async def test_glosa_upload_via_xml(client, auth_headers_a, admin_engine, tenant
 
 async def test_glosa_upload_via_json(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-JSON-1;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-JSON-1;"
     await _upload_faturamento(client, auth_headers_a, fat_row)
 
     payload = [
@@ -302,7 +302,7 @@ async def test_glosa_upload_via_json(client, auth_headers_a, admin_engine, tenan
 
 async def test_glosa_settles_by_member_card_when_guia_numero_is_absent(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-001"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-001"
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
     assert fat.json()["error_row_count"] == 0
@@ -347,8 +347,8 @@ async def test_glosa_ambiguous_member_card_without_procedure_code_is_rejected(cl
     rejeita em vez de adivinhar (mesmo princípio da chave por guia)."""
     await _create_insurance_plan(admin_engine, tenant_a)
     rows = [
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-002",
-        "12345678900;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;CART-002",
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-002",
+        "12345678909;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;CART-002",
     ]
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, *rows)
     assert fat.status_code == 201, fat.text
@@ -368,8 +368,8 @@ async def test_glosa_ambiguous_member_card_without_procedure_code_is_rejected(cl
 async def test_glosa_disambiguates_member_card_by_procedure_code(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
     rows = [
-        "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-003",
-        "12345678900;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;CART-003",
+        "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-003",
+        "12345678909;Paciente Teste;Unimed Nacional;20102030;J06;200,00;20/08/2026;CART-003",
     ]
     await _upload_faturamento_sem_guia(client, auth_headers_a, *rows)
 
@@ -399,7 +399,7 @@ async def test_glosa_guia_numero_takes_precedence_over_member_card_when_both_pre
     caminho por guia continua sendo o escolhido, não uma race condition
     entre os dois."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-PRIORIDADE;"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;sadt;G-PRIORIDADE;"
     fat = await _upload_faturamento(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
 
@@ -425,7 +425,7 @@ async def test_glosa_matches_member_card_despite_different_formatting(client, au
     espaço interno ("0012 345 678 90"). Antes da normalização, a busca
     por string exata não encontraria nada."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;0012.345.678-90"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;0012.345.678-90"
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
     assert fat.json()["error_row_count"] == 0
@@ -447,11 +447,11 @@ async def test_glosa_matches_member_card_despite_different_formatting(client, au
 
 async def test_glosa_member_card_with_matching_cpf_settles_normally(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-1"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-1"
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
 
-    glosa_row = "Unimed Nacional;CART-CPF-1;123.456.789-00;10101012;350,00;25/08/2026;;"
+    glosa_row = "Unimed Nacional;CART-CPF-1;123.456.789-09;10101012;350,00;25/08/2026;;"
     resp = await _upload_glosa_por_carteirinha_com_cpf(client, auth_headers_a, glosa_row)
     assert resp.status_code == 201, resp.text
     assert resp.json()["error_row_count"] == 0
@@ -466,7 +466,7 @@ async def test_glosa_member_card_with_mismatched_cpf_is_rejected(client, auth_he
     errado (erro de digitação na carteirinha, por exemplo). Rejeita em
     vez de liquidar às cegas."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-2"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-2"
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
 
@@ -484,7 +484,7 @@ async def test_glosa_member_card_without_cpf_in_file_settles_normally(client, au
     não envia isso) — a confirmação cruzada é opcional, nunca bloqueia
     quem simplesmente não manda esse dado."""
     await _create_insurance_plan(admin_engine, tenant_a)
-    fat_row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-3"
+    fat_row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;500,00;20/08/2026;CART-CPF-3"
     fat = await _upload_faturamento_sem_guia(client, auth_headers_a, fat_row)
     assert fat.status_code == 201, fat.text
 

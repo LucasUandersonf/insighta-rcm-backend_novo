@@ -48,6 +48,17 @@ _EXPECTED_HEADERS = {
     "tipo_consulta": "tipo_consulta",
     "motivo_cancelamento": "motivo_cancelamento",
     "canal_agendamento": "canal_agendamento",
+    # Escopo completo de pessoa física (pedido do usuário: "a agenda tem
+    # os dados de pessoa física") — mesmas colunas de csv_parser.py
+    # (Faturamento), ver DECISÃO em RawAppointmentRow (app/worker/schemas.py).
+    "telefone_paciente": "patient_phone",
+    "email_paciente": "patient_email",
+    "data_nascimento_paciente": "patient_birth_date",
+    "sexo_paciente": "patient_sex",
+    "endereco_paciente": "patient_address_street",
+    "cidade_paciente": "patient_address_city",
+    "uf_paciente": "patient_address_state",
+    "cep_paciente": "patient_zip_code",
 }
 
 _OPTIONAL_STRING_FIELDS = (
@@ -62,6 +73,14 @@ _OPTIONAL_STRING_FIELDS = (
     "tipo_consulta",
     "motivo_cancelamento",
     "canal_agendamento",
+    "patient_phone",
+    "patient_email",
+    "patient_birth_date",
+    "patient_sex",
+    "patient_address_street",
+    "patient_address_city",
+    "patient_address_state",
+    "patient_zip_code",
 )
 
 

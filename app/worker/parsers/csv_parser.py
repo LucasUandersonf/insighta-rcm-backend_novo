@@ -70,6 +70,17 @@ EXPECTED_HEADERS = {
     "tabela_procedimento": "tabela_procedimento",
     "tipo_item": "tipo_item",
     "valor_coparticipacao": "valor_coparticipacao",
+    # Escopo completo de pessoa física (pedido do usuário) — ver DECISÃO
+    # completa em RawBillingRow (app/worker/schemas.py) e
+    # app/sql/058_patient_full_identity.sql. Também opcionais.
+    "telefone_paciente": "patient_phone",
+    "email_paciente": "patient_email",
+    "data_nascimento_paciente": "patient_birth_date",
+    "sexo_paciente": "patient_sex",
+    "endereco_paciente": "patient_address_street",
+    "cidade_paciente": "patient_address_city",
+    "uf_paciente": "patient_address_state",
+    "cep_paciente": "patient_zip_code",
 }
 
 _OPTIONAL_STRING_FIELDS = (
@@ -83,6 +94,14 @@ _OPTIONAL_STRING_FIELDS = (
     "numero_carteirinha",
     "tabela_procedimento",
     "tipo_item",
+    "patient_phone",
+    "patient_email",
+    "patient_birth_date",
+    "patient_sex",
+    "patient_address_street",
+    "patient_address_city",
+    "patient_address_state",
+    "patient_zip_code",
 )
 
 

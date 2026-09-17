@@ -31,7 +31,7 @@ async def _seed_rejected_row(admin_engine, tenant_id, *, raw_value="UNIMED NAC."
             {"id": file_id, "t": tenant_id, "key": f"tenants/x/incoming/csv/arquivo-{file_id}.csv"},
         )
         payload = {
-            "patient_cpf": "12345678900",
+            "patient_cpf": "12345678909",
             "patient_name": patient_name,
             "insurance_plan_raw_name": raw_value,
             "procedure_code": "10101012",

@@ -90,11 +90,28 @@ _CSV_ROWS = [
 ]
 
 
+def _valid_cpf(seq: int) -> str:
+    """Gera um CPF estruturalmente válido (dígito verificador real) por
+    índice sequencial — a ingestão agora valida checksum de verdade (ver
+    validate_cpf_checksum, app/core/text_utils.py), então um fixture de
+    teste não pode mais usar qualquer sequência de 11 dígitos."""
+    base = f"{seq:09d}"
+
+    def _check_digit(nums: str, start_weight: int) -> str:
+        total = sum(int(n) * w for n, w in zip(nums, range(start_weight, 1, -1)))
+        remainder = total % 11
+        return str(0 if remainder < 2 else 11 - remainder)
+
+    dv1 = _check_digit(base, 10)
+    dv2 = _check_digit(base + dv1, 11)
+    return base + dv1 + dv2
+
+
 def _build_csv() -> bytes:
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
     lines = [header]
     for i, (nome, convenio, proc, cid, valor) in enumerate(_CSV_ROWS):
-        cpf = f"{i + 1:011d}"
+        cpf = _valid_cpf(i + 1)
         data = _BAD_SERVICE_DATE if nome == "Igor Falha" else _SERVICE_DATE
         lines.append(f"{cpf};{nome};{convenio};{proc};{cid};{valor};{data}")
     return ("\r\n".join(lines) + "\r\n").encode("utf-8-sig")
@@ -215,7 +232,7 @@ async def test_xml_and_json_uploads_reconcile_identically_to_csv(client, auth_he
     xml_bytes = f"""<?xml version="1.0" encoding="UTF-8"?>
 <lote>
   <atendimento>
-    <cpfPaciente>99988877766</cpfPaciente>
+    <cpfPaciente>99988877048</cpfPaciente>
     <nomePaciente>Julia Ramos</nomePaciente>
     <convenio>Unimed Nacional</convenio>
     <codigoProcedimento>10101012</codigoProcedimento>
@@ -226,7 +243,7 @@ async def test_xml_and_json_uploads_reconcile_identically_to_csv(client, auth_he
 </lote>""".encode("utf-8")
 
     json_bytes = (
-        '[{"cpf_paciente": "99988877765", "nome_paciente": "Karla Nunes", '
+        '[{"cpf_paciente": "99988877129", "nome_paciente": "Karla Nunes", '
         '"convenio": "Unimed Nacional", "codigo_procedimento": "10101012", "cid": "J06", '
         f'"valor_cobrado": 180.00, "data_atendimento": "{service_date_iso}"}}]'
     ).encode("utf-8")

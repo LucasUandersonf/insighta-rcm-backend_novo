@@ -57,7 +57,7 @@ def _fake_ingestion_bucket(monkeypatch):
 
 def _valid_csv_bytes() -> bytes:
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
     return (header + "\r\n" + row + "\r\n").encode("utf-8-sig")
 
 

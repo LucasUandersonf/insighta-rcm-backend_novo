@@ -59,6 +59,17 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                     if _text(atendimento, "valorCoparticipacao")
                     else None
                 ),
+                # Escopo completo de pessoa física (pedido do usuário) —
+                # mesmo padrão camelCase das demais tags, ver DECISÃO em
+                # RawBillingRow (app/worker/schemas.py).
+                "patient_phone": _text(atendimento, "telefonePaciente") or None,
+                "patient_email": _text(atendimento, "emailPaciente") or None,
+                "patient_birth_date": _text(atendimento, "dataNascimentoPaciente") or None,
+                "patient_sex": _text(atendimento, "sexoPaciente") or None,
+                "patient_address_street": _text(atendimento, "enderecoPaciente") or None,
+                "patient_address_city": _text(atendimento, "cidadePaciente") or None,
+                "patient_address_state": _text(atendimento, "ufPaciente") or None,
+                "patient_zip_code": _text(atendimento, "cepPaciente") or None,
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))

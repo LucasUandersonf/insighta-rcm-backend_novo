@@ -52,6 +52,12 @@ class PatientService:
             communication_consent=data.communication_consent,
             preferred_time_window=data.preferred_time_window,
             zip_code=data.zip_code,
+            phone=data.phone,
+            email=data.email,
+            sex=data.sex,
+            address_street=data.address_street,
+            address_city=data.address_city,
+            address_state=data.address_state,
         )
         saved = await self.repo.add(patient)
         # DECISÃO — sem `diff`: ver DECISÃO completa em
@@ -96,6 +102,16 @@ class PatientService:
         # titular sozinhos e referred_by_patient_id ainda sustenta o
         # histórico de indicação de OUTROS pacientes — preservados.
         patient.zip_code = None
+        # Escopo completo de pessoa física (pedido do usuário) — telefone/
+        # e-mail/endereço/sexo são dado pessoal direto, mesma eliminação
+        # de cpf/birth_date/zip_code acima (ver DECISÃO em
+        # app/sql/058_patient_full_identity.sql).
+        patient.phone = None
+        patient.email = None
+        patient.sex = None
+        patient.address_street = None
+        patient.address_city = None
+        patient.address_state = None
         patient.anonymized_at = datetime.now(timezone.utc)
         await self.repo.save(patient)
 
@@ -143,6 +159,22 @@ class PatientService:
             patient.preferred_time_window = data.preferred_time_window
         if data.zip_code is not None:
             patient.zip_code = data.zip_code
+        # Escopo completo de pessoa física (pedido do usuário) — mesmo
+        # contrato parcial de sempre (só `is not None` é aplicado).
+        if data.birth_date is not None:
+            patient.birth_date = data.birth_date
+        if data.phone is not None:
+            patient.phone = data.phone
+        if data.email is not None:
+            patient.email = data.email
+        if data.sex is not None:
+            patient.sex = data.sex
+        if data.address_street is not None:
+            patient.address_street = data.address_street
+        if data.address_city is not None:
+            patient.address_city = data.address_city
+        if data.address_state is not None:
+            patient.address_state = data.address_state
         await self.repo.save(patient)
         return PatientResponse.model_validate(patient)
 

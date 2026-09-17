@@ -65,7 +65,7 @@ async def test_search_finds_billing_by_patient_name(client, auth_headers_a, admi
 async def test_search_finds_billing_by_cpf(client, auth_headers_a, admin_engine, tenant_a):
     plan_id = await _create_insurance_plan(admin_engine, tenant_a)
     patient_resp = await client.post(
-        "/api/v1/patients", json={"full_name": "Joao Pereira", "cpf": "12345678900"}, headers=auth_headers_a
+        "/api/v1/patients", json={"full_name": "Joao Pereira", "cpf": "12345678909"}, headers=auth_headers_a
     )
     patient_id = patient_resp.json()["id"]
     appointment_resp = await client.post(
@@ -86,7 +86,7 @@ async def test_search_finds_billing_by_cpf(client, auth_headers_a, admin_engine,
     )
     assert billing_resp.status_code == 201, billing_resp.text
 
-    response = await client.get("/api/v1/billing/search", params={"q": "123.456.789-00"}, headers=auth_headers_a)
+    response = await client.get("/api/v1/billing/search", params={"q": "123.456.789-09"}, headers=auth_headers_a)
     assert response.status_code == 200, response.text
     assert len(response.json()) == 1
     assert response.json()[0]["patient_name"] == "Joao Pereira"

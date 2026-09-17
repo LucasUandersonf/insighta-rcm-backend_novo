@@ -40,7 +40,7 @@ async def _create_insurance_plan(admin_engine, tenant_id, display_name="Unimed N
 # Cabeçalho NÃO padrão: "Nome do Paciente" em vez de "nome_paciente" — o
 # único campo obrigatório que o padrão não reconhece neste arquivo.
 _NONSTANDARD_HEADER = "cpf_paciente;Nome do Paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
-_NONSTANDARD_ROW = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
+_NONSTANDARD_ROW = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
 
 
 def _csv_bytes(header: str, *rows: str) -> bytes:

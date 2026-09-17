@@ -53,6 +53,17 @@ def parse(raw_bytes: bytes) -> list[RowParseResult]:
                 "tabela_procedimento": item.get("tabela_procedimento") or None,
                 "tipo_item": item.get("tipo_item") or None,
                 "valor_coparticipacao": item.get("valor_coparticipacao"),
+                # Escopo completo de pessoa física (pedido do usuário) —
+                # mesma chave usada no CSV, ver DECISÃO em RawBillingRow
+                # (app/worker/schemas.py).
+                "patient_phone": item.get("telefone_paciente") or None,
+                "patient_email": item.get("email_paciente") or None,
+                "patient_birth_date": item.get("data_nascimento_paciente") or None,
+                "patient_sex": item.get("sexo_paciente") or None,
+                "patient_address_street": item.get("endereco_paciente") or None,
+                "patient_address_city": item.get("cidade_paciente") or None,
+                "patient_address_state": item.get("uf_paciente") or None,
+                "patient_zip_code": item.get("cep_paciente") or None,
             }
             row = RawBillingRow.model_validate(mapped)
             results.append(RowParseResult.ok(row_number, row))

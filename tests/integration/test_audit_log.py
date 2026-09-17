@@ -345,7 +345,7 @@ async def test_homologate_contract_writes_audit_log_with_status_diff(client, aut
 async def test_anonymize_patient_writes_audit_log_without_pii(client, auth_headers_a):
     create_resp = await client.post(
         "/api/v1/patients",
-        json={"full_name": "Paciente Para Esquecer", "cpf": "12345678900"},
+        json={"full_name": "Paciente Para Esquecer", "cpf": "12345678909"},
         headers=auth_headers_a,
     )
     patient_id = create_resp.json()["id"]
@@ -362,4 +362,4 @@ async def test_anonymize_patient_writes_audit_log_without_pii(client, auth_heade
     # auditoria — nem o "antes" nem o "depois".
     dump = str(audit_resp.json())
     assert "Paciente Para Esquecer" not in dump
-    assert "12345678900" not in dump
+    assert "12345678909" not in dump

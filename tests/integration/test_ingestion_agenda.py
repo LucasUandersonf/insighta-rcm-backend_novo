@@ -78,7 +78,7 @@ async def _fetch_all(admin_engine, sql: str, **params) -> list[dict]:
 async def test_upload_agenda_creates_appointment_without_billing(client, auth_headers_a, admin_engine, tenant_a):
     await _create_insurance_plan(admin_engine, tenant_a)
     row = (
-        "12345678900;Paciente Teste;Dra. Ana Souza;CRM12345;Unimed Nacional;Unidade Centro;"
+        "12345678909;Paciente Teste;Dra. Ana Souza;CRM12345;Unimed Nacional;Unidade Centro;"
         "Ambulatorial;20/08/2026;14:30;30;Agendado;10101012;J06;AG-001"
     )
     response = await _upload_agenda(client, auth_headers_a, row)
@@ -119,13 +119,13 @@ async def test_reupload_with_same_external_id_updates_instead_of_duplicating(cli
     (mesmo codigo_agendamento). Deve fazer UPSERT, nunca duplicar."""
     await _create_insurance_plan(admin_engine, tenant_a)
     first_row = (
-        "12345678900;Paciente Teste;;;Unimed Nacional;;;20/08/2026;09:00;;Agendado;;;AG-777"
+        "12345678909;Paciente Teste;;;Unimed Nacional;;;20/08/2026;09:00;;Agendado;;;AG-777"
     )
     first = await _upload_agenda(client, auth_headers_a, first_row, filename="agenda_dia1.csv")
     assert first.status_code == 201, first.text
 
     second_row = (
-        "12345678900;Paciente Teste;;;Unimed Nacional;;;20/08/2026;09:00;;Faltou;;;AG-777"
+        "12345678909;Paciente Teste;;;Unimed Nacional;;;20/08/2026;09:00;;Faltou;;;AG-777"
     )
     second = await _upload_agenda(client, auth_headers_a, second_row, filename="agenda_dia2.csv")
     assert second.status_code == 201, second.text
@@ -140,7 +140,7 @@ async def test_reupload_with_same_external_id_updates_instead_of_duplicating(cli
 async def test_agenda_row_without_external_id_always_creates_new(client, auth_headers_a, admin_engine, tenant_a):
     """Limitação aceita e documentada: sem codigo_agendamento, não há
     chave de upsert — cada linha vira um agendamento novo."""
-    row = "12345678900;Paciente Teste;;;;;;20/08/2026;10:00;;Agendado;;;"
+    row = "12345678909;Paciente Teste;;;;;;20/08/2026;10:00;;Agendado;;;"
     first = await _upload_agenda(client, auth_headers_a, row, filename="agenda_sem_id_1.csv")
     second = await _upload_agenda(client, auth_headers_a, row, filename="agenda_sem_id_2.csv")
     assert first.status_code == 201, first.text
@@ -152,9 +152,9 @@ async def test_agenda_row_without_external_id_always_creates_new(client, auth_he
 
 async def test_agenda_status_aliases_are_normalized(client, auth_headers_a, admin_engine, tenant_a):
     rows = [
-        "11111111111;Paciente Um;;;;;;20/08/2026;08:00;;confirmado;;;AG-C1",
-        "22222222222;Paciente Dois;;;;;;20/08/2026;09:00;;atendido;;;AG-C2",
-        "33333333333;Paciente Tres;;;;;;20/08/2026;10:00;;cancelado;;;AG-C3",
+        "11122233981;Paciente Um;;;;;;20/08/2026;08:00;;confirmado;;;AG-C1",
+        "22233344073;Paciente Dois;;;;;;20/08/2026;09:00;;atendido;;;AG-C2",
+        "33344455001;Paciente Tres;;;;;;20/08/2026;10:00;;cancelado;;;AG-C3",
     ]
     response = await _upload_agenda(client, auth_headers_a, *rows)
     assert response.status_code == 201, response.text
@@ -168,7 +168,7 @@ async def test_agenda_status_aliases_are_normalized(client, auth_headers_a, admi
 
 
 async def test_agenda_row_with_unknown_insurance_plan_is_rejected(client, auth_headers_a, admin_engine, tenant_a):
-    row = "12345678900;Paciente Teste;;;Convenio Desconhecido;;;20/08/2026;10:00;;Agendado;;;"
+    row = "12345678909;Paciente Teste;;;Convenio Desconhecido;;;20/08/2026;10:00;;Agendado;;;"
     response = await _upload_agenda(client, auth_headers_a, row)
     assert response.status_code == 201, response.text
     assert response.json()["error_row_count"] == 1
@@ -180,7 +180,7 @@ async def test_agenda_row_with_unknown_insurance_plan_is_rejected(client, auth_h
 async def test_agenda_without_insurance_plan_column_is_accepted(client, auth_headers_a, admin_engine, tenant_a):
     """Diferente de Faturamento: convênio é OPCIONAL em Agenda (agendamento
     pode existir antes da confirmação de cobertura)."""
-    row = "12345678900;Paciente Teste;;;;;;20/08/2026;10:00;;Agendado;;;"
+    row = "12345678909;Paciente Teste;;;;;;20/08/2026;10:00;;Agendado;;;"
     response = await _upload_agenda(client, auth_headers_a, row)
     assert response.status_code == 201, response.text
     assert response.json()["error_row_count"] == 0
@@ -192,7 +192,7 @@ async def test_agenda_without_insurance_plan_column_is_accepted(client, auth_hea
 async def test_agenda_upload_via_xml(client, auth_headers_a, admin_engine, tenant_a):
     xml_bytes = (
         b"<agendamentos><agendamento>"
-        b"<cpfPaciente>12345678900</cpfPaciente>"
+        b"<cpfPaciente>12345678909</cpfPaciente>"
         b"<nomePaciente>Paciente Teste</nomePaciente>"
         b"<dataAgendamento>2026-08-20T09:00:00</dataAgendamento>"
         b"<status>Agendado</status>"
@@ -214,7 +214,7 @@ async def test_agenda_upload_via_xml(client, auth_headers_a, admin_engine, tenan
 async def test_agenda_upload_via_json(client, auth_headers_a, admin_engine, tenant_a):
     payload = [
         {
-            "cpf_paciente": "12345678900",
+            "cpf_paciente": "12345678909",
             "nome_paciente": "Paciente Teste",
             "data_agendamento": "2026-08-20T09:00:00",
             "status": "Confirmado",
@@ -244,7 +244,7 @@ async def test_default_data_type_is_faturamento_when_omitted(client, auth_header
     como Faturamento (cria Billing), exatamente como antes desta mudança."""
     await _create_insurance_plan(admin_engine, tenant_a)
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
-    row = "12345678900;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
+    row = "12345678909;Paciente Teste;Unimed Nacional;10101012;J06;150,00;20/08/2026"
     files = {"file": ("faturamento_padrao.csv", io.BytesIO((header + "\r\n" + row + "\r\n").encode("utf-8-sig")), "text/csv")}
 
     response = await client.post("/api/v1/ingestion/upload", files=files, headers=auth_headers_a)
@@ -268,7 +268,7 @@ async def test_default_data_type_is_faturamento_when_omitted(client, auth_header
 # tests/test_no_show_risk_engine.py e via HTTP em
 # tests/integration/test_no_show_risk.py) roda também neste caminho.
 
-_PATIENT_CPF = "12345678900"
+_PATIENT_CPF = "12345678909"
 
 
 async def _insert_patient(admin_engine, tenant_id, cpf: str, full_name: str = "Paciente Teste") -> str:

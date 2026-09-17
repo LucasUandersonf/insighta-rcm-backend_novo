@@ -71,7 +71,7 @@ def _csv(*rows: str) -> bytes:
 
 
 def test_parse_csv_with_br_format_values() -> None:
-    raw = _csv("12345678900;Maria Silva;Unimed Nacional;10101012;J06;1.234,56;15/01/2026")
+    raw = _csv("12345678909;Maria Silva;Unimed Nacional;10101012;J06;1.234,56;15/01/2026")
     results = parse(raw)
     assert len(results) == 1
     assert results[0].row is not None
@@ -82,7 +82,7 @@ def test_parse_csv_with_dot_decimal_values_does_not_inflate() -> None:
     """Reprodução direta do incidente: arquivo de origem em ponto-decimal
     simples (sem separador de milhar) — o valor final tem que continuar
     sendo o valor real, não 100x maior."""
-    raw = _csv("12345678900;Maria Silva;Unimed Nacional;10101012;J06;1234.56;15/01/2026")
+    raw = _csv("12345678909;Maria Silva;Unimed Nacional;10101012;J06;1234.56;15/01/2026")
     results = parse(raw)
     assert len(results) == 1
     assert results[0].row is not None
@@ -94,8 +94,8 @@ def test_parse_csv_mixed_batch_both_formats_in_same_file() -> None:
     """Um arquivo pode ter linhas de fontes/exportações diferentes — cada
     linha é normalizada independentemente, sem estado compartilhado."""
     raw = _csv(
-        "11111111111;Paciente BR;Amil;10101012;J06;1.234,56;15/01/2026",
-        "22222222222;Paciente Dot;Amil;10101012;J06;1234.56;16/01/2026",
+        "11122233981;Paciente BR;Amil;10101012;J06;1.234,56;15/01/2026",
+        "22233344073;Paciente Dot;Amil;10101012;J06;1234.56;16/01/2026",
     )
     results = parse(raw)
     assert len(results) == 2
@@ -108,8 +108,99 @@ def test_parse_csv_grossly_inflated_value_is_rejected_by_sanity_cap() -> None:
     que uma futura regressão reintroduza o bug de inflação, um valor
     absurdo para um procedimento único vira linha `failed`, nunca dado
     silenciosamente errado em billing."""
-    raw = _csv("12345678900;Maria Silva;Unimed Nacional;10101012;J06;999999999,00;15/01/2026")
+    raw = _csv("12345678909;Maria Silva;Unimed Nacional;10101012;J06;999999999,00;15/01/2026")
     results = parse(raw)
     assert len(results) == 1
     assert results[0].row is None
     assert results[0].errors is not None
+
+
+# ---------------------------------------------------------------------
+# Escopo completo de pessoa física (pedido do usuário: "todo sistema tem
+# dados de pessoa física com nome, telefone, data de nascimento,
+# endereço, email, CPF, sexo") — ver DECISÃO completa em
+# app/sql/058_patient_full_identity.sql e RawBillingRow (app/worker/schemas.py).
+# ---------------------------------------------------------------------
+_EXTENDED_IDENTITY_HEADER = (
+    "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento;"
+    "telefone_paciente;email_paciente;data_nascimento_paciente;sexo_paciente;"
+    "endereco_paciente;cidade_paciente;uf_paciente;cep_paciente"
+)
+
+
+def _csv_extended(*rows: str) -> bytes:
+    return "\n".join([_EXTENDED_IDENTITY_HEADER, *rows]).encode("utf-8-sig")
+
+
+def test_parse_csv_captures_full_patient_identity_fields() -> None:
+    raw = _csv_extended(
+        "12345678909;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026;"
+        "(11) 98888-7777;maria@example.com;05/03/1990;Feminino;"
+        "Rua das Flores, 123;São Paulo;sp;01310-100"
+    )
+    results = parse(raw)
+    assert len(results) == 1
+    row = results[0].row
+    assert row is not None
+    assert row.patient_phone == "11988887777"
+    assert row.patient_email == "maria@example.com"
+    assert row.patient_birth_date.isoformat() == "1990-03-05"
+    assert row.patient_sex == "F"
+    assert row.patient_address_street == "Rua das Flores, 123"
+    assert row.patient_address_city == "São Paulo"
+    assert row.patient_address_state == "SP"
+    assert row.patient_zip_code == "01310100"
+
+
+def test_parse_csv_without_extended_identity_columns_still_works() -> None:
+    """Mesmo critério dos demais campos opcionais do template: um export
+    que não tem essas colunas continua funcionando exatamente como antes."""
+    raw = _csv("12345678909;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026")
+    results = parse(raw)
+    assert len(results) == 1
+    row = results[0].row
+    assert row is not None
+    assert row.patient_phone is None
+    assert row.patient_email is None
+    assert row.patient_birth_date is None
+    assert row.patient_sex is None
+
+
+def test_parse_csv_rejects_cpf_with_wrong_check_digit() -> None:
+    """CPF é a chave de deduplicação de paciente — um valor
+    estruturalmente inválido (dígito verificador errado) rejeita a
+    linha, nunca vira identidade de paciente silenciosamente."""
+    raw = _csv("12345678900;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026")
+    results = parse(raw)
+    assert len(results) == 1
+    assert results[0].row is None
+    assert "CPF inválido" in results[0].errors[0]
+
+
+def test_parse_csv_rejects_repeated_digit_cpf() -> None:
+    raw = _csv("11111111111;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026")
+    results = parse(raw)
+    assert len(results) == 1
+    assert results[0].row is None
+
+
+def test_parse_csv_rejects_invalid_email() -> None:
+    raw = _csv_extended(
+        "12345678909;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026;;"
+        "nao-e-email;;;;;;"
+    )
+    results = parse(raw)
+    assert len(results) == 1
+    assert results[0].row is None
+    assert "E-mail" in results[0].errors[0]
+
+
+def test_parse_csv_rejects_unrecognized_sex_value() -> None:
+    raw = _csv_extended(
+        "12345678909;Maria Silva;Unimed Nacional;10101012;J06;150,00;15/01/2026;;;;"
+        "Indefinido;;;;"
+    )
+    results = parse(raw)
+    assert len(results) == 1
+    assert results[0].row is None
+    assert "sexo" in results[0].errors[0]

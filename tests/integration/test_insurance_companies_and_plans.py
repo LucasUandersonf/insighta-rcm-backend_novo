@@ -134,7 +134,7 @@ async def test_deactivated_plan_still_resolves_during_ingestion(client, auth_hea
 
     service_date = (date.today() - timedelta(days=1)).strftime("%d/%m/%Y")
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
-    row = f"11122233344;Paciente Teste;SulAmérica Direto;10101012;J06;150,00;{service_date}"
+    row = f"11122234015;Paciente Teste;SulAmérica Direto;10101012;J06;150,00;{service_date}"
     csv_bytes = (header + "\r\n" + row + "\r\n").encode("utf-8-sig")
     upload_resp = await client.post(
         "/api/v1/ingestion/upload",

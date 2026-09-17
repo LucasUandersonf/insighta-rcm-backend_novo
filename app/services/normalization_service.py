@@ -100,10 +100,43 @@ class NormalizationService:
         # normalize_glosa_row/rows, ver checagem lá.
         self.glosa_repo = glosa_repo
 
+    # Escopo completo de pessoa física (pedido do usuário: "todo sistema
+    # tem dados de pessoa física com nome, telefone, data de nascimento,
+    # endereço, email, CPF, sexo") — os dois templates (Agenda e
+    # Faturamento) compartilham os MESMOS nomes de atributo de pessoa
+    # física (ver docstring de RawAppointmentRow), então esta lista pode
+    # ser lida de qualquer um dos dois via getattr, sem duplicar a lógica
+    # de enriquecimento abaixo.
+    _PATIENT_ENRICHABLE_FIELDS = (
+        ("patient_phone", "phone"),
+        ("patient_email", "email"),
+        ("patient_birth_date", "birth_date"),
+        ("patient_sex", "sex"),
+        ("patient_address_street", "address_street"),
+        ("patient_address_city", "address_city"),
+        ("patient_address_state", "address_state"),
+        ("patient_zip_code", "zip_code"),
+    )
+
     async def _get_or_create_patient(self, tenant_id: uuid.UUID, row: RawBillingRow | RawAppointmentRow) -> Patient:
         if row.patient_cpf:
             existing = await self.patient_repo.get_by_cpf(row.patient_cpf)
             if existing is not None:
+                # Enriquecimento: uma reimportação mais completa (ex: a
+                # Agenda trouxe telefone que o primeiro cadastro via
+                # Faturamento não tinha) preenche o que ainda está NULL —
+                # nunca sobrescreve um valor que já existe (pode ter sido
+                # corrigido manualmente depois, mais confiável que um
+                # arquivo velho sendo reimportado).
+                changed = False
+                for row_field, patient_field in self._PATIENT_ENRICHABLE_FIELDS:
+                    if getattr(existing, patient_field) is None:
+                        new_value = getattr(row, row_field, None)
+                        if new_value is not None:
+                            setattr(existing, patient_field, new_value)
+                            changed = True
+                if changed:
+                    await self.patient_repo.save(existing)
                 return existing
         return await self.patient_repo.add(
             Patient(
@@ -111,7 +144,14 @@ class NormalizationService:
                 tenant_id=tenant_id,
                 full_name=row.patient_name,
                 cpf=row.patient_cpf,
-                birth_date=None,
+                birth_date=getattr(row, "patient_birth_date", None),
+                phone=getattr(row, "patient_phone", None),
+                email=getattr(row, "patient_email", None),
+                sex=getattr(row, "patient_sex", None),
+                address_street=getattr(row, "patient_address_street", None),
+                address_city=getattr(row, "patient_address_city", None),
+                address_state=getattr(row, "patient_address_state", None),
+                zip_code=getattr(row, "patient_zip_code", None),
             )
         )
 

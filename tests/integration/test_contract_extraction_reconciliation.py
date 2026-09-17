@@ -237,14 +237,14 @@ async def test_pdf_upload_extraction_and_homologation_reconcile_against_real_bil
     header = "cpf_paciente;nome_paciente;convenio;codigo_procedimento;cid;valor_cobrado;data_atendimento"
     service_date = (date.today() - timedelta(days=2)).strftime("%d/%m/%Y")
     rows = [
-        f"11111111111;Paciente Exato;Unimed Nacional;10101012;J06;180,00;{service_date}",
-        f"22222222222;Paciente Abaixo;Unimed Nacional;20103019;J06;90,00;{service_date}",
+        f"11122233981;Paciente Exato;Unimed Nacional;10101012;J06;180,00;{service_date}",
+        f"22233344073;Paciente Abaixo;Unimed Nacional;20103019;J06;90,00;{service_date}",
         # Cobrou 70,00 contra o valor CORRIGIDO (55,00) — se o sistema
         # ainda estivesse usando os R$150,00 que a IA leu originalmente,
         # isso não dispararia glosa nenhuma (70 < 150). É a prova de que
         # é o valor HOMOLOGADO pelo humano que vale para o motor de
         # risco, não o extraído.
-        f"33333333333;Paciente Acima;Unimed Nacional;30111000;J06;70,00;{service_date}",
+        f"33344455001;Paciente Acima;Unimed Nacional;30111000;J06;70,00;{service_date}",
     ]
     csv_bytes = ("\r\n".join([header] + rows) + "\r\n").encode("utf-8-sig")
     upload_resp = await client.post(

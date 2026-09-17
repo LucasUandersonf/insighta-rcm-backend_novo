@@ -78,6 +78,15 @@ CANONICAL_FIELD_LABELS = {
     "tabela_procedimento": "Tabela do procedimento",
     "tipo_item": "Tipo de item",
     "valor_coparticipacao": "Valor de coparticipação",
+    # Escopo completo de pessoa física (pedido do usuário).
+    "patient_phone": "Telefone do paciente",
+    "patient_email": "E-mail do paciente",
+    "patient_birth_date": "Data de nascimento do paciente",
+    "patient_sex": "Sexo do paciente",
+    "patient_address_street": "Endereço do paciente",
+    "patient_address_city": "Cidade do paciente",
+    "patient_address_state": "UF do paciente",
+    "patient_zip_code": "CEP do paciente",
 }
 
 # Todo campo canônico que o template de Faturamento reconhece (obrigatório

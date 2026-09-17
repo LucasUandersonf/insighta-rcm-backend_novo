@@ -36,7 +36,14 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from app.core.text_utils import normalize_item_type, sanitize_member_card_value
+from app.core.text_utils import (
+    normalize_item_type,
+    normalize_sex_value,
+    sanitize_member_card_value,
+    sanitize_phone_value,
+    validate_cpf_checksum,
+    validate_email_value,
+)
 from app.models.appointment import TIPO_PACIENTE_VALUES, VISIT_TYPE_VALUES
 from app.models.guia import GUIA_TIPOS
 
@@ -139,6 +146,38 @@ def _sanitize_cpf_value(v: str) -> str | None:
     return digits or None
 
 
+def _sanitize_and_validate_patient_cpf(v: str) -> str | None:
+    """Mesmo digit-strip de `_sanitize_cpf_value`, mas com validação real
+    de dígito verificador (ver DECISÃO completa em
+    app/core/text_utils.py::validate_cpf_checksum) — usado só pelos dois
+    templates que CRIAM identidade de paciente (RawBillingRow/
+    RawAppointmentRow, ver NormalizationService._get_or_create_patient).
+    `RawGlosaRow` continua em `_sanitize_cpf_value` (sem checksum) de
+    propósito: lá o CPF é só confirmação cruzada OPCIONAL contra um
+    billing já existente (nunca cria paciente novo) — não vale travar a
+    conciliação de uma glosa real por causa de um dígito verificador
+    errado num campo que só ajuda a confirmar, nunca decide sozinho."""
+    digits = "".join(ch for ch in v if ch.isdigit())
+    if not digits:
+        return None
+    validate_cpf_checksum(digits)
+    return digits
+
+
+def _parse_br_date_value(v: str) -> date:
+    """Data de nascimento — mesmo formato dd/mm/aaaa que o resto do
+    template usa (ver csv_parser.py::_parse_br_date); aqui aceita também
+    ISO (aaaa-mm-dd), já que XML/JSON frequentemente chegam nesse
+    formato e Pydantic já converteria sozinho se o campo fosse `date`
+    direto — como o parser sempre entrega string, cobrimos os dois."""
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(v, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"data de nascimento '{v}' não reconhecida — use dd/mm/aaaa ou aaaa-mm-dd.")
+
+
 class RawBillingRow(BaseModel):
     patient_cpf: str | None = None
     patient_name: str = Field(min_length=1, max_length=255)
@@ -203,12 +242,28 @@ class RawBillingRow(BaseModel):
     # nesta linha específica, mas o campo foi informado mesmo assim).
     valor_coparticipacao: float | None = Field(default=None, ge=0, le=500_000)
 
+    # --- Escopo completo de pessoa física (pedido do usuário: "todo
+    # sistema tem dados de pessoa física com nome, telefone, data de
+    # nascimento, endereço, email, CPF, sexo") — ver DECISÃO completa em
+    # app/sql/058_patient_full_identity.sql e
+    # NormalizationService._get_or_create_patient (enriquece o cadastro
+    # existente com o que faltar, nunca sobrescreve dado já preenchido).
+    # Todos OPCIONAIS, mesmo critério dos demais campos deste template. ---
+    patient_phone: str | None = None
+    patient_email: str | None = None
+    patient_birth_date: date | None = None
+    patient_sex: str | None = None
+    patient_address_street: str | None = None
+    patient_address_city: str | None = None
+    patient_address_state: str | None = None
+    patient_zip_code: str | None = None
+
     @field_validator("patient_cpf")
     @classmethod
     def sanitize_cpf(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
-        return _sanitize_cpf_value(v)
+        return _sanitize_and_validate_patient_cpf(v)
 
     @field_validator("numero_carteirinha")
     @classmethod
@@ -216,6 +271,54 @@ class RawBillingRow(BaseModel):
         if v is None or v == "":
             return None
         return sanitize_member_card_value(v)
+
+    @field_validator("patient_phone")
+    @classmethod
+    def sanitize_patient_phone(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return sanitize_phone_value(v)
+
+    @field_validator("patient_email")
+    @classmethod
+    def sanitize_patient_email(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return validate_email_value(v)
+
+    @field_validator("patient_birth_date", mode="before")
+    @classmethod
+    def parse_patient_birth_date(cls, v: str | date | None) -> date | None:
+        if v is None or v == "":
+            return None
+        return v if isinstance(v, date) else _parse_br_date_value(v)
+
+    @field_validator("patient_sex")
+    @classmethod
+    def normalize_patient_sex(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return normalize_sex_value(v)
+
+    @field_validator("patient_address_state")
+    @classmethod
+    def normalize_patient_address_state(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        cleaned = v.strip().upper()
+        if len(cleaned) != 2:
+            raise ValueError("UF deve conter 2 letras.")
+        return cleaned
+
+    @field_validator("patient_zip_code")
+    @classmethod
+    def sanitize_patient_zip_code(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        digits = "".join(ch for ch in v if ch.isdigit())
+        if digits and len(digits) != 8:
+            raise ValueError("CEP deve conter 8 dígitos.")
+        return digits or None
 
     @field_validator("tabela_procedimento")
     @classmethod
@@ -306,12 +409,27 @@ class RawAppointmentRow(BaseModel):
     # mas não um vocabulário fechado universal como status/tipo_paciente).
     canal_agendamento: str | None = None
 
+    # --- Escopo completo de pessoa física (pedido do usuário: "a agenda
+    # tem os dados de pessoa física") — mesmos campos/validadores de
+    # RawBillingRow, ver DECISÃO lá e em
+    # app/sql/058_patient_full_identity.sql. A Agenda é o ponto de
+    # entrada MAIS comum do cadastro de paciente na prática (o
+    # agendamento normalmente acontece antes do faturamento em si). ---
+    patient_phone: str | None = None
+    patient_email: str | None = None
+    patient_birth_date: date | None = None
+    patient_sex: str | None = None
+    patient_address_street: str | None = None
+    patient_address_city: str | None = None
+    patient_address_state: str | None = None
+    patient_zip_code: str | None = None
+
     @field_validator("patient_cpf")
     @classmethod
     def sanitize_cpf(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
-        return _sanitize_cpf_value(v)
+        return _sanitize_and_validate_patient_cpf(v)
 
     @field_validator("tipo_paciente")
     @classmethod
@@ -324,6 +442,54 @@ class RawAppointmentRow(BaseModel):
     @classmethod
     def blank_optional_to_none(cls, v: str | None) -> str | None:
         return v or None
+
+    @field_validator("patient_phone")
+    @classmethod
+    def sanitize_patient_phone(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return sanitize_phone_value(v)
+
+    @field_validator("patient_email")
+    @classmethod
+    def sanitize_patient_email(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return validate_email_value(v)
+
+    @field_validator("patient_birth_date", mode="before")
+    @classmethod
+    def parse_patient_birth_date(cls, v: str | date | None) -> date | None:
+        if v is None or v == "":
+            return None
+        return v if isinstance(v, date) else _parse_br_date_value(v)
+
+    @field_validator("patient_sex")
+    @classmethod
+    def normalize_patient_sex(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        return normalize_sex_value(v)
+
+    @field_validator("patient_address_state")
+    @classmethod
+    def normalize_patient_address_state(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        cleaned = v.strip().upper()
+        if len(cleaned) != 2:
+            raise ValueError("UF deve conter 2 letras.")
+        return cleaned
+
+    @field_validator("patient_zip_code")
+    @classmethod
+    def sanitize_patient_zip_code(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        digits = "".join(ch for ch in v if ch.isdigit())
+        if digits and len(digits) != 8:
+            raise ValueError("CEP deve conter 8 dígitos.")
+        return digits or None
 
     @field_validator("tipo_consulta")
     @classmethod

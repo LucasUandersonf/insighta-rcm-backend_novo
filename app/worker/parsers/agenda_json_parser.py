@@ -48,6 +48,17 @@ def parse(raw_bytes: bytes) -> list[AgendaRowParseResult]:
                 "tipo_consulta": item.get("tipo_consulta") or None,
                 "motivo_cancelamento": item.get("motivo_cancelamento") or None,
                 "canal_agendamento": item.get("canal_agendamento") or None,
+                # Escopo completo de pessoa física (pedido do usuário) —
+                # mesma chave usada no CSV, ver DECISÃO em
+                # RawAppointmentRow (app/worker/schemas.py).
+                "patient_phone": item.get("telefone_paciente") or None,
+                "patient_email": item.get("email_paciente") or None,
+                "patient_birth_date": item.get("data_nascimento_paciente") or None,
+                "patient_sex": item.get("sexo_paciente") or None,
+                "patient_address_street": item.get("endereco_paciente") or None,
+                "patient_address_city": item.get("cidade_paciente") or None,
+                "patient_address_state": item.get("uf_paciente") or None,
+                "patient_zip_code": item.get("cep_paciente") or None,
             }
             row = RawAppointmentRow.model_validate(mapped)
             results.append(AgendaRowParseResult.ok(row_number, row))
