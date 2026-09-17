@@ -2571,6 +2571,8 @@ class AnalyticsService:
             generated_at=datetime.now(timezone.utc),
             top_priorities=top_priorities,
             recently_resolved=recently_resolved,
+        )
+
     async def get_data_quality_by_user(self, date_from: date, date_to: date) -> DataQualityResponse:
         """
         Épico F2.2 do Plano Diretor ("Qualidade de dado na origem") —
