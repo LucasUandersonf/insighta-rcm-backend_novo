@@ -43,7 +43,9 @@ from app.schemas.analytics import (
     PlanLossRankingResponse,
     RecallCandidatesResponse,
     SmartInsightsResponse,
+    UpcomingRiskAppointmentItem,
 )
+from app.schemas.pagination import PaginatedResponse
 from app.services.analytics_service import AnalyticsService
 from app.services.network_benchmark_service import NetworkBenchmarkService
 from app.services.oportunidades_service import OportunidadesService
@@ -114,6 +116,25 @@ async def get_agenda_metrics(
 ) -> AgendaMetricsResponse:
     start, end = _default_period(date_from, date_to)
     return await _build_service(db).get_agenda_metrics(start, end)
+
+
+@router.get("/upcoming-risk-appointments", response_model=PaginatedResponse[UpcomingRiskAppointmentItem])
+async def list_upcoming_risk_appointments(
+    db: DbSession,
+    limit: int = 20,
+    offset: int = 0,
+    current_user: CurrentUser = Depends(require_role(*_CAN_VIEW)),
+) -> PaginatedResponse[UpcomingRiskAppointmentItem]:
+    """
+    Tela "Agenda de risco" (Painel → Agenda) — Roadmap "Rumo à Nota 9"
+    (Fase 2). Lista completa e paginada de agendamentos futuros com risco
+    médio/alto de falta — o card da Sala de Comando (dentro de
+    agenda-metrics) só mostra uma prévia de 6; aqui é a lista inteira,
+    mesmo envelope de paginação de /billing/high-risk.
+    """
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    return await _build_service(db).list_upcoming_risk_appointments(limit=limit, offset=offset)
 
 
 @router.get("/smart-insights", response_model=SmartInsightsResponse)

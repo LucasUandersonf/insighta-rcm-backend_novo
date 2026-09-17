@@ -757,8 +757,14 @@ def _no_show_risk_insight(current: InsightsPeriodInput, estimated_revenue_at_ris
             "mensagem confirmando a presença costuma reduzir bastante esse risco."
         ),
         financial_impact=estimated_revenue_at_risk,
+        # DECISÃO — Roadmap "Rumo à Nota 9" (Fase 2, Auditoria UX): antes
+        # só rolava até o card de CONTAGEM agregada dentro da própria Sala
+        # de Comando ("#agenda-resumo") — o gestor via "12 em risco" mas
+        # não tinha como ver QUEM, exceto os 6 nomes de prévia. Agora
+        # aponta pra tela dedicada com a lista nominal completa, paginada
+        # (ver AnalyticsService.list_upcoming_risk_appointments).
         action_label="Ver quem está em risco",
-        action_href="#agenda-resumo",
+        action_href="/agenda-risco",
     )
 
 

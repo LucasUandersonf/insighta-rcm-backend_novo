@@ -312,6 +312,10 @@ def test_high_risk_no_show_volume_uses_estimated_revenue_at_risk():
     insights = generate_insights(current, _EMPTY_PERIOD, estimated_no_show_revenue_at_risk=1600.0)
     assert len(insights) == 1
     assert insights[0].financial_impact == 1600.0
+    # Roadmap "Rumo à Nota 9" (Fase 2) — aponta pra tela dedicada "Agenda
+    # de risco" (lista nominal completa), não mais só pro card de
+    # contagem agregada dentro da própria Sala de Comando.
+    assert insights[0].action_href == "/agenda-risco"
 
 
 def test_weekday_drop_above_threshold_is_flagged_critical():

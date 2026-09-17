@@ -539,6 +539,59 @@ class AnalyticsRepository:
             for row in result.all()
         ]
 
+    async def upcoming_risk_appointments_paginated(
+        self,
+        *,
+        as_of: datetime,
+        min_level: tuple[str, ...] = ("medio", "alto"),
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        Versão paginada de `upcoming_risk_appointments` — Roadmap "Rumo à
+        Nota 9" (Fase 2, achado da Auditoria UX: "o insight de agenda tem
+        CONTAGEM, não LISTA"). O card da Sala de Comando continua usando
+        o método acima (top 6, sem contagem total — não precisa disso pra
+        uma prévia). Esta versão alimenta a tela dedicada "Agenda de
+        risco" (Painel → Agenda): mesma consulta, mesmo critério de nível
+        mínimo, agora com offset + contagem total (mesmo padrão de
+        BillingRepository.list_high_risk_paginated). Inclui o nome do
+        profissional (LEFT JOIN — agendamento pode não ter profissional
+        vinculado) para a tela poder mostrar "quem" além de "quando".
+        """
+        base_from = """
+            FROM core.appointments a
+            JOIN core.patients p ON p.id = a.patient_id
+            LEFT JOIN core.professionals prof ON prof.id = a.professional_id
+            WHERE a.status = 'scheduled'
+              AND a.scheduled_at >= :as_of
+              AND a.no_show_risk_level = ANY(:levels)
+        """
+        params = {"as_of": as_of, "levels": list(min_level)}
+        total = (
+            await self.session.execute(text(f"SELECT COUNT(*) {base_from}"), params)
+        ).scalar_one()
+        stmt = text(
+            f"""
+            SELECT a.id, p.full_name, a.scheduled_at, a.no_show_risk_level, prof.full_name
+            {base_from}
+            ORDER BY a.scheduled_at ASC
+            LIMIT :limit OFFSET :offset
+            """
+        )
+        result = await self.session.execute(stmt, {**params, "limit": limit, "offset": offset})
+        items = [
+            {
+                "appointment_id": row[0],
+                "patient_full_name": row[1],
+                "scheduled_at": row[2],
+                "risk_level": row[3],
+                "professional_name": row[4],
+            }
+            for row in result.all()
+        ]
+        return items, total
+
     async def upcoming_risk_count_by_weekday(self, *, as_of: datetime) -> dict[int, int]:
         """
         Mesmo filtro de `upcoming_risk_appointments` (agendamento futuro,

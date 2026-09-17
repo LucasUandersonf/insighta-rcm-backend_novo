@@ -163,6 +163,12 @@ class UpcomingRiskAppointmentItem(BaseModel):
     patient_full_name: str
     scheduled_at: datetime
     risk_level: str  # "medio" | "alto"
+    # Tela "Agenda de risco" (Roadmap "Rumo à Nota 9", Fase 2) — None no
+    # card resumido de sempre (ver AnalyticsService.get_agenda_metrics,
+    # que não busca isso), preenchido só na versão paginada
+    # (AnalyticsRepository.upcoming_risk_appointments_paginated), já que
+    # o agendamento pode não ter profissional vinculado.
+    professional_name: str | None = None
 
 
 class AgendaMetricsResponse(BaseModel):

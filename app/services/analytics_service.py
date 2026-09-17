@@ -34,6 +34,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.schemas.pagination import PaginatedResponse
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
@@ -562,6 +563,36 @@ class AnalyticsService:
             total_idle_minutes=idle_minutes,
             estimated_revenue_lost_to_idle_capacity=estimated_revenue_lost_to_idle_capacity,
             professionals_without_availability_count=professionals_without_availability_count,
+        )
+
+    async def list_upcoming_risk_appointments(self, *, limit: int, offset: int) -> PaginatedResponse[UpcomingRiskAppointmentItem]:
+        """
+        Tela dedicada "Agenda de risco" (Painel → Agenda) — Roadmap "Rumo
+        à Nota 9" (Fase 2). Achado da Auditoria UX: o card de risco de
+        falta na Sala de Comando só mostra CONTAGEM agregada (ver
+        no_show_risk_breakdown) e, no máximo, uma prévia de 6 nomes (ver
+        upcoming_risk_appointments, usado por get_agenda_metrics) — sem
+        lugar nenhum pra ver a lista COMPLETA de quem está em risco. Esta
+        tela existe só pra isso; os insights de agenda passam a linkar
+        pra cá em vez de só informar um número.
+        """
+        items, total = await self.analytics_repo.upcoming_risk_appointments_paginated(
+            as_of=datetime.now(timezone.utc), limit=limit, offset=offset
+        )
+        return PaginatedResponse(
+            items=[
+                UpcomingRiskAppointmentItem(
+                    appointment_id=row["appointment_id"],
+                    patient_full_name=row["patient_full_name"],
+                    scheduled_at=row["scheduled_at"],
+                    risk_level=row["risk_level"],
+                    professional_name=row["professional_name"],
+                )
+                for row in items
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
         )
 
     async def get_plan_loss_ranking(self, date_from: date, date_to: date) -> PlanLossRankingResponse:

@@ -42,7 +42,30 @@ class BillingRepository:
         # que disparou o card — antes sempre caía na fila GERAL, e o
         # usuário tinha que procurar sozinho quais linhas eram daquele
         # convênio (ver DECISÃO em smart_insights_engine.py::_denial_spike_insights).
-        base = select(Billing).where(Billing.denial_risk_level == "high")
+        return await self.list_by_risk_level_paginated(
+            level="high", limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+        )
+
+    async def list_medium_risk_paginated(
+        self, *, limit: int, offset: int, insurance_plan_id: uuid.UUID | None = None
+    ) -> tuple[list[Billing], int]:
+        """
+        "Contas que valem revisão" (Roadmap "Rumo à Nota 9", Fase 2) —
+        achado da Auditoria UX: hoje só `denial_risk_level='high'` vira
+        fila acionável (ver `list_high_risk_paginated` acima); risco
+        MÉDIO só entra contado no donut de distribuição (ver
+        `denial-risk-distribution`), nunca como lista navegável. Mesmo
+        formato de paginação, nível diferente — nunca misturado com a
+        fila bloqueante de alto risco (telas e endpoints separados).
+        """
+        return await self.list_by_risk_level_paginated(
+            level="medium", limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+        )
+
+    async def list_by_risk_level_paginated(
+        self, *, level: str, limit: int, offset: int, insurance_plan_id: uuid.UUID | None = None
+    ) -> tuple[list[Billing], int]:
+        base = select(Billing).where(Billing.denial_risk_level == level)
         if insurance_plan_id is not None:
             base = base.where(Billing.insurance_plan_id == insurance_plan_id)
         total = (await self.session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()

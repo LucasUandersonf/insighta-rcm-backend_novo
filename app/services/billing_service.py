@@ -157,6 +157,18 @@ class BillingService:
             items=[BillingResponse.model_validate(i) for i in items], total=total, limit=limit, offset=offset
         )
 
+    async def list_medium_risk_paginated(
+        self, *, limit: int, offset: int, insurance_plan_id: uuid.UUID | None = None
+    ) -> PaginatedResponse[BillingResponse]:
+        """"Contas que valem revisão" (Roadmap "Rumo à Nota 9", Fase 2) —
+        ver DECISÃO em BillingRepository.list_medium_risk_paginated."""
+        items, total = await self.billing_repo.list_medium_risk_paginated(
+            limit=limit, offset=offset, insurance_plan_id=insurance_plan_id
+        )
+        return PaginatedResponse(
+            items=[BillingResponse.model_validate(i) for i in items], total=total, limit=limit, offset=offset
+        )
+
     async def search_billing(self, query: str) -> list[BillingSearchItem]:
         if not query or len(query.strip()) < 2:
             return []  # evita varrer a tabela inteira com 0-1 caractere
