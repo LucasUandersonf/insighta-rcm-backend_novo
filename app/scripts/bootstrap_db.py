@@ -262,6 +262,11 @@ _POST_UPGRADE_SQL_FILES = [
     # TABLE sem IF NOT EXISTS — precisa do marcador (ver
     # _POST_UPGRADE_MARKER_TABLE).
     "038_executive_narratives.sql",
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+    # core.tracked_alerts (RLS normal, dado da clínica — ver DECISÃO no
+    # próprio .sql). CREATE TABLE sem IF NOT EXISTS — precisa do
+    # marcador (ver _POST_UPGRADE_MARKER_TABLE).
+    "039_tracked_alerts.sql",
 ]
 
 _ROLES_SQL = """
@@ -434,6 +439,7 @@ _POST_UPGRADE_MARKER_TABLE = {
     "029_platform_users.sql": "platform_users",
     "034_health_score_snapshots.sql": "health_score_snapshots",
     "038_executive_narratives.sql": "executive_narratives",
+    "039_tracked_alerts.sql": "tracked_alerts",
 }
 
 

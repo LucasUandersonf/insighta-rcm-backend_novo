@@ -26,6 +26,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
 from app.schemas.analytics import (
     AgendaMetricsResponse,
     AgendaRevenueForecastResponse,
@@ -93,6 +94,7 @@ def _build_service(db: DbSession) -> AnalyticsService:
         HealthScoreSnapshotRepository(db),
         LoteRepository(db),
         ExecutiveNarrativeRepository(db),
+        TrackedAlertRepository(db),
     )
 
 

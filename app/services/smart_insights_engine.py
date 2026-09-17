@@ -362,6 +362,25 @@ class Insight:
     action_href: str | None = None
 
 
+def derive_fact_key(insight: Insight) -> str:
+    """
+    Identificador estável de uma SITUAÇÃO, para a memória contínua
+    dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3 — ver
+    app/repositories/tracked_alert_repository.py). `title` já é
+    naturalmente estável e específico o bastante pra maioria dos
+    insights deste motor: card por convênio nomeia o convênio no título
+    (_denial_spike_insights), card de dia da semana nomeia o dia
+    (_weekday_drop_insight/_weekday_no_show_rate_insight), card de
+    profissional nomeia o profissional (_professional_outlier_insight) —
+    a mesma SITUAÇÃO real sempre produz o mesmo título, mesmo que a
+    frase completa (com números atualizados) mude de um dia pro outro.
+    `category` entra só como precaução contra colisão entre as duas
+    áreas (faturamento/agenda nunca deveriam produzir o mesmo título,
+    mas nada nesse motor garante isso estruturalmente).
+    """
+    return f"{insight.category}:{insight.title}"
+
+
 def describe_denial_reason(code: str) -> str:
     """Tradução em português simples de um reason_code do motor de glosa
     (denial_risk_engine.py) — pública porque analytics_service.py também

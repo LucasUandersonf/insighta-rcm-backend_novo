@@ -41,6 +41,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
 from app.services.analytics_service import AnalyticsService
 from app.worker.active_tenants import list_active_tenants
 
@@ -74,6 +75,7 @@ async def _process_tenant(tenant: Tenant, snapshot_month: date) -> None:
             HealthScoreSnapshotRepository(session),
             LoteRepository(session),
             ExecutiveNarrativeRepository(session),
+            TrackedAlertRepository(session),
         )
         health_score = await service.get_health_score()
         await HealthScoreSnapshotRepository(session).upsert_snapshot(

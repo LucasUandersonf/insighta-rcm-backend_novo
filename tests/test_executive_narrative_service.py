@@ -67,3 +67,19 @@ def test_prompt_caps_insights_at_four_even_when_more_are_given():
 def test_prompt_has_no_insights_section_when_there_are_none():
     prompt = build_narrative_prompt(_facts(insight_lines=[]))
     assert "Insights identificados" not in prompt
+
+
+def test_prompt_has_no_resolved_section_when_nothing_was_resolved():
+    prompt = build_narrative_prompt(_facts(resolved_since_yesterday_titles=[]))
+    assert "corrigidas desde a última checagem" not in prompt
+
+
+def test_prompt_includes_resolved_situations_since_last_check():
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) — pedido
+    # direto do usuário: o texto precisa poder dizer "isso que eu avisei já
+    # foi corrigido", não só apontar problema novo.
+    prompt = build_narrative_prompt(
+        _facts(resolved_since_yesterday_titles=["Você está cobrando menos do que devia de alguns convênios"])
+    )
+    assert "Situações que estavam sinalizadas e foram corrigidas desde a última checagem:" in prompt
+    assert "- Você está cobrando menos do que devia de alguns convênios" in prompt

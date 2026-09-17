@@ -63,6 +63,7 @@ REGRAS RÍGIDAS (nunca quebre nenhuma):
 4. Nunca use markdown, listas, títulos ou emojis — só texto corrido, pronto para aparecer direto na tela.
 5. Não repita as frases de entrada literalmente, palavra por palavra — sintetize a situação, priorizando o que for mais urgente ou financeiramente relevante entre os fatos dados.
 6. Nunca compare com "o mercado", "a média do setor" ou "outras clínicas" a menos que isso já esteja explícito nos fatos fornecidos.
+7. Se a lista de fatos incluir situações corrigidas desde a última checagem, mencione pelo menos uma delas — é isso que faz o gestor perceber que o sistema está acompanhando o dia a dia, não só apontando problema novo.
 
 Devolva APENAS o texto do resumo, sem nenhuma explicação antes ou depois."""
 
@@ -88,6 +89,14 @@ class NarrativeFacts:
     # ordenadas por impacto (a mais relevante primeiro) — ver DECISÃO
     # acima sobre reaproveitar texto já revisado em vez de floats crus.
     insight_lines: list[str] = field(default_factory=list)
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+    # títulos de situações que a memória contínua (TrackedAlertRepository)
+    # detectou como resolvidas HOJE (sumiram da lista de insights ativos).
+    # Só o TÍTULO entra aqui (não a mensagem completa, que citava números
+    # de um dia que já passou) — é o suficiente para a IA reconhecer "isso
+    # que eu avisei já foi corrigido", sem arriscar repetir um número
+    # desatualizado como se fosse atual.
+    resolved_since_yesterday_titles: list[str] = field(default_factory=list)
 
 
 def _format_currency(value: float) -> str:
@@ -119,6 +128,10 @@ def build_narrative_prompt(facts: NarrativeFacts) -> str:
     if top_insights:
         lines.append("Insights identificados no período, do mais para o menos importante:")
         lines.extend(f"- {line}" for line in top_insights)
+
+    if facts.resolved_since_yesterday_titles:
+        lines.append("Situações que estavam sinalizadas e foram corrigidas desde a última checagem:")
+        lines.extend(f"- {title}" for title in facts.resolved_since_yesterday_titles)
 
     return "\n".join(lines)
 

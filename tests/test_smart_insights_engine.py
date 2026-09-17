@@ -9,8 +9,10 @@ import pytest
 
 from app.services.smart_insights_engine import (
     DenialReasonCount,
+    Insight,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    derive_fact_key,
     describe_worst_no_show_weekday,
     generate_insights,
     is_true_denial_risk_reason,
@@ -27,6 +29,19 @@ _EMPTY_PERIOD = InsightsPeriodInput(
 
 def test_no_insights_when_nothing_changed():
     assert generate_insights(_EMPTY_PERIOD, _EMPTY_PERIOD) == []
+
+
+def test_derive_fact_key_is_stable_for_the_same_situation_and_differs_across_categories():
+    # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) — a
+    # mesma situação real (mesmo título, mesma categoria) precisa sempre
+    # produzir a MESMA chave, mesmo com mensagem/financial_impact
+    # diferentes (números do dia mudam, a chave não pode mudar).
+    yesterday = Insight(severity="warning", category="faturamento", title="X", message="ontem", financial_impact=10.0)
+    today = Insight(severity="critical", category="faturamento", title="X", message="hoje", financial_impact=99.0)
+    assert derive_fact_key(yesterday) == derive_fact_key(today)
+
+    other_category = Insight(severity="warning", category="agenda", title="X", message="hoje", financial_impact=None)
+    assert derive_fact_key(other_category) != derive_fact_key(today)
 
 
 def test_denial_spike_above_threshold_is_flagged_critical():

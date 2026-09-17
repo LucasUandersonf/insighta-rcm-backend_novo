@@ -34,6 +34,7 @@ from app.repositories.professional_availability_repository import ProfessionalAv
 from app.repositories.professional_repository import ProfessionalRepository
 from app.repositories.reporting_repository import ReportingRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.tracked_alert_repository import TrackedAlertRepository
 from app.schemas.pagination import PaginatedResponse
 from app.schemas.analytics import (
     AgendaMetricsResponse,
@@ -82,6 +83,7 @@ from app.services.smart_insights_engine import (
     DenialReasonCount,
     InsightsPeriodInput,
     build_network_comparativo_insight,
+    derive_fact_key,
     describe_denial_reason,
     describe_worst_no_show_weekday,
     generate_insights,
@@ -291,6 +293,7 @@ class AnalyticsService:
         health_score_snapshot_repo: HealthScoreSnapshotRepository,
         lote_repo: LoteRepository,
         narrative_repo: ExecutiveNarrativeRepository,
+        tracked_alert_repo: TrackedAlertRepository,
     ):
         self.analytics_repo = analytics_repo
         self.reporting_repo = reporting_repo
@@ -301,6 +304,7 @@ class AnalyticsService:
         self.health_score_snapshot_repo = health_score_snapshot_repo
         self.lote_repo = lote_repo
         self.narrative_repo = narrative_repo
+        self.tracked_alert_repo = tracked_alert_repo
         self.capacity_service = CapacityService(availability_repo, capacity_repo)
 
     async def _avg_utilization(self, date_from: date, date_to: date) -> float | None:
@@ -925,6 +929,20 @@ class AnalyticsService:
             extra_insights=extra_insights,
         )
 
+        # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3) —
+        # só "critical"/"warning" são SITUAÇÕES rastreáveis (algo errado
+        # que pode ser corrigido); "positive" já é a celebração de uma
+        # melhora, e "comparativo" é uma comparação com a rede, não um
+        # problema desta clínica — nenhum dos dois faz sentido como "isto
+        # foi resolvido". Roda a CADA chamada (não só 1x/dia): é uma
+        # sincronização idempotente (ver DECISÃO em
+        # TrackedAlertRepository.sync), nunca chama IA nem tem custo
+        # relevante.
+        active_situations = {
+            derive_fact_key(i): (i.category, i.title) for i in insights if i.severity in ("critical", "warning")
+        }
+        await self.tracked_alert_repo.sync(uuid.UUID(tenant_id), active=active_situations, today=date.today())
+
         return SmartInsightsResponse(
             period_start=date_from,
             period_end=date_to,
@@ -1203,6 +1221,15 @@ class AnalyticsService:
 
         try:
             summary = await self.get_executive_summary(period_start, period_end)
+            # Memória contínua dia-a-dia (Roadmap "Rumo à Nota 9", Fase 3)
+            # — a chamada a get_smart_insights logo acima já rodou o sync
+            # de hoje (side effect, ver DECISÃO em TrackedAlertRepository.
+            # sync), possivelmente numa visita ANTERIOR à Sala de Comando
+            # neste mesmo dia. Por isso lê "tudo resolvido hoje" de volta
+            # do banco (get_resolved_on) em vez de confiar no retorno de
+            # sync() — a narrativa pode ser gerada bem depois da correção
+            # ter sido detectada.
+            resolved_titles = await self.tracked_alert_repo.get_resolved_on(uuid.UUID(tenant_id), resolved_date=today)
             facts = NarrativeFacts(
                 period_start=period_start,
                 period_end=period_end,
@@ -1212,6 +1239,7 @@ class AnalyticsService:
                 denial_at_risk_value=summary.denial_at_risk_value,
                 avg_days_to_receive=summary.avg_days_to_receive.value if summary.avg_days_to_receive else None,
                 insight_lines=[f"{i.title}: {i.message}" for i in insights.insights],
+                resolved_since_yesterday_titles=resolved_titles,
             )
             generator = AnthropicNarrativeGenerator()
             narrative_text = await generator.generate(build_narrative_prompt(facts))
