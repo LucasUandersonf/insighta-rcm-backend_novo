@@ -6,7 +6,15 @@ from fastapi import HTTPException, status
 from app.models.patient import Patient
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
-from app.schemas.patient import PatientCreateRequest, PatientResponse
+from app.schemas.patient import (
+    PatientCreateRequest,
+    PatientFichaAppointmentItem,
+    PatientFichaBillingItem,
+    PatientFichaResponse,
+    PatientFichaSummary,
+    PatientResponse,
+    PatientSearchItem,
+)
 
 # Placeholder usado por anonymize_patient() — nunca um nome real, nunca
 # vazio (um `full_name` vazio quebraria qualquer tela que assume o campo
@@ -89,3 +97,69 @@ class PatientService:
         items = await self.repo.list_all(limit=limit, offset=offset)
         total = await self.repo.count_all()
         return [PatientResponse.model_validate(i) for i in items], total
+
+    async def search_patients(self, query: str) -> list[PatientSearchItem]:
+        """Ficha do Paciente (Roadmap "Rumo à Nota 9", Fase 4) — entrada
+        pra achar o paciente antes de abrir a ficha (mesmo raciocínio de
+        BillingService.search_billing: sem varrer a tabela com 0-1
+        caractere)."""
+        if not query or len(query.strip()) < 2:
+            return []
+        patients = await self.repo.search(query.strip())
+        return [PatientSearchItem(id=p.id, full_name=p.full_name, cpf=p.cpf) for p in patients]
+
+    async def get_ficha(self, patient_id: uuid.UUID) -> PatientFichaResponse:
+        """
+        Ficha do Paciente — cruza pessoa física + agendamento +
+        atendimento/faturamento numa visão só (achado direto do usuário:
+        "não seria legal termos isto, já que podemos juntar dados de
+        pessoa física, com os dados de agendamento, com os dados de
+        atendimento"). Reagrupa as linhas (atendimento, billing) de
+        `get_ficha_appointments` por atendimento — ver DECISÃO lá sobre
+        por que a query devolve uma linha por billing.
+        """
+        patient = await self.repo.get_by_id(patient_id)
+        if patient is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paciente não encontrado neste tenant.")
+
+        rows = await self.repo.get_ficha_appointments(patient_id)
+        appointments_by_id: dict[uuid.UUID, PatientFichaAppointmentItem] = {}
+        for row in rows:
+            appointment_id = row["id"]
+            if appointment_id not in appointments_by_id:
+                appointments_by_id[appointment_id] = PatientFichaAppointmentItem(
+                    id=appointment_id,
+                    scheduled_at=row["scheduled_at"],
+                    status=row["status"],
+                    professional_name=row["professional_name"],
+                    insurance_plan_name=row["insurance_plan_name"],
+                    no_show_risk_level=row["no_show_risk_level"],
+                    billings=[],
+                )
+            if row["billing_id"] is not None:
+                appointments_by_id[appointment_id].billings.append(
+                    PatientFichaBillingItem(
+                        id=row["billing_id"],
+                        charged_value=row["charged_value"],
+                        status=row["billing_status"],
+                        denial_risk_level=row["denial_risk_level"],
+                        created_at=row["billing_created_at"],
+                    )
+                )
+
+        summary_row = await self.repo.get_ficha_summary(patient_id)
+        resolved_count = summary_row["resolved_count"]
+        summary = PatientFichaSummary(
+            total_appointments=summary_row["total_appointments"],
+            no_show_count=summary_row["no_show_count"],
+            no_show_rate=(summary_row["no_show_count"] / resolved_count) if resolved_count > 0 else None,
+            total_billed=summary_row["total_billed"],
+            total_value_saved=summary_row["total_value_saved"],
+            last_visit_at=summary_row["last_visit_at"],
+        )
+
+        return PatientFichaResponse(
+            patient=PatientResponse.model_validate(patient),
+            summary=summary,
+            appointments=list(appointments_by_id.values()),
+        )

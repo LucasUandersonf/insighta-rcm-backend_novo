@@ -23,7 +23,7 @@ from app.api.deps import CurrentUser, DbSession, require_role
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.patient_repository import PatientRepository
 from app.schemas.pagination import PaginatedResponse
-from app.schemas.patient import PatientCreateRequest, PatientResponse
+from app.schemas.patient import PatientCreateRequest, PatientFichaResponse, PatientResponse, PatientSearchItem
 from app.services.patient_service import PatientService
 
 router = APIRouter(prefix="/patients", tags=["patients"])
@@ -62,6 +62,34 @@ async def list_patients(
     anterior deste endpoint."""
     items, total = await _build_service(db).list_patients_paginated(limit=limit, offset=offset)
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/search", response_model=list[PatientSearchItem])
+async def search_patients(
+    db: DbSession,
+    q: str = Query(min_length=2, max_length=100),
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+) -> list[PatientSearchItem]:
+    """
+    Busca por nome/CPF — Ficha do Paciente (Roadmap "Rumo à Nota 9",
+    Fase 4). Mesmo RBAC de list_patients (quem já podia ver a lista de
+    pacientes pode buscar um pra abrir a ficha).
+    """
+    return await _build_service(db).search_patients(q)
+
+
+@router.get("/{patient_id}/ficha", response_model=PatientFichaResponse)
+async def get_patient_ficha(
+    patient_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser = Depends(require_role(*_CAN_WRITE, "financeiro", "auditor")),
+) -> PatientFichaResponse:
+    """
+    Ficha do Paciente (Roadmap "Rumo à Nota 9", Fase 4) — cruza pessoa
+    física + agendamento + atendimento/faturamento numa visão só. Ver
+    DECISÃO completa em PatientService.get_ficha.
+    """
+    return await _build_service(db).get_ficha(patient_id)
 
 
 @router.post("/{patient_id}/anonymize", response_model=PatientResponse)
